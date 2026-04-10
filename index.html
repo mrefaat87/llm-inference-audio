@@ -175,6 +175,14 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
 .podcast-bar audio { width: 100%; height: 36px; }
 .podcast-fallback { font-size: 13px; color: #64748b; padding: 4px 0; }
 
+/* ── Audio Reader: Highlight While Reading ── */
+.tts-active {
+  background: rgba(59, 130, 246, 0.12);
+  border-radius: 4px;
+  outline: 1px solid rgba(59, 130, 246, 0.25);
+  transition: background 0.3s;
+}
+
 /* ── Audio Reader: Hamburger ── */
 .hamburger { display: none; width: 44px; height: 44px; border: none; background: none; color: #cbd5e1; font-size: 22px; cursor: pointer; align-items: center; justify-content: center; flex-shrink: 0; }
 .nav-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 999; }
@@ -2863,6 +2871,11 @@ const dirs = {
 let autoAdvance = localStorage.getItem('llm-ref-auto') === 'true';
 let currentRate = parseFloat(localStorage.getItem('llm-ref-rate') || '1');
 
+// Timing data for highlight sync
+let currentTiming = [];       // [{start, end, paragraphIndex}]
+let currentElements = [];     // DOM elements matching paragraphs in current section
+let lastHighlightIdx = -1;    // Track to avoid redundant DOM updates
+
 // Load an MP3 for the given mode and section
 function loadAudio(mode, sectionId) {
   const player = players[mode];
@@ -2879,7 +2892,73 @@ function loadAudio(mode, sectionId) {
     fallback.style.display = 'block';
   };
 
+  // Load timing data for highlight sync (narration mode only)
+  clearHighlight();
+  currentTiming = [];
+  currentElements = [];
+  lastHighlightIdx = -1;
+
+  if (mode === 'listen') {
+    const timingUrl = 'narration/' + sectionId + '.json';
+    fetch(timingUrl)
+      .then(r => r.ok ? r.json() : [])
+      .then(data => {
+        currentTiming = data;
+        // Build list of highlightable DOM elements in this section
+        currentElements = getSectionElements(sectionId);
+      })
+      .catch(() => { currentTiming = []; });
+  }
+
   updateInfoUI(mode);
+}
+
+// Get the content elements of a section in order (same order as text extraction)
+function getSectionElements(sectionId) {
+  const sec = document.getElementById('sec-' + sectionId);
+  if (!sec) return [];
+  const elements = [];
+  const skipClasses = ['prev-next', 'resource-bar', 'quiz', 'breadcrumb', 'kbd-hint', 'new-badge'];
+  const vizClasses = ['viz-flow', 'viz-timeline', 'viz-grid', 'viz-mem', 'fmt-row', 'fmt-bits', 'fmt-legend', 'token-legend'];
+
+  for (const el of sec.children) {
+    if (!el.classList) continue;
+    if (skipClasses.some(c => el.classList.contains(c))) continue;
+    if (vizClasses.some(c => el.classList.contains(c))) continue;
+    // Only include elements with meaningful text (matches extract logic)
+    const text = el.textContent.replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+    if (text.length > 10) {
+      elements.push(el);
+    }
+  }
+  return elements;
+}
+
+// Highlight the element at the given paragraph index
+function highlightParagraph(idx) {
+  if (idx === lastHighlightIdx) return; // No change
+  clearHighlight();
+  lastHighlightIdx = idx;
+  if (idx >= 0 && idx < currentElements.length) {
+    const el = currentElements[idx];
+    el.classList.add('tts-active');
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+}
+
+function clearHighlight() {
+  document.querySelectorAll('.tts-active').forEach(el => el.classList.remove('tts-active'));
+  lastHighlightIdx = -1;
+}
+
+// Find which paragraph is active at the given time
+function findActiveParagraph(time) {
+  for (let i = currentTiming.length - 1; i >= 0; i--) {
+    if (time >= currentTiming[i].start) {
+      return currentTiming[i].paragraphIndex;
+    }
+  }
+  return -1;
 }
 
 // Toggle play/pause for the active mode
@@ -2896,6 +2975,7 @@ function toggleAudio(mode) {
 
 function pauseAll() {
   Object.values(players).forEach(p => { if (p && !p.paused) p.pause(); });
+  clearHighlight();
 }
 
 // Navigate to prev/next section, continuing playback
@@ -2926,10 +3006,12 @@ Object.keys(players).forEach(mode => {
   player.addEventListener('pause', () => {
     btn.textContent = '\u25B6';
     btn.classList.remove('playing');
+    clearHighlight();
   });
   player.addEventListener('ended', () => {
     btn.textContent = '\u25B6';
     btn.classList.remove('playing');
+    clearHighlight();
     // Auto-advance to next section
     if (autoAdvance) {
       const idx = order.indexOf(currentSec);
@@ -2939,9 +3021,14 @@ Object.keys(players).forEach(mode => {
       }
     }
   });
-  // Update time display as audio plays
+  // Update time display + highlight as audio plays
   player.addEventListener('timeupdate', () => {
     updateInfoUI(mode);
+    // Highlight current paragraph (listen mode with timing data)
+    if (mode === 'listen' && currentTiming.length > 0) {
+      const paraIdx = findActiveParagraph(player.currentTime);
+      highlightParagraph(paraIdx);
+    }
   });
 });
 

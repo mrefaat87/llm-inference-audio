@@ -18,6 +18,7 @@ Usage:
 
 import asyncio
 import argparse
+import json
 import re
 from pathlib import Path
 
@@ -125,11 +126,74 @@ def table_to_speech(table) -> str:
     return speech
 
 
+def map_sentence_to_paragraph(sentence_text: str, paragraphs: list[str],
+                               full_text: str) -> int:
+    """Find which paragraph a sentence belongs to by locating it in full_text."""
+    # Find the sentence position in full_text
+    pos = full_text.find(sentence_text)
+    if pos == -1:
+        return 0  # Fallback to first paragraph
+
+    # Build paragraph start/end positions in full_text
+    separator = ' ... '
+    cursor = 0
+    for i, para in enumerate(paragraphs):
+        para_start = cursor
+        para_end = cursor + len(para)
+        if para_start <= pos < para_end:
+            return i
+        cursor = para_end + len(separator)
+
+    return len(paragraphs) - 1  # Fallback to last
+
+
 async def generate_narration(sec_id: str, paragraphs: list[str], output_path: Path):
-    """Generate a single-narrator MP3 for one section."""
+    """Generate a single-narrator MP3 with timing data for highlight sync."""
     full_text = ' ... '.join(paragraphs)
     communicate = edge_tts.Communicate(full_text, VOICE_PRIMARY, rate="+5%")
-    await communicate.save(str(output_path))
+
+    # Stream to capture both audio and sentence timing
+    audio_chunks = []
+    sentence_events = []
+
+    async for chunk in communicate.stream():
+        if chunk['type'] == 'audio':
+            audio_chunks.append(chunk['data'])
+        elif chunk['type'] == 'SentenceBoundary':
+            start = chunk['offset'] / 10_000_000  # 100ns ticks -> seconds
+            duration = chunk['duration'] / 10_000_000
+            para_idx = map_sentence_to_paragraph(
+                chunk['text'], paragraphs, full_text)
+            sentence_events.append({
+                'start': round(start, 2),
+                'end': round(start + duration, 2),
+                'paragraphIndex': para_idx,
+            })
+
+    # Write MP3
+    with open(output_path, 'wb') as f:
+        for chunk in audio_chunks:
+            f.write(chunk)
+
+    # Consolidate sentence events into paragraph-level timing
+    # Multiple sentences can belong to the same paragraph — merge them
+    para_timing = []
+    for evt in sentence_events:
+        idx = evt['paragraphIndex']
+        if para_timing and para_timing[-1]['paragraphIndex'] == idx:
+            # Extend the existing paragraph entry
+            para_timing[-1]['end'] = evt['end']
+        else:
+            para_timing.append({
+                'start': evt['start'],
+                'end': evt['end'],
+                'paragraphIndex': idx,
+            })
+
+    # Write timing JSON alongside the MP3
+    timing_path = output_path.with_suffix('.json')
+    with open(timing_path, 'w') as f:
+        json.dump(para_timing, f)
 
 
 async def generate_podcast(sec_id: str, paragraphs: list[str], output_path: Path):

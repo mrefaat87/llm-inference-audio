@@ -1,0 +1,75 @@
+Alex: Alright Jenny, welcome back. Last time we did this — the Chapter 1 quiz — we traced a single request through the whole transformer pipeline. Today I want to do something harder. We've covered MLA, multi-token prediction, and model-hardware co-design. Three separate episodes. And I think the real test isn't whether you remember each one — it's whether you can reason about them together. Because in production, they're not separate. They're interacting.
+
+Jenny: Okay, I'm ready. Hit me.
+
+Alex: Here's the setup. You're an infrastructure lead at a frontier lab. Your team is about to train a new model for production serving. Your target workload is long-context agentic — 128k token contexts, tool-calling workflows, responses that regularly hit a thousand tokens or more. What architectural choices do you make, and critically, why?
+
+Jenny: Alright, let me work through this. First thing — 128k contexts. That immediately tells me attention cost is going to dominate. Attention scales quadratically with context length, so at 128k tokens, the attention compute is enormous. That's my most expensive resource per request.
+
+Alex: Good. So what do you do about it?
+
+Jenny: I reduce the number of attention heads. But — and this is the part that tripped me up the first time — I don't just delete capacity. I move it. I increase the number of experts in a mixture-of-experts setup, because expert compute is constant per token regardless of context length. Same total model knowledge, but the cost curve is fundamentally different at long contexts.
+
+Alex: Why does that matter specifically at 128k versus, say, 4k tokens?
+
+Jenny: Because at 4k tokens, the quadratic cost of attention is manageable. Doubling your attention heads at 4k is expensive but survivable. At 128k, doubling attention heads means doubling compute at a scale that's already 1,024 times larger than 4k. The absolute numbers become absurd. But doubling your expert count? The per-token cost doesn't change at all. You just have more specialized capacity in your pool.
+
+Alex: Perfect. Now, you've got your attention heads reduced. But that means each sequence is generating less KV cache per layer, right? Fewer heads, fewer key-value vectors to store. Is that enough to solve your memory problem at 128k contexts?
+
+Jenny: Hmm. Fewer heads helps, but at 128k tokens, even a reduced KV cache is massive. Let me think about this... okay, this is where MLA comes in. Instead of caching the full key and value vectors — even the reduced set — I compress everything down to a single small latent vector per token per layer. DeepSeek got a 93% reduction that way.
+
+Alex: And what's the cost of that compression?
+
+Jenny: Extra compute on the decode path. You have to decompress — project the latent vector back up to reconstruct the full keys and values when you actually need them. But here's the thing — and this is the insight that I think is the most important one from that episode — decode is memory-bandwidth-bound, not compute-bound. The GPU has spare arithmetic capacity during decode because it's bottlenecked waiting for data to come through from HBM.
+
+Alex: So you're using cycles that were otherwise wasted.
+
+Jenny: Exactly. It's like having a ten-lane highway where only three lanes are carrying traffic because the on-ramp can't feed cars fast enough. MLA adds cars to the empty lanes. The highway doesn't slow down because the bottleneck was never the road — it was the on-ramp. And meanwhile, you've shrunk the amount of data that has to come through that on-ramp by over 90%.
+
+Alex: Beautiful. Now let me push you on something. You said your target workload is agentic with long outputs — a thousand tokens or more. What architectural choice addresses the decode throughput problem specifically?
+
+Jenny: Multi-token prediction. And the key insight is that it's not a bolt-on optimization. It starts during training. You train the model with auxiliary prediction heads that forecast not just the next token, but the next two, three, four tokens simultaneously. And those heads share the same internal representations as the main model.
+
+Alex: Why does that matter? Why not just use a separate small draft model for speculative decoding and call it a day?
+
+Jenny: Because a separate draft model is like a caching layer with different consistency semantics than your source of truth. It was trained independently. It doesn't share representations with the main model. So its predictions diverge — the acceptance rate is lower, the speedup is less reliable. But the MTP auxiliary heads were literally trained alongside the main model. They are the main model, just different output projections of the same internal state. So their acceptance rate is dramatically higher.
+
+Alex: And what does that buy you in practice?
+
+Jenny: About 1.8x decode throughput. Instead of one token per forward pass, you're averaging closer to two. And — here's the connection to the workload — that speedup amortizes over long outputs. For a three-token response, the overhead of running auxiliary heads and doing verification might eat your gains. But for a thousand-token agentic response? The amortized benefit is massive.
+
+Alex: Okay, now here's the question I really want you to answer. You've made three decisions: fewer attention heads with more experts, MLA for KV compression, and MTP for decode throughput. Are these independent optimizations, or do they interact?
+
+Jenny: Oh, they absolutely interact. And I think this is the whole point of co-design. Let me trace it. MLA reduces KV cache by 93%, which frees up GPU memory. That free memory means I can serve more concurrent sequences or handle longer contexts — both of which matter for my 128k agentic workload. More concurrent sequences means bigger batches. Bigger batches mean the GPU arithmetic units are better utilized during decode, which means MLA's decompression overhead is even more hidden because there's even more spare compute to absorb it.
+
+Alex: Keep going.
+
+Jenny: And MTP's throughput improvement compounds with that. If I'm generating 1.8 tokens per forward pass instead of one, and each forward pass is faster because MLA reduced my memory bandwidth bottleneck, the combination is multiplicative, not additive. Meanwhile, the MoE architecture means my total parameter count can be enormous — hundreds of billions — giving me quality and knowledge breadth, but my per-token compute stays low because only a fraction of experts activate. So I've got a model that's smart, memory-efficient, and fast at generation. All three choices reinforcing each other.
+
+Alex: And here's the part that I think would trip up someone who learned these concepts in isolation — none of those choices makes sense without the others. If you picked MLA but didn't reduce attention heads, you'd still be compute-bound on attention at 128k. If you used MTP but didn't have MLA freeing memory, you might not have the batch size to fully utilize the GPU during those multi-token verification passes. The system only works because all three decisions were made together, with the same target workload in mind.
+
+Jenny: It's fleet design. You don't pick your instance type, your scaling policy, and your load balancer independently. They're one decision viewed from three angles. Same thing here — model architecture, memory strategy, and generation strategy are one decision.
+
+Alex: Okay, one more. Hardware. You're training and serving on H100s. How does that change your co-design decisions?
+
+Jenny: FP8. H100 Tensor Cores have native FP8 support, roughly doubling compute throughput versus BF16. So I train in FP8 from the start. The model learns to be robust to that precision during training, which means I don't take a quality hit at inference the way I would if I trained in BF16 and quantized down afterward. That's like post-hoc JPEG compression versus shooting at the right resolution from the beginning.
+
+Alex: And the parallelism strategy?
+
+Jenny: I design around NVLink topology. H100s in an NVLink domain give me 900 gigabytes per second of interconnect bandwidth. I keep tensor parallelism within that domain so I'm not paying PCIe or network costs for the most latency-sensitive communication. Expert parallelism can span across nodes because expert routing is more tolerant of higher latency — each expert processes independently once the token is routed.
+
+Alex: So even the networking topology of the hardware is shaping the model architecture. The number of experts, the parallelism boundaries, the precision — all designed together.
+
+Jenny: It's what you said in the co-design episode that stuck with me. The question "how many attention heads should this model have" isn't a research question anymore. It's a serving economics question. And it's answered with the same thinking as "what instance type mix should this fleet use."
+
+Alex: Alright, looking forward. Everything we've covered in these two chapters has been the model — what it is, how it's designed, why it's shaped the way it is. But we haven't served a single request at scale yet. Next chapter, we get into the serving infrastructure. KV cache management, continuous batching, PagedAttention, scheduling policies.
+
+Jenny: And that's where the distributed systems parallels go from analogy to direct equivalence, right? Like, PagedAttention is literally virtual memory paging.
+
+Alex: Literally. It's not even an analogy — it's the same algorithm applied to a different memory hierarchy. And continuous batching, request scheduling, preemption policies — if you've ever built a job scheduler or a request router, you already know the tradeoffs. The domain is different but the engineering is identical.
+
+Jenny: So for anyone listening — if the model architecture chapters felt like learning a new domain, the serving chapters are going to feel like coming home. Same problems you've already solved, just with GPUs and tokens instead of CPUs and HTTP requests.
+
+Alex: And the beautiful part is that because you now understand the model internals — why decode is memory-bound, why MLA changes the memory profile, why MTP changes the generation pattern — you'll understand the serving decisions at a much deeper level than someone who just memorizes "use PagedAttention." You'll know why it works and when it breaks.
+
+Jenny: Can't wait. See you in Chapter 3.

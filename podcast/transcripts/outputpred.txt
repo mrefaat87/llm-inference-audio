@@ -1,29 +1,87 @@
-Alex: So here's a problem that sounds simple but actually breaks a lot of things in inference serving — you don't know how long the model's answer is going to be until it's done generating.
-Jenny: Wait, really? You just... have no idea?
-Alex: Not until the model emits that end-of-sequence token. And think about what that means for scheduling. Imagine you're running a restaurant kitchen and orders come in, but you have no idea if someone ordered a salad or a seven-course meal.
-Jenny: Oh, so you can't plan your resources at all. You don't know how long a batch slot is going to be occupied.
-Alex: Exactly. A 2,000-token request blocks a slot twenty times longer than a 100-token request. Without prediction, your short requests get stuck behind long ones. It's like being in the express checkout lane at a grocery store, but there's no item limit — someone with a full cart just walked in front of you.
-Jenny: That's painful. And I'm guessing this also messes up SLO checks? Like, you can't reject a request early if you don't know how long it'll take to decode.
-Alex: Right, and it goes further. Think about preemption — if a request is 95% done, you really don't want to evict it from the GPU. But without prediction, you don't know it's 95% done. And KV cache grows linearly with output length, so you can't pre-allocate memory correctly either.
-Jenny: Okay, so how do people actually predict this? I'm guessing there's no perfect solution.
-Alex: There's a whole spectrum. The simplest is just using the max_tokens parameter from the request — that's your upper bound. It's conservative and costs you nothing, but it massively over-allocates.
-Jenny: Because most requests don't actually hit their max.
-Alex: Right. Then you can train a classifier — just bucket requests into short, medium, long. Gets you maybe 70-80% accuracy for three buckets, adds about a millisecond of latency. Good enough for coarse scheduling.
-Jenny: What about predicting the exact count?
-Alex: Regression models can do that. You're looking at a mean absolute error of 30 to 100 tokens, which honestly isn't great for individual requests. There's also this fun one — you can ask the LLM itself, "hey, how long do you think your answer will be?"
-Jenny: Ha! Does that actually work?
-Alex: About 60-70% of the time it's within 30% of the real answer. But it costs you an extra prefill pass, so you'd only do it for high-value requests.
-Jenny: So none of these are amazing on their own. What's the clever approach?
-Alex: This is where QLM comes in — from the Andes paper out of Berkeley and Microsoft. Instead of trying to nail each individual prediction, they use the Central Limit Theorem. The insight is: even if your per-request predictions are noisy, across a batch of N requests, the total predicted tokens converges to the true total. The variance shrinks as one over root N.
-Jenny: Oh, that's really smart. So your individual predictions can be mediocre, but your batch-level capacity planning can still be accurate.
-Alex: Exactly. And then there's another clever trick — Learning-to-Rank. Instead of predicting absolute lengths, you just predict relative lengths. Is request A shorter than request B? That's a much easier problem to learn.
-Jenny: And that's enough for shortest-job-first scheduling! You don't need exact numbers, you just need the ordering.
-Alex: You got it. And you add aging to prevent starvation — effective priority equals your shortness score plus an aging factor times wait time. It's directly analogous to Linux's CFS scheduler or AWS weighted round-robin with priority aging.
-Jenny: Okay, but what happens when predictions are just wrong? Because they will be.
-Alex: Two cases. Over-prediction — you thought it'd be long, it's actually short. You wasted some KV cache allocation, but the request finishes early. No real harm done.
+Alex: So Jenny, I want you to imagine you're running an auto scaling group, and every time a new request comes in, you have no idea whether it's going to take ten milliseconds or ten minutes to process. How do you plan capacity for that?
+
+Jenny: You don't. I mean, you can't, right? You'd end up either massively over-provisioning or constantly getting blindsided by requests that take way longer than expected. That's basically the nightmare scenario for any capacity planner.
+
+Alex: Exactly. And that's the reality of LLM inference right now. When a request comes into your serving system, you genuinely do not know how many tokens the model is going to generate. It could be twenty tokens — a quick one-liner. Or it could be two thousand tokens — a full essay. And you won't find out until the model emits that special end-of-sequence token that says "I'm done."
+
+Jenny: Okay wait, so every request is basically an open-ended commitment? That's like accepting an EC2 instance reservation without knowing if the customer is going to use it for five minutes or five months.
+
+Alex: That's a perfect analogy, and it gets worse. Because these requests are sitting in batches together. Remember continuous batching — the city bus model? Well imagine your bus has limited seats, and one passenger says they're going two stops, but actually they're riding to the end of the line. They're blocking that seat for twenty times longer than you expected. Meanwhile, short-ride passengers are stuck waiting at the bus stop because the bus looks full.
+
+Jenny: So short requests get stuck behind long ones. That's head-of-line blocking, basically.
+
+Alex: It is exactly head-of-line blocking. And this cascades into everything. Your SLO feasibility checks can't work — you can't reject a request proactively if you don't know how long it'll take to decode. Your preemption decisions get dumb — you might evict a request that's ninety-five percent done because you didn't know it was almost finished. And your KV cache, which grows linearly with every token generated, becomes impossible to budget for. You're flying blind.
+
+Jenny: Alright, so the answer is obviously predict the output length. But how? The whole point of these models is that their output is, you know, unpredictable. It's generative.
+
+Alex: Right, and there's a spectrum of approaches here, each with different accuracy and cost tradeoffs. The simplest one is what most people do today — just use the max tokens parameter from the request. The user says "I want at most 500 tokens," so you budget for 500.
+
+Jenny: But that's wildly conservative. If most responses are like fifty tokens, you're over-allocating by ten x on every request.
+
+Alex: Exactly. It's an upper bound, nothing more. But it costs you zero latency to compute, so it's the default fallback. The next step up is a classifier — just bucket requests into short, medium, and long. You train a lightweight model on your historical data, and it looks at the prompt and says "this looks like a short response."
+
+Jenny: How accurate is that?
+
+Alex: For three buckets, you're looking at seventy to eighty percent accuracy. And it only costs about a millisecond of inference time. It's not precise, but it's enough for coarse scheduling decisions — like deciding which lane a request goes into.
+
+Jenny: Okay, so you can get fancier. What about actually predicting the exact token count?
+
+Alex: You can train a regression model to do that. You'll get a mean absolute error of maybe thirty to a hundred tokens, depending on your workload. Same ballpark latency cost — about a millisecond. This is useful for SLO feasibility checks where you need a specific number to plug into your "can I serve this in time" calculation.
+
+Jenny: What about asking the model itself? Like, "hey, how long is your answer going to be?"
+
+Alex: People have tried that — LLM self-prediction. You basically prepend something to the prompt that says "estimate how long your response will be." It works okay, maybe sixty to seventy percent accurate within plus or minus thirty percent. But the cost is brutal — you're doing an extra prefill pass through the entire model just to get a length estimate.
+
+Jenny: So you're burning GPU compute on predicting the length instead of actually generating the answer. That only makes sense for really high-value requests where getting the scheduling right matters more than the overhead.
+
+Alex: Exactly. But here's where it gets really interesting. There's an approach from a Berkeley and Microsoft paper called QLM — the Andes paper from 2024 — that kind of flips the whole problem on its head. Instead of trying to nail the prediction for each individual request, they use the Central Limit Theorem.
+
+Jenny: Wait, the Central Limit Theorem? From like, intro stats?
+
+Alex: The very same. Here's the insight. Your per-request prediction can be mediocre — it can be noisy, it can be off by a lot for individual requests. But if you have a batch of, say, thirty requests, the total number of tokens across that batch converges to the true total. The variance shrinks as one over square root of N. So your batch-level capacity planning can be very accurate even when individual predictions are garbage.
+
+Jenny: Oh, that's clever. So you don't need to solve the hard problem of "exactly how long will this one request be." You just need the aggregate to be right. It's like — okay, in auto scaling, I don't need to predict exactly how much CPU each individual request will use. I just need the fleet-level utilization forecast to be accurate, and the law of large numbers does the rest.
+
+Alex: That's exactly the same principle. And the coverage intervals they get are around ninety-five percent — meaning ninety-five percent of the time, the actual batch total falls within their predicted range. That's good enough for capacity planning.
+
+Jenny: Okay, but what about scheduling individual requests? If I want shortest-job-first to reduce latency for quick requests, I do need per-request estimates.
+
+Alex: You do, but here's a trick — you don't actually need the absolute length. You just need the relative ordering. Is request A shorter than request B? That's a much easier problem to learn. It's called learning-to-rank, and it's sufficient for shortest-job-first scheduling.
+
+Jenny: Oh, like you don't need to know the exact ETA of every car on the highway. You just need to know which lane is moving faster.
+
+Alex: Right. And then you add aging to prevent starvation. Because pure shortest-job-first has the classic problem — long requests can starve if short ones keep cutting in line. So you compute an effective priority that combines the shortness score with how long the request has been waiting. The longer it waits, the more its priority increases.
+
+Jenny: That's literally the Linux CFS scheduler. Or weighted round-robin with priority aging. We do this exact thing in request routing.
+
+Alex: It's the same pattern, just applied to token generation scheduling. And it works surprisingly well.
+
+Jenny: Alright, so let's talk about failure modes. What happens when your predictions are wrong? Because they will be wrong.
+
+Alex: There are two directions to be wrong, and they're very asymmetric. Over-prediction — you predicted long, but the request finishes early. That's the safe failure. You allocated more KV cache than you needed, you maybe held a batch slot open longer than necessary. But the request finishes, the resources free up. Minor inefficiency.
+
 Jenny: And under-prediction is the dangerous one.
-Alex: Very dangerous. You predicted short, it's actually long. Now it triggers preemption, violates your SLO, blocks your express lane. The mitigation is to use the upper bound of your confidence interval for admission control, not the point estimate.
-Jenny: So be conservative on the admission side, optimistic on the scheduling side.
-Alex: That's a great way to put it. And here's the key insight that I think surprises people — prediction accuracy matters way less than you'd think. Even a noisy predictor that just correctly identifies the top 25% shortest and bottom 25% longest requests gives you a two to three X reduction in average latency for short requests.
-Jenny: So you don't need a perfect crystal ball. You just need to roughly separate the salads from the seven-course meals.
-Alex: Exactly. Rough bucketing beats no bucketing every single time.
+
+Alex: Very dangerous. You predicted short, so you put the request in the express lane, allocated a small KV cache budget. But then it keeps generating and generating. Now you have to either preempt it — evict it and restart it later, which destroys latency — or it blocks your express lane and violates SLOs for everything behind it. It's like telling an auto scaling group that a workload is small, so it gets placed on a small instance, and then it OOMs.
+
+Jenny: So you want to be biased toward over-prediction for safety.
+
+Alex: Exactly. The practical mitigation is to use the upper bound of your confidence interval for admission control, not the point estimate. If your model says "I think this request is two hundred tokens, but the ninety-fifth percentile is five hundred," you use five hundred for your admission check. You eat some over-provisioning, but you avoid the catastrophic under-prediction failures.
+
+Jenny: That makes total sense. Same reason we use P99 latency for capacity planning instead of the average — the tail is where things break.
+
+Alex: And here's the key insight that I think surprised me most about this whole area. Prediction accuracy matters way less than you'd expect. Even a noisy predictor — one that just correctly identifies the top twenty-five percent shortest and the bottom twenty-five percent longest requests — that's enough to get a two to three x reduction in average latency for short requests. You don't need to be right about everyone. You just need to separate the fast from the slow with reasonable accuracy.
+
+Jenny: So the bar isn't "predict token count within ten." The bar is "don't put the ten-minute requests in the same lane as the ten-second requests."
+
+Alex: That's it. Coarse separation is the eighty-twenty solution. And that's achievable with even simple classifiers.
+
+Jenny: Okay, so looking ahead — we've been talking about predicting how long requests take so we can schedule them better. But scheduling is just one piece of the puzzle, right? If you can predict output length, that also feeds into how you route requests across different nodes, and it connects directly to something we haven't talked about yet — disaggregated inference, where you literally run different phases of generation on different hardware.
+
+Alex: That's exactly where this leads. Once you can predict output length, you can make much smarter decisions about which requests go to your prefill nodes versus your decode nodes. You can pre-allocate KV cache on the decode side before the prefill even finishes. It turns your blind system into one that can actually plan ahead — like going from reactive auto scaling to predictive scaling.
+
+Jenny: From CloudWatch alarms to forecast-based scaling. I like that. That's the next episode then — disaggregated inference, splitting the brain of the model across different hardware.
+
+Alex: And you're going to love it, because it maps almost perfectly to read-write splitting in databases.
+
+Jenny: Oh, now you're speaking my language.

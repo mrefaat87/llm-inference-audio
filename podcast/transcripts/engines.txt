@@ -1,45 +1,85 @@
-Alex: So today we're comparing the four big inference engines — vLLM, TensorRT-LLM, SGLang, and Dynamo. And honestly, the easiest way to think about this is like choosing a vehicle for a job.
+Alex: So Jenny, I want to try something today. Imagine you're standing in front of a whiteboard, and someone asks you: "We need to serve a 70-billion parameter language model to ten thousand users. Pick your infrastructure." What's the first thing you think about?
 
-Jenny: Okay, I like that. So what's the lineup?
+Jenny: Honestly? It's the same question I'd ask about any workload. What are my constraints? Latency targets, throughput requirements, operational complexity my team can handle. And then I'd pick the compute abstraction that matches — like choosing between ECS, EKS, and Lambda. Each one makes real tradeoffs.
 
-Alex: vLLM is your reliable pickup truck. It does everything well, huge community, broadest model support. It came out of UC Berkeley in 2023 and introduced PagedAttention, which was a game-changer for memory management. Think of it as the Linux of LLM inference — general purpose, community-driven, flexibility over raw peak performance.
+Alex: That is exactly the right frame, because that's precisely what's happening in the inference engine space right now. You've got four serious contenders — vLLM, TensorRT-LLM, SGLang, and Dynamo — and each one is basically a different philosophy about how to serve models. They're not just different codebases. They're different opinions about what matters most.
 
-Jenny: And TensorRT-LLM?
+Jenny: Okay, so walk me through the philosophies. Because when I hear "four options," my instinct is — one of these is the default, and the others exist because the default breaks for specific workloads.
 
-Alex: That's your Formula One car. NVIDIA built it for maximum performance on their hardware. It compiles your model ahead of time into these hyper-optimized TensorRT engines. You get ten to thirty percent more throughput than vLLM on the same GPU. But here's the catch — that compilation step takes thirty to sixty minutes, and it's NVIDIA-only.
+Alex: You nailed it. vLLM is the default. It's the Linux of LLM inference — that's not my analogy, that's basically how the community thinks about it. It came out of UC Berkeley in 2023, it's open-source, community-driven, and it prioritizes flexibility and broad support over squeezing out every last drop of performance. It runs on NVIDIA, AMD, even Intel GPUs. It supports the widest set of models. If you don't know what you need yet, you start here.
 
-Jenny: Oh wow, so you're trading flexibility for speed.
+Jenny: So it's on-demand EC2. The safe starting point. You know it works, you know the ecosystem, and you optimize later.
 
-Alex: Exactly. And then there's SGLang, which is fascinating. Also from Berkeley — actually from Lianmin Zheng, who co-created vLLM. SGLang's superpower is structured generation. When you need JSON output or constrained formats, it's two to five times faster than the alternatives. It uses this thing called RadixAttention instead of PagedAttention.
+Alex: Exactly. Now TensorRT-LLM is the opposite end of the spectrum. It's NVIDIA's engine, and its entire philosophy is: maximum performance on NVIDIA hardware, period. It takes your model and does ahead-of-time compilation — it literally compiles the model into an optimized TensorRT engine. Custom fused kernels, hardware-specific optimizations, the whole works.
 
-Jenny: Wait, what's the difference between those two?
+Jenny: Wait, ahead-of-time compilation? So you're building a machine image, basically. Like baking an AMI instead of running a general-purpose instance and installing at boot.
 
-Alex: So PagedAttention manages memory like virtual memory pages — fixed blocks that get allocated and freed. RadixAttention is tree-based. Imagine a tree where each branch represents a different conversation that shares the same system prompt. Instead of storing that prompt separately for every request, RadixAttention shares it across the tree. For workloads with shared prefixes, you get thirty to eighty percent reduction in time to first token.
+Alex: That's a perfect analogy. And just like baking an AMI, there's a build step. For a 70B model, that compilation takes thirty to sixty minutes. But once it's built, you get ten to thirty percent more throughput than vLLM on the same hardware.
 
-Jenny: That's huge for multi-turn conversations where every message starts with the same system prompt and chat history.
+Jenny: Okay but that build step is a real cost. What happens when you want to swap models? Or update to a new version?
 
-Alex: Exactly right. And then Dynamo is the newest one — NVIDIA open-sourced it in early 2025. But here's the thing, Dynamo isn't really an engine. It's an orchestration framework. Its whole philosophy is disaggregation-first. It separates prefill from decode across different GPU pools and manages that routing.
+Alex: You rebuild. Every time. And that's exactly why it requires a dedicated MLOps team to operate. The performance is real — we're talking maybe 2,500 to 5,000 output tokens per second on H100s for a 70B model, compared to vLLM's 2,000 to 4,000. But the operational complexity is genuinely higher. You need to version those compiled engines, manage the build pipeline, deal with the fact that a compiled engine is locked to a specific GPU architecture.
 
-Jenny: So it sits on top of the other engines?
+Jenny: So this is reserved instances with Savings Plans. You get better unit economics, but you're committing, and you need the operational maturity to manage that commitment.
 
-Alex: Yes! Think of it like Kubernetes for inference. It doesn't serve the model itself, it orchestrates engines that do. The control plane is written in Rust for performance. You'd use it at fifty-plus GPU scale where you need strict time-between-tokens SLOs and you have high-bandwidth interconnect between nodes.
+Alex: I love that. Yes. And here's the thing — NVIDIA packages TensorRT-LLM inside their NIM containers, so if you're already in the NVIDIA ecosystem, the operational burden drops a lot. But if you're rolling your own, it's real work.
 
-Jenny: Okay so let me make sure I have the performance picture right. For something like LLaMA 70B on H100s?
+Jenny: Alright, so vLLM is the general-purpose default, TensorRT-LLM is the NVIDIA-optimized power play. What about SGLang? Where does that fit?
 
-Alex: vLLM gets you roughly two to four thousand output tokens per second. TRT-LLM pushes that to twenty-five hundred to five thousand. SGLang is right in between — two to forty-five hundred — but it destroys the competition on structured output. And Dynamo's performance depends entirely on which engine it's running underneath.
+Alex: SGLang is the interesting one. It also came out of UC Berkeley — in fact, one of the co-creators, Lianmin Zheng, was also a co-creator of vLLM. But SGLang started with a very different problem. Its original killer feature is structured generation — when you need the model to output valid JSON, or follow a specific schema, or fill in a template.
 
-Jenny: So how do you actually choose? Like if I'm starting a new project tomorrow?
+Jenny: How much of a difference are we talking?
 
-Alex: Start with vLLM. Always. It's the same principle as AWS — you don't start with a custom Spot placement strategy. You start with on-demand, prove your workload, then optimize. vLLM has the biggest community, fastest feature iteration, supports the most models and hardware.
+Alex: Two to five X faster than vLLM for structured output. And the way it achieves that is genuinely clever — it uses a zero-overhead finite state machine approach. But here's what happened over time: SGLang got so good at the general case too that it's now within five to ten percent of vLLM on standard workloads. And for certain workloads, it's actually faster.
 
-Jenny: And when would I switch?
+Jenny: Okay, hang on. Why would an engine built for structured generation end up competitive on general workloads? That seems like it shouldn't happen.
 
-Alex: If you're running purely on NVIDIA hardware and you have an MLOps team that can handle the complexity, and you need every last drop of throughput — TRT-LLM. If structured generation is your primary use case, or you have heavy multi-turn workloads where prefix caching matters — SGLang. And if you're at massive scale and need to separate your prefill and decode infrastructure — Dynamo.
+Alex: Great question. It comes down to a core architectural choice called RadixAttention. So you know how vLLM uses PagedAttention — it treats GPU memory like virtual memory pages to avoid wasting KV cache space?
 
-Jenny: That's really clean. It's like, vLLM is your default, and you only graduate to the specialists when you have a specific bottleneck that justifies it.
+Jenny: Right, that's the OS virtual memory analogy. The KV cache is your warm instance pool, and PagedAttention lets you pack it efficiently instead of pre-allocating worst-case memory for every request.
 
-Alex: That's exactly it. And honestly, they're all converging. vLLM V1 is twenty to forty percent faster than V0. SGLang added most of vLLM's features. Even the attention mechanisms are becoming interchangeable. The real differentiator going forward is probably going to be ecosystem and community more than raw performance.
+Alex: Exactly. SGLang took a different approach. RadixAttention organizes the KV cache as a radix tree — a prefix tree. So when multiple requests share the same system prompt, or the same conversation prefix, or the same few-shot examples, SGLang automatically detects that and shares the cached computation.
 
-Jenny: Which again favors vLLM as the safe default.
+Jenny: Oh, that's like a content-addressable cache. If I've already computed the attention for "You are a helpful assistant that outputs JSON," and a thousand requests start with that same prefix, I compute it once and share it.
 
-Alex: Right. Start there, measure your bottlenecks, and let the data tell you when to switch.
+Alex: Precisely. And this gives you thirty to eighty percent reduction in time-to-first-token for shared-prefix workloads. Think about multi-turn conversations where every message includes the full conversation history. Each new turn shares a massive prefix with the previous turn.
+
+Jenny: That's huge. So if I'm running a chatbot or an agentic workflow where the same context gets extended over and over — that's where SGLang really shines.
+
+Alex: Right. And this is also why it's so good at structured generation. When you're constraining output to a schema, you're effectively exploring a tree of valid continuations. RadixAttention's tree structure maps naturally onto that problem.
+
+Jenny: Okay, so three engines, three philosophies. Where does Dynamo fit? You said there were four.
+
+Alex: Dynamo is fundamentally different from the other three. It's not really an inference engine in the same sense — it's an orchestration framework. NVIDIA open-sourced it in early 2025, and its philosophy is disaggregation-first. It doesn't replace vLLM or TensorRT-LLM — it sits above them and orchestrates them.
+
+Jenny: Wait, so it's like... Kubernetes for inference engines?
+
+Alex: Close. Think of it more like a control plane that can split the inference pipeline into stages. The big idea is disaggregated inference — separating the prefill phase from the decode phase and running them on different hardware.
+
+Jenny: Why would you want to do that? They're two steps of the same request.
+
+Alex: Because they have completely different compute profiles. Prefill is compute-bound — you're processing the entire input prompt in one big matrix multiplication. Decode is memory-bandwidth-bound — you're generating one token at a time, reading the whole KV cache each step. Imagine running your batch processing and your real-time API serving on the same EC2 instances. You could, but at fifty-plus GPU scale, it makes sense to have pools specialized for each workload.
+
+Jenny: Oh, so prefill workers are like your compute-optimized instances and decode workers are like your memory-optimized instances. Different hardware profiles for different phases of the same request.
+
+Alex: Exactly. And Dynamo's Rust-based control plane handles routing requests between them, managing the KV cache transfer, all of that. But — and this is important — you only need this at scale. If you're running eight GPUs, the overhead of disaggregation isn't worth it. This is a fifty-plus GPU architecture.
+
+Jenny: And you need high-bandwidth interconnect between the prefill and decode pools, right? Because you're shipping KV cache state between them.
+
+Alex: You do. NVLink, InfiniBand, that kind of thing. Without it, the transfer latency kills your time-to-first-token advantage.
+
+Jenny: So let me see if I can summarize the decision tree. Start with vLLM — it's on-demand, it works, broadest support. If you're on NVIDIA and you've proven your workload and you have the MLOps team, look at TensorRT-LLM for that ten to thirty percent throughput bump. If structured generation or heavy prefix sharing is your bottleneck, SGLang might beat both of them. And Dynamo is for when you're at true fleet scale and need to disaggregate prefill from decode.
+
+Alex: That's exactly right. And I'd add one more thing — don't pick based on benchmark numbers alone. Just like you wouldn't pick an EC2 instance type based solely on spec sheets. You run your actual workload, with your actual prompt distributions, at your actual concurrency levels.
+
+Jenny: Because a benchmark with fixed-length inputs and outputs tells you about as much as a synthetic CPU benchmark tells you about your real application performance.
+
+Alex: Precisely. The real performance depends on your mix of short and long prompts, your batching patterns, whether you're doing multi-turn or single-shot, whether you need structured output — all of it.
+
+Jenny: Okay, this is a great foundation. So looking ahead — we've got the engines, we understand the tradeoffs. What comes next?
+
+Alex: Next we need to talk about actually measuring these tradeoffs for your specific workload. Benchmarking inference is surprisingly tricky — there are ways to make any engine look good or bad depending on how you set up the test. We'll dig into the metrics that matter, how to avoid misleading results, and then tie it all together with cost economics. Because at the end of the day, cost-per-token is becoming the new cost-per-request, and the engine choice directly impacts your unit economics.
+
+Jenny: So it's not just "which engine is fastest" — it's "which engine gives me the best cost-per-token at my SLO targets." That's the conversation that actually matters in a budget review.
+
+Alex: Exactly. And that math changes depending on whether you're optimizing for latency, throughput, or cost — just like how your EC2 strategy changes depending on whether you're optimizing for availability, performance, or spend. That's where we're headed next.

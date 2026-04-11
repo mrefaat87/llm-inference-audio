@@ -1,30 +1,111 @@
-Alex: So today we're doing something fun — we're going to run through every major inference optimization technique and talk about what each one actually does under the hood.
-Jenny: Every single one? That sounds like a lot.
-Alex: It is, but here's the trick that makes it manageable. Every optimization attacks one of just three bottlenecks — compute throughput, memory bandwidth, or memory capacity. Once you know which bottleneck a technique targets, it clicks into place.
-Jenny: Okay, I like that framing. So let's start with compute. What's wasting our GPU cycles?
-Alex: The biggest one is continuous batching. So picture a city bus route. The old way of batching — static batching — is like a charter bus. It waits until every seat is full, drives the whole route, then comes back for the next group. Continuous batching is the city bus. People hop on and off at every stop. The bus never sits idle waiting.
-Jenny: So you're swapping requests in and out at every single decode step?
-Alex: Exactly. A request finishes generating? Great, evict it, pull in a new one immediately. No waiting. That alone takes GPU utilization from something like 30% up to 85% or higher.
-Jenny: That's a massive jump. Okay, what about memory capacity? I've heard KV cache is the real bottleneck there.
-Alex: It absolutely is, and that's where PagedAttention comes in. Think of it like OS virtual memory. Instead of pre-allocating one big contiguous block of memory for each request's KV cache — which wastes tons of space — you break it into small pages. Allocate them on demand, scatter them wherever there's room.
-Jenny: Oh, like how your operating system doesn't actually give a program one continuous block of RAM — it just maps virtual pages to whatever physical frames are free.
-Alex: Exactly that analogy. And the result? KV cache fragmentation drops from around 60% wasted space to nearly zero. You can fit way more concurrent requests in the same GPU memory.
-Jenny: That's elegant. Now what about latency? Because I've seen these nasty spikes where a long prompt comes in and suddenly everyone's decode tokens stall.
-Alex: You're describing exactly the problem chunked prefill solves. Instead of processing a 10,000-token prompt all at once — which hogs the GPU and blocks decode tokens from other requests — you chop it into fixed-size chunks. Process one chunk per step, mixed right in with the decode tokens from other requests.
-Jenny: So it's like time-slicing. The long prefill shares the GPU with everyone else instead of monopolizing it.
-Alex: Right. Those 500-millisecond TBT spikes? Gone.
-Jenny: Okay, this is great. What about when you have a bunch of requests that all share the same system prompt? Like in a RAG application where everyone gets the same context documents?
-Alex: That's prefix caching, sometimes called radix attention. You compute the KV vectors for that shared prefix once, cache them, and reuse them for every request that starts with the same text. Hash-based matching finds the common prefix.
-Jenny: So you're basically eliminating redundant prefill compute. That would crush TTFT for those repeated prompts.
-Alex: Exactly. Now, speculative decoding is a totally different trick — it attacks decode latency. You run a tiny draft model that proposes, say, five tokens really fast. Then the big model verifies all five in one parallel forward pass. If the first four match but the fifth doesn't, you keep the four good ones, correct the fifth, and move on.
-Jenny: Wait, so you get multiple tokens per step from the big model, but the quality is identical because you're still verifying against it?
-Alex: Identical. No quality loss. Two to three x decode throughput for free, basically.
-Jenny: That's clever. Okay, FlashAttention — I keep hearing about this one.
-Alex: FlashAttention is attacking memory bandwidth. Standard attention computes that full N-by-N attention matrix and stores it in HBM — your main GPU memory. FlashAttention tiles the computation so everything stays in SRAM — the tiny, ultra-fast on-chip memory. It uses an online softmax trick so it never needs to materialize the full matrix.
-Jenny: So you go from quadratic memory to linear, and it's two to four x faster because you're not bottlenecked on the HBM bandwidth anymore.
-Alex: Bingo. And that's what makes long context windows even possible. Without it, a 128K context would just blow up your memory.
-Jenny: Last couple — GQA and KV cache quantization?
-Alex: Both attack KV cache size from different angles. GQA — grouped query attention — shares key and value heads across multiple query heads. Instead of every query head having its own K and V, a group shares one set. MQA takes it to the extreme with just one global K/V head. And KV cache quantization simply stores those vectors in INT8 or FP8 instead of FP16. Half the bits, double the sequences you can serve.
-Jenny: So GQA shrinks the cache architecturally, and quantization shrinks it numerically. And you can stack them.
-Alex: You absolutely can, and most production systems do. That's the beautiful thing — these techniques are composable. Continuous batching plus PagedAttention plus FlashAttention plus GQA plus KV cache quantization — layer them all together and you get a system that's radically more efficient than any one technique alone.
-Jenny: It's like each one removes a different ceiling. Love it. This was a great overview.
+Alex: So Jenny, I want to try something different today. Instead of going technique by technique through an optimization list, I want to start with a question. You've run capacity planning for large-scale services, right?
+
+Jenny: Years of it. Auto Scaling groups, capacity reservations, the whole thing.
+
+Alex: Okay, so imagine you have a GPU. It's expensive — like, thousands of dollars a month expensive. And you look at your monitoring dashboard and it's sitting at 30% utilization. What's your gut reaction?
+
+Jenny: I'm firing up a cost optimization review immediately. 30% utilization on expensive hardware? That's a scandal.
+
+Alex: Right. And that was the state of the art for LLM inference not that long ago. 30% GPU utilization was normal. And the reason why tells you everything about why these optimizations exist. See, the naive approach to serving LLM requests is what I call the charter bus model. You wait until you have a full batch of requests, you process them all together, and nobody gets off until the longest request is done.
+
+Jenny: Oh, that's terrible. So if I send a quick "summarize this sentence" request and someone else sends "write me a novel," I'm waiting for the novel to finish?
+
+Alex: Exactly. And while the GPU is waiting for that novel to finish, the short requests are done, those slots are wasted, and new requests are queuing up outside. So the first big breakthrough was continuous batching — switching from the charter bus to a city bus. The GPU picks up new passengers at every stop and drops off finished ones immediately.
+
+Jenny: Every stop being every decode step? Every single token generation?
+
+Alex: Every single one. A request finishes generating its last token, that slot opens up, and a waiting request slides right in. No waiting for the whole batch to complete.
+
+Jenny: That's like... that's exactly like how we handle Auto Scaling group instance replacement. You don't wait for all instances to be unhealthy before launching replacements. You replace each one as it fails.
+
+Alex: Great analogy. And the impact is dramatic — you go from 30% GPU utilization to 85% or higher. But here's where it gets interesting. Now that you're packing way more concurrent requests onto the GPU, you've created a new problem. Can you guess what it is?
+
+Jenny: Memory. You're storing state for all those concurrent requests, and GPUs don't have unlimited memory.
+
+Alex: Exactly. Every active request needs its own KV cache — that's the pre-computed attention state, think of it like a warm instance pool. Each request has its own pool of cached computation so you don't redo the attention math from scratch on every token. And with continuous batching cramming way more concurrent requests in, these caches are eating your HBM alive.
+
+Jenny: So how were people managing that memory before?
+
+Alex: Badly. The standard approach was to pre-allocate a contiguous block of memory for each request's maximum possible sequence length. So if your model supports 4096 tokens, every request gets a 4096-token-sized memory block, even if the actual response is 50 tokens.
+
+Jenny: That's like provisioning every EC2 instance for peak capacity and never scaling down. The fragmentation must be horrendous.
+
+Alex: 60% memory waste from fragmentation. And that's where PagedAttention comes in, and your instinct is exactly right — it's literally virtual memory paging applied to the KV cache. Instead of pre-allocating one big contiguous block, you allocate small fixed-size pages. A request needs more memory? Give it another page. Doesn't matter if it's physically contiguous. The request finishes? Those pages go back to the free pool instantly.
+
+Jenny: So the same insight that solved memory fragmentation in operating systems 50 years ago — just applied to GPU memory for attention caches.
+
+Alex: Precisely. And just like in OS virtual memory, you can even do things like copy-on-write. If two requests share a prefix — say they both have the same system prompt — they can share those KV cache pages until their outputs diverge.
+
+Jenny: Okay wait, you just touched on something. Shared prefixes. That sounds like it connects to prefix caching?
+
+Alex: It does, and that's a beautiful segue. So prefix caching, sometimes called radix attention, takes that shared-page idea and runs with it. Think about a production deployment where every request starts with the same 2000-token system prompt. Without prefix caching, you're computing the exact same attention vectors for those 2000 tokens on every single request.
+
+Jenny: That's like recomputing a hash table from scratch on every API call instead of caching it.
+
+Alex: Right. So prefix caching keeps those KV vectors around in a hash-indexed cache. New request comes in with the same system prompt? Skip the prefill entirely for that prefix. Your time to first token drops dramatically because you're only computing attention for the new, unique part of the prompt.
+
+Jenny: How much does that actually save in practice?
+
+Alex: For RAG applications where you're stuffing the same retrieved documents into multiple queries? It can eliminate 80-90% of your prefill compute. The TTFT improvement is massive. But here's the thing — even with prefix caching, you still have requests with long unique prompts that need full prefill. And that creates a different problem.
+
+Jenny: The prefill is compute-heavy, right? So a long prompt comes in and it hogs the GPU while decode tokens from other requests are waiting?
+
+Alex: Exactly. Imagine you have 50 requests happily decoding, generating one token each per step, and then a new request arrives with a 10,000-token prompt. The prefill for that prompt is so compute-intensive that it blocks the decode step. Those 50 users see their token stream stall — their time between tokens spikes from 30 milliseconds to maybe 500 or more.
+
+Jenny: That's a noisy neighbor problem. One bursty request starving everyone else.
+
+Alex: And what do you do with noisy neighbors in infrastructure?
+
+Jenny: Admission control. Rate limiting. You throttle the burst so it doesn't impact steady-state traffic.
+
+Alex: That's exactly what chunked prefill does. Instead of processing that 10,000-token prompt in one giant gulp, you break it into fixed-size chunks — say 512 tokens each. Each decode step, you process one chunk of the new prompt alongside the decode tokens from active requests. The prefill takes longer to complete, but it never starves the decode pipeline.
+
+Jenny: So it's a latency-consistency optimization. You're trading a bit of prefill latency for dramatically better tail latency on the decode side.
+
+Alex: Precisely. Your P99 time-between-tokens stays tight instead of having these horrific spikes. Now, let's zoom into a completely different bottleneck. Everything we've talked about so far is about scheduling and memory management — how you organize work on the GPU. But there's a fundamental hardware constraint we haven't addressed. The GPU's compute units can do math way faster than memory can feed them data.
+
+Jenny: The memory bandwidth wall. I've seen this in CPU workloads too — you can have all the cores in the world, but if they're stalling on cache misses, it doesn't matter.
+
+Alex: Same idea, bigger gap. GPU arithmetic throughput is measured in hundreds of teraflops. Memory bandwidth is maybe 2-3 terabytes per second. For attention computation, you're constantly shuffling huge matrices back and forth between HBM — the GPU's main memory — and the actual compute units. And the classic attention algorithm makes this worse because it materializes the full N-by-N attention matrix in HBM.
+
+Jenny: N being the sequence length? So that matrix grows quadratically?
+
+Alex: Quadratically. A 4096-token sequence means a 16-million-element attention matrix, and you're reading and writing that full matrix to HBM multiple times during the attention computation. FlashAttention's insight is to never materialize that matrix at all. Instead, you tile the computation — break it into small blocks that fit entirely in SRAM, the GPU's fast on-chip memory, and compute attention block by block using an online softmax algorithm.
+
+Jenny: So it's like... instead of writing intermediate results to a shared disk and reading them back, you keep everything in local memory and stream through it?
+
+Alex: Perfect analogy. You fuse what used to be multiple memory-bound kernel launches into a single pass that stays on-chip. The result? Two to four times faster attention, and your memory usage drops from O(n-squared) to O(n). That's what made 100K and million-token contexts practical.
+
+Jenny: And I'm guessing this is where quantization fits in too — attacking that same memory problem from the data-size angle?
+
+Alex: Exactly. Quantization is lossy compression for model weights and activations. Instead of storing everything in 16-bit floating point, you compress to 8-bit integers or 8-bit floats. You cut memory consumption in half, which means you can fit bigger models or serve more concurrent requests, and because you're moving fewer bytes through memory, your bandwidth-bound operations get faster too.
+
+Jenny: And you can apply that same idea to the KV cache specifically?
+
+Alex: You can, and it's one of the highest-leverage optimizations in practice. KV cache quantization — storing those cached attention vectors in INT8 or FP8 instead of FP16 — doubles the number of concurrent sequences you can serve in the same HBM. You dequantize on the fly during attention, and the quality impact is minimal.
+
+Jenny: So you get double the concurrency for essentially free?
+
+Alex: Nearly free. There's a tiny accuracy cost, but for most production use cases, it's well within tolerance. Now there's one more technique I want to cover, and it attacks the bottleneck from a completely different direction. Everything so far has been about making individual operations faster or fitting more into memory. But decode is fundamentally sequential — one token at a time. What if you could generate multiple tokens per step?
+
+Jenny: That sounds like it breaks the autoregressive constraint. How do you generate multiple tokens if each one depends on the previous?
+
+Alex: Optimistic concurrency. You use a small, cheap draft model to speculatively generate, say, five tokens. Then you feed all five into the big model in one forward pass — which is highly parallel and efficient, just like a prefill. The big model verifies each token. If the first three match what it would have generated, you accept them all and only recompute from token four.
+
+Jenny: Oh, that's like optimistic locking in databases. You assume no conflict, do the work, and only pay the rollback cost when you're wrong.
+
+Alex: Exactly. And the draft model is right often enough — especially for predictable tokens, function calls, common patterns — that you get a two to three times speedup in decode throughput with zero quality loss. You're always guaranteed to produce exactly what the big model would have produced.
+
+Jenny: Because you're verifying with the real model. You never actually serve an unverified token.
+
+Alex: Never. The math guarantees it. The worst case is you reject all draft tokens and you've only wasted one cheap draft forward pass.
+
+Jenny: Okay so stepping back — what strikes me is that none of these optimizations exist in isolation. Continuous batching creates memory pressure, which demands PagedAttention, which enables prefix caching. Chunked prefill solves the noisy neighbor problem that continuous batching creates. FlashAttention makes the long contexts possible that make prefix caching valuable. They're all interlocking.
+
+Alex: That's the key insight. This isn't a menu you pick from — it's a system where each optimization enables or amplifies the others. And that's actually a perfect bridge to what's coming next. We have dedicated deep dives on FlashAttention and speculative decoding because there's so much more under the hood — the tiling math, the different FlashAttention generations, how you actually train and select a draft model, the rejection sampling algorithm. And beyond that, we'll look at advanced architectural innovations like multi-latent attention and multi-token prediction that are baked into the model design itself.
+
+Jenny: So we've covered the inference-time optimizations today — the things you do at serving time. And next we go deeper into the ones that deserve their own episodes, and then into the ones that change the model architecture itself.
+
+Alex: Exactly. Think of today as the map. We've oriented ourselves. Now we go exploring.
+
+Jenny: I love it. See you in the next one.

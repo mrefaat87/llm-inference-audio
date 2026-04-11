@@ -1,0 +1,103 @@
+Now I have all the context I need. Let me write the script.
+
+Alex: Okay Jenny, pop quiz time. But this one's different from last time. We're not testing definitions — we're testing whether you can actually operate an inference system under pressure. Real scenarios, real numbers, real tradeoffs.
+
+Jenny: Oh great, so it's an on-call simulation. My favorite kind of stress.
+
+Alex: Pretty much. You're the operator, I'm the one throwing production incidents at you. Ready?
+
+Jenny: Hit me.
+
+Alex: First scenario. You're running an inference service with an SLO of fifteen seconds per request. A new request comes in with a ten-thousand-token prompt. Your system prefills at five thousand tokens per second, decodes at fifty tokens per second, and your output length predictor says this request will generate about five hundred tokens. Do you accept or reject?
+
+Jenny: Okay, let me actually do the math. Prefill time — ten thousand tokens divided by five thousand tokens per second — that's two seconds. Decode time — five hundred output tokens at fifty tokens per second — that's ten seconds. Total is twelve seconds. My SLO is fifteen. Twelve is less than fifteen, so... accept.
+
+Alex: Good. But you said that a little hesitantly. What's bothering you?
+
+Jenny: The margin. I've only got three seconds of headroom. And I didn't account for queue wait. If there's any queue depth at all, that eats into my margin. So the real question isn't "can I finish in fifteen seconds" — it's "can I finish in fifteen seconds minus however long this request has been waiting."
+
+Alex: Exactly. And this is the Mooncake pattern we talked about — SLO-aware admission control. You estimate total time at admission: queue wait plus prefill plus decode. If it exceeds the SLO, you reject immediately with a 503. No GPU cycles burned.
+
+Jenny: Which is so much better than the alternative. I've seen this movie in web services — you accept the request, you're halfway through processing it, you blow the deadline, and now you've wasted compute on tokens that the user never sees. It's the worst possible outcome.
+
+Alex: Right. You've wasted GPU time and the user still got an error. Double failure. Now here's the follow-up — what was the weakest link in your calculation just now?
+
+Jenny: The output length prediction. I said five hundred tokens, but that's a guess. If the model actually generates a thousand tokens, my decode time doubles to twenty seconds and I've blown the SLO. Everything downstream of that prediction — the admission decision, the memory budget, the preemption priority — it all depends on a number I don't actually know yet.
+
+Alex: And that's the thread that connects this entire chapter. Prediction quality is the foundation. Better predictions, better everything. Okay, scenario two. You're serving an agentic workload — think something like a coding assistant that makes tool calls. The model generates a tool call, and now it's waiting for the tool to execute. Let's say the tool takes five seconds. During those five seconds, what's happening to your GPU?
+
+Jenny: Well the compute units are idle for that session. The model isn't generating any tokens. But — and this is the painful part — the KV cache is still sitting in GPU memory.
+
+Alex: How painful, exactly? Let's quantify it.
+
+Jenny: Okay, so if the model's average decode time between tool calls is three seconds, and the average tool execution is five seconds, then for every eight-second cycle, the GPU is idle for five of them. That's... sixty-two and a half percent idle time. For that session, you're paying for GPU memory to hold state while doing zero useful compute more than half the time.
+
+Alex: And this is the core tension of agentic inference. You've got a sequence that's alive — it has state, it has context, it's part of an ongoing session — but it's not active. It's not generating tokens. Traditional schedulers only know two states: active or done. Tool calls create this third state — suspended — and the scheduler has no good playbook for it.
+
+Jenny: So what are your options? You can hold the KV cache in GPU memory and eat the waste. You can swap it to CPU memory and pay a hundred to five hundred milliseconds of latency to bring it back when the tool result arrives. Or you can evict it entirely and recompute from scratch.
+
+Alex: Right. And there's actually a fourth option that's becoming increasingly popular in production — you just don't bother with any of that. The client re-sends the full conversation history when the tool result comes back, and prefix caching handles the deduplication. The serving system recognizes the overlapping prefix and reuses the cached KV data.
+
+Jenny: Oh, that's elegant because it pushes the complexity to the client side. The server stays stateless. It's like — instead of maintaining sticky sessions on your load balancer, you design the protocol so the client carries the state and the server can reconstruct context from any healthy instance.
+
+Alex: Exactly. Simpler architecture, at the cost of some redundant network transfer. But for most agentic workloads, that's a great trade. Okay, next one. This is the question that I think trips up the most people. Chunked prefill — what's its real benefit? And be specific. I don't want the textbook answer.
+
+Jenny: Alright, the instinct is to say "it makes prefill faster" or "it improves time to first token." But that's actually backwards. Chunked prefill makes TTFT slightly worse. The real benefit is TBT consistency — time between tokens for everyone else.
+
+Alex: Explain why. Walk me through what happens without chunking first.
+
+Jenny: Without chunking, a ten-thousand-token prompt arrives and the GPU has to process the entire thing in one monolithic forward pass. That takes, let's say, five hundred milliseconds. During that entire window, every single decode request in the batch is frozen. No tokens generated. No data streaming. The user who's mid-conversation watching tokens flow in sees their stream just... stop. For half a second. That's a five-hundred-millisecond TBT spike for every active user.
+
+Alex: And with chunking?
+
+Jenny: You break the prefill into chunks — say five hundred twelve tokens each. Each forward pass processes one chunk of prefill plus one decode step for every active sequence. So instead of one five-hundred-millisecond freeze, you get twenty steps of about twenty-five milliseconds each. Decode latency goes from twenty milliseconds per token to maybe twenty-five or twenty-six. Barely noticeable.
+
+Alex: And here's why this matters for the right reason. What do users actually perceive?
+
+Jenny: This is the key insight. Users tolerate waiting a bit longer for the first token to appear. That initial pause feels natural — like the system is "thinking." But a freeze in the middle of a streaming response? That's jarring. Your stream is flowing, you're reading along, and then everything stops. That feels broken. So chunked prefill optimizes for the metric that actually matters for user experience — smooth, consistent token delivery — even though it technically makes TTFT a little worse.
+
+Alex: Nailed it. And this directly connects to the next scenario. Here's question four, and it's a trick question in a way. Berkeley's retrospective found that chunked prefill closes sixty to eighty percent of the latency gap that disaggregation was supposed to solve. So... when is disaggregation still worth the complexity?
+
+Jenny: Hmm. Okay, if chunked prefill gets you eighty percent of the per-request latency benefit, then the remaining benefit of disaggregation has to come from somewhere else. And I think the answer is independent scaling.
+
+Alex: Go deeper. Why does independent scaling matter?
+
+Jenny: Because prefill and decode have completely different resource profiles and completely different demand curves. If I suddenly get a burst of long-context RAG queries — big prompts, heavy prefill — I need more prefill capacity. But my decode load hasn't changed. With colocated serving, I have to scale the whole fleet up, which means I'm overprovisioning decode capacity I don't need. With disaggregation, I scale my prefill fleet independently. It's the exact same reason you'd put your web tier and your background workers in separate auto scaling groups.
+
+Alex: When else?
+
+Jenny: When you have strict TBT SLOs — like sub-fifty milliseconds — where you can't tolerate any prefill interference at all. Even chunked prefill adds a few milliseconds per step, and at that level of strictness, "a few milliseconds" matters. Also at serious scale — fifty-plus GPUs — where the operational complexity is justified by the efficiency gains. And when you have heterogeneous GPU hardware available. You put your high-FLOPS GPUs on prefill duty, your high-bandwidth GPUs on decode duty.
+
+Alex: And when do you stay colocated?
+
+Jenny: When my workloads are uniform — similar prompt and output lengths, so there's no noisy neighbor problem to solve. When I'm small scale — under eight GPUs — because the operational complexity isn't worth it. And critically, when I don't have fast interconnect. That KV cache transfer between fleets can be thirty-two gigs for a large model with long context. On TCP, that transfer alone can eat a hundred milliseconds to a full second. At that point I'm paying more in transfer latency than I'm saving.
+
+Alex: Perfect. The key takeaway — disaggregation is a capacity management play, not just a latency play. Chunked prefill solves most of the latency problem. Independent scaling is what disaggregation uniquely enables. Last question. Your output length predictor classifies requests into three buckets — short, medium, and long — with seventy-five percent accuracy. Is that useful?
+
+Jenny: My gut says no. Seventy-five percent accuracy sounds pretty bad. You're wrong on one in four requests.
+
+Alex: Push on that instinct. Think about what you actually need.
+
+Jenny: Hmm. Okay. For scheduling — like shortest-job-first — I don't actually need exact token counts. I just need relative ordering. Is this request shorter than that one? And even with seventy-five percent accuracy, if I can reliably identify the shortest twenty-five percent of requests and the longest twenty-five percent, I can put the short ones in a fast lane.
+
+Alex: And what does that buy you?
+
+Jenny: If the short requests aren't stuck behind the long ones... that's a massive reduction in average latency for the short requests. Two to three X maybe? Because right now they're just mixed in with everything else, and head-of-line blocking is killing them. Even a noisy predictor that gets the extremes right gives you most of the benefit of shortest-job-first scheduling.
+
+Alex: Exactly. You don't need a perfect prediction — you need relative ordering. It's like — you don't need to know exactly how much CPU each request will use. You just need to route the quick health checks to a different lane than the heavy report generation. Even a rough classifier makes that possible. But what about the long requests? If short requests always get priority, what happens to them?
+
+Jenny: They starve. Classic priority inversion problem. If you always run the shortest job first, and new short requests keep arriving, the long requests just sit in the queue forever. You need aging. As a request waits longer, its effective priority increases. Something like effective priority equals shortness score plus an aging factor times wait time. So a long request that's been waiting a while eventually outprioritizes a freshly arrived short one.
+
+Alex: And that's the formula that makes this work in production. A noisy predictor plus a simple aging mechanism gives you most of the theoretical benefit of perfect shortest-job-first scheduling without the starvation problem. It's practical, it's deployable, and it's far better than FIFO.
+
+Jenny: Okay, so stepping back — all five of these scenarios are really about the same thing, aren't they? Every one of them comes down to making a decision under uncertainty, before you have complete information about the request.
+
+Alex: That's exactly the connecting thread. Admission control — deciding whether to accept before you know the true cost. Agentic scheduling — managing resources for sequences whose activity pattern you can't predict. Chunked prefill — optimizing for the metric that actually matters, not the obvious one. Disaggregation — choosing the right architecture based on your workload shape. Output prediction — using imperfect information to make better-than-random decisions. All of it is inference-time capacity planning.
+
+Jenny: Which honestly maps perfectly to everything I know from distributed systems. You never have perfect information. You make the best decision you can with the signals you have, you build in feedback loops, and you design for graceful degradation when you're wrong.
+
+Alex: And that's the foundation for where this goes next — production hardening. Because so far we've been designing the system. Next we need to make it survive. What happens when a decode worker crashes mid-generation? Can you checkpoint and resume? How do you do admission control across two separate fleets with different capacity curves? How do you handle cascading failures when a tool-calling burst overwhelms your KV cache budget?
+
+Jenny: So we're going from "how do you build it" to "how do you keep it alive at 3 AM." That's where the real engineering starts.
+
+Alex: That's where every infrastructure principle you've ever learned starts paying dividends. We'll see you there.

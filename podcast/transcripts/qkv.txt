@@ -1,41 +1,105 @@
-Alex: So today we're talking about Q, K, and V — queries, keys, and values. These are the three projections that make attention work in transformers, and honestly, once you get this, so much of how large language models work just clicks.
+Alex: So Jenny, I want to start today with a question. You've built request routing systems before — when a request comes in, how does your load balancer decide where to send it?
 
-Jenny: Okay, I know attention is like the core mechanism, but I've always found Q, K, V a bit abstract. Can you ground it for me?
+Jenny: I mean, it depends on the strategy, right? Could be round-robin, could be content-based routing where you look at the request headers or the path, match it against some rules, and send it to the right backend.
 
-Alex: Absolutely. Here's my favorite example. Take the sentence: "The bank near the river was flooded. It was too damaged to reopen." The model hits the word "it" and needs to figure out — what does "it" refer to? Bank? River? That's exactly the problem Q, K, V solve.
+Alex: Exactly. Content-based routing. You inspect the request, you inspect what each backend advertises it can handle, and you match them. That is literally what attention does inside a transformer. Every single token in a sequence is simultaneously a request and a backend, and the model is running content-based routing to figure out which tokens should talk to which other tokens.
 
-Jenny: Oh, so it's basically a reference resolution problem.
+Jenny: Okay wait, so every token is both sending requests and advertising its capabilities?
 
-Alex: Exactly. So each token gets three separate vectors computed from its embedding. The Query is like a question the token is asking — "it" generates a Q that essentially says "I'm a pronoun looking for a concrete, damageable noun." The Key is like an advertisement — each token broadcasts what it contains. "Bank" advertises "I'm a physical structure that can be damaged and closed." "River" says "I'm a body of water." And "was" says "I'm a verb" — terrible match for a pronoun needing a noun.
+Alex: Every single one. And the way it does this is through three separate projections called Q, K, and V — Query, Key, and Value. And the reason there are three, not one or two, is a genuinely elegant design decision. Let me set it up with a concrete example. Take this sentence: "The bank near the river was flooded. It was too damaged to reopen."
 
-Jenny: That's a great way to think about it. So the Query is the search, and the Key is the label you're searching against. But then what's the Value?
+Jenny: The model needs to figure out what "it" refers to.
 
-Alex: This is the clever part. Once "it" decides "bank" is the best match by comparing Q against K, it doesn't pull in bank's Key. It pulls in bank's Value — which is a much richer representation. The Key was the label on the filing cabinet drawer. The Value is everything inside the drawer.
+Alex: Right. "It" could mean the bank, could mean the river. Humans resolve this instantly, but the model needs a mechanism. So here's what happens. The token "it" generates a Query vector — think of it as a structured request. That Query encodes something like "I'm a pronoun, I need a concrete, physical, damageable noun." That's the search intent.
 
-Jenny: Wait, so why not just make Key and Value the same thing? Why the separation?
+Jenny: So the Query is like the request metadata — the headers and path that tell the router what kind of backend this request needs.
 
-Alex: Because if they were the same, you'd be forced to use your full rich representation as your search index. That's noisy and inefficient. By separating them, the model learns to optimize the Key purely for matching and the Value purely for information transfer. It's actually one of the most elegant design decisions in the whole transformer architecture.
+Alex: That's a great analogy, yeah. Now every other token in the sequence generates a Key vector. The Key is the advertisement. It's what each token says about itself to help other tokens decide if there's a match. So "bank" puts out a Key that says "I'm a concrete noun, a physical structure, something that can be damaged." "River" puts out a Key that says "I'm a body of water, a natural entity." And "was" puts out a Key that says "I'm a past tense verb."
 
-Jenny: That is clever. Okay so walk me through the actual math. How does the model go from these vectors to deciding "it" means "bank"?
+Jenny: So you do a dot product between the Query and each Key to get a similarity score, and that's your routing decision.
 
-Alex: Five steps. First, "it" takes its Q vector and computes a dot product with every other token's K vector. That gives you a similarity score — higher means more relevant. "Bank" gets a high score, "river" medium, grammar words near zero. Second, you scale those scores by dividing by the square root of the head dimension. Without this, the dot products get too large and softmax saturates — you get near-zero gradients and training just stops.
+Alex: Exactly. The dot product — multiply corresponding elements pair-wise and sum — gives you a single number measuring how aligned two vectors are. "It" dot "bank" produces a high score. "It" dot "river" produces a medium score. "It" dot "was" produces basically nothing.
 
-Jenny: So that's why it's called "scaled" dot-product attention.
+Jenny: Okay, but you said there are three projections. We've got Query and Key doing the matching. What's Value for? Why not just pull in the Key once you've found your match?
 
-Alex: Exactly. Third, you apply a causal mask — in autoregressive generation, a token can't attend to future tokens it hasn't generated yet, so you set those to negative infinity. Fourth, softmax converts everything into probabilities that sum to one. "It" might put 70% weight on "bank," 20% on "river," 10% spread across everything else. And fifth, you take a weighted sum of all the Value vectors using those probabilities.
+Alex: This is the part I think is really elegant. Think about it in infrastructure terms. When your load balancer routes a request to a backend, the health check metadata that helped you choose that backend — CPU utilization, queue depth, whatever — that's not the actual response the backend sends back. Those are two different things, right?
 
-Jenny: So the output isn't the word "bank" — it's a blended vector?
+Jenny: Oh. So the Key is the health check advertisement, and the Value is the actual response payload.
 
-Alex: Right, and that's a really important subtlety. The model doesn't make a binary choice. It carries forward a weighted blend of context from every relevant token. That blended vector flows into the next layer carrying the resolved meaning.
+Alex: Exactly. The Key is optimized purely for matching — it's a compact label, like the description on a filing cabinet drawer. The Value is the full, rich representation — everything inside the drawer. For "bank," the Value contains: it's near a river, it was flooded, it's the subject of the earlier sentence, it could be a financial institution that reopens. Way richer than what the Key advertised.
 
-Jenny: Okay, now the practical angle — these Q, K, V vectors have to be stored somewhere, right? How big are we talking?
+Jenny: So if you collapsed Key and Value into the same thing, you'd be using your full rich representation as your search index. That's like indexing your database on the entire row instead of a purpose-built index column.
 
-Alex: So each one is computed by multiplying the token's embedding by a learned weight matrix. For GPT-3, the embedding is 12,288 dimensions, and each head projects that down to 128 dimensions. The real problem is the KV cache. During generation, every new token needs to attend to all previous tokens, so you store their K and V vectors in GPU memory. For GPT-3, that's about 4.7 megabytes per token. A 100,000 token context needs roughly 470 gigabytes just for the KV cache.
+Alex: That's exactly right. You'd be forcing the model to use one representation for two completely different jobs — matching and information transfer. Separating them lets the model learn a compact, precise matching function independently from learning what information to actually pass forward. The Key is your index. The Value is your data.
 
-Jenny: 470 gigabytes! So long-context serving is fundamentally a memory problem, not a compute problem.
+Jenny: Okay, so we've got scores from the dot products. What happens next?
 
-Alex: You nailed it. That's exactly why techniques like GQA and MQA exist — they share K and V across attention heads to shrink that cache. And it's why PagedAttention was such a breakthrough — it manages KV cache memory the way an operating system pages virtual memory.
+Alex: A few critical steps. First, you scale. You divide all the scores by the square root of the vector dimension. So if your vectors are 128 dimensions, you divide by about 11.3.
 
-Jenny: This all connects back to why inference infrastructure is so interesting. The math is elegant, but serving it at scale is a completely different engineering challenge.
+Jenny: Why? What breaks if you skip that?
 
-Alex: And that tension between the elegance of the algorithm and the brutality of the memory constraints — that's really the story of modern inference.
+Alex: Think about what happens with high-dimensional dot products. When you're summing 128 multiplied pairs, the raw score can get very large in magnitude. And the next step is softmax — which converts scores into probabilities that sum to one. But softmax is exponential. If your inputs are huge, like 50 or negative 50, the output becomes essentially one-hot — all the probability mass goes to one token, everything else gets driven to zero.
+
+Jenny: And that kills your gradients during training.
+
+Alex: Exactly. The gradient — the error signal that flows backward to update weights — becomes near zero when softmax is saturated. Learning stops. Dividing by square root of d keeps the variance of the scores around 1 regardless of dimension, so softmax stays in its useful range. It's a small normalization trick that makes the entire architecture trainable.
+
+Jenny: That's like the scaling problem we had with metrics aggregation — raw sums across hundreds of instances were meaningless until we normalized per-instance. Same principle.
+
+Alex: Same principle. Next step after scaling is masking. During generation — when the model is producing text one token at a time — a token can't look at future tokens that haven't been generated yet. So you set those positions to negative infinity, which softmax turns into zero probability.
+
+Jenny: That's just enforcing causality. Like a stream processor that can only see events up to the current offset.
+
+Alex: Right, the causal mask. Then softmax runs and you get your probability distribution. For "it," you might end up with 70% on "bank," 20% on "river," and 10% spread across everything else.
+
+Jenny: And then you use those probabilities to do a weighted sum of the Value vectors?
+
+Alex: Exactly. The output for "it" becomes 0.7 times bank's Value, plus 0.2 times river's Value, plus small contributions from everything else. And here's the thing people miss — the output is not the word "bank." It's a brand new vector that has absorbed proportional context from every token in the sequence. The model never makes a binary choice. It always carries forward a weighted blend.
+
+Jenny: That's actually really different from how I was thinking about it. I was picturing a hard routing decision — request goes to one backend. But this is more like a scatter-gather where you query every backend and blend the responses.
+
+Alex: That's a much better analogy. It's scatter-gather with weighted aggregation. Every token queries every other token, and the response is a blend proportional to relevance. No hard routing at all.
+
+Jenny: Okay, let's talk about the actual mechanics. Where do these Q, K, V vectors come from physically?
+
+Alex: Each token starts as an embedding vector — a list of numbers, maybe 12,288 dimensions for a large model. To produce Q, K, and V, you multiply that vector by three separate learned weight matrices. W_Q, W_K, W_V. Each one is a big grid of numbers — d_model by d_head — discovered during training through gradient descent.
+
+Jenny: So the model learns during training what makes a good Query, what makes a good Key, and what makes a good Value, all independently.
+
+Alex: And here's the kicker — every layer has its own independent set of W_Q, W_K, W_V matrices. So the same token gets projected differently at every layer. Early layers might learn syntactic relationships — subject-verb agreement. Later layers might learn semantic relationships — coreference resolution like our "it" example.
+
+Jenny: That's like having different routing policies at different stages of a processing pipeline. Layer one routes on syntax, layer twenty routes on meaning.
+
+Alex: Exactly. Now let's talk about the infrastructure cost, because this is where it gets real for anyone running inference at scale. Every token you've already generated — you need its K and V vectors available for every new token to attend to. You could recompute them from scratch at each step, but that's like rebuilding your routing table on every request.
+
+Jenny: So you cache them.
+
+Alex: You cache them. This is the KV cache, stored in GPU HBM — the GPU's main memory, typically 80 gigs on an A100 or H100. For a model like GPT-3, each token's KV cache entry is about 4.7 megabytes. That's two vectors per head, times 96 heads, times 96 layers, times two bytes for FP16.
+
+Jenny: Wait. 4.7 megabytes per token? So a 100K context window is...
+
+Alex: About 470 gigabytes just for the KV cache. Not the model weights, not the activations. Just the cached keys and values.
+
+Jenny: That's six A100s worth of memory just for cache. That's insane. So long-context serving isn't a compute problem, it's a memory problem.
+
+Alex: It is fundamentally a memory capacity and memory bandwidth problem. And this is exactly why techniques like GQA — grouped query attention — and MQA — multi-query attention — exist. They share K and V across attention heads to shrink that cache. But we'll get deep into those in the multi-head attention episode.
+
+Jenny: Okay, one more thing. You mentioned that the industry converged on causal decoder-only models — this one-directional attention. But there were bidirectional models like BERT that could look at future tokens too. What happened?
+
+Alex: Three things compounded. First, data scaling. Next-token prediction works on any raw text — no labels needed. Your training data is effectively unlimited. Encoder-decoder models need paired data or specialized training objectives. Second, architectural subsumption — with enough context length, a decoder-only model can do any sequence-to-sequence task by just concatenating input and output. The encoder-decoder split doesn't buy you anything you can't replicate. And third — the one that matters most for infrastructure people — serving simplicity. One model, one KV cache shape, one forward pass. At production scale, that simplicity dividend is enormous.
+
+Jenny: That sounds like the same reason everyone converged on HTTP REST over specialized protocols. The generalist wins when you're operating at scale because operational simplicity compounds.
+
+Alex: That's a perfect analogy. The best architecture isn't always the most theoretically optimal one — it's the one that scales operationally.
+
+Jenny: Alright, so looking ahead — we've got these Q, K, V projections running attention for a single head. But you mentioned multi-head attention, where you have dozens of these running in parallel. What's the point of that?
+
+Alex: Think about it this way — one attention head can only learn one type of routing policy. But language has syntax, semantics, positional relationships, coreference, all happening simultaneously. Multi-head attention gives you independent routing policies running in parallel, each specializing in a different aspect. And that's where the real cost and optimization story begins — because every head means more K and V to cache.
+
+Jenny: And that's where GQA, MQA, and all the KV cache optimization techniques come in — which is directly where inference infrastructure meets model architecture.
+
+Alex: Exactly. That's next time. The attention mechanism we covered today is the core engine. Everything else — multi-head, KV cache management, PagedAttention, prefix caching — it all builds on understanding these three projections and why they're separate. Get Q, K, V right, and the rest of inference infrastructure snaps into focus.
+
+Jenny: I love that this whole thing maps so cleanly to routing and caching patterns we already know. Query is request metadata, Key is the service advertisement, Value is the response payload, and the KV cache is just... a cache. It's content-based routing with scatter-gather aggregation and a really expensive cache.
+
+Alex: And the entire field of inference optimization is basically figuring out how to make that cache cheaper and that routing faster. See you next time.

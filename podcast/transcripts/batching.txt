@@ -1,49 +1,55 @@
-Alex: So today we're talking about continuous batching, and honestly, this is the single biggest throughput improvement in modern LLM serving. But before we get there, we need to understand why inference is such a weird scheduling problem.
-
-Jenny: Okay, set it up for me. What makes it weird?
-
-Alex: So when an LLM processes your request, it happens in two completely different phases. First is prefill — the model reads your entire input prompt in one shot, all in parallel, one forward pass. That's fast per token but it hammers the GPU. Then comes decode, where it generates output one token at a time. You can't generate token five until you know token four. It's sequential, it's slow, and it's mostly just loading model weights from memory rather than doing heavy math.
-
-Jenny: So prefill is compute-heavy and decode is memory-bandwidth-heavy. And different requests need wildly different numbers of output tokens, right?
-
-Alex: Exactly. A classification might need five tokens. A detailed explanation might need eight hundred. And that's where naive batching completely falls apart.
-
-Jenny: What's naive batching doing wrong?
-
-Alex: Picture this — you collect 32 requests, process them all together, and wait until every single one finishes before accepting new work. Now imagine 31 of those requests finish in 20 tokens, but one request runs to 500 tokens. Your GPU is sitting there serving one request for 96% of the batch's runtime. Utilization drops to like 30 or 40 percent.
-
-Jenny: Oh, that's painful. Every new request in the queue is just sitting there waiting for that one slow request to finish.
-
-Alex: Right. And here's the analogy I love. Naive batching is a charter bus — it drives to every passenger's final destination before it goes back to pick up new people. Continuous batching is a city bus. It drops passengers at each stop and immediately picks up new riders. The bus is always full.
-
-Jenny: That's a great mental model. So how does continuous batching actually work mechanically?
-
-Alex: At the end of every single decode step — and we're talking every five to fifty milliseconds — the scheduler wakes up and asks two questions. First, did any sequences just hit their end-of-sequence token? If so, free those slots immediately. Second, are there requests waiting in the queue? If there's enough memory, admit them into the freed slots right now.
-
-Jenny: So the batch composition is changing at every single decode step?
-
-Alex: Every single one. A five-token request is in and out in five steps. A 500-token request occupies its slot for 500 steps but it never blocks the short requests. GPU utilization jumps to 80, 90 percent or higher.
-
-Jenny: Wait, so what's actually constraining the scheduler? It can't just admit infinite requests.
-
-Alex: Two things. First is KV cache memory. Every active sequence holds pages of key-value cache in GPU high-bandwidth memory. Each new token generated adds to that cache. If you admit too many sequences, you run out of HBM. Second is compute — beyond a certain batch size, the GPU is saturated and adding more sequences doesn't help.
-
-Jenny: That sounds exactly like bin-packing in EC2 Auto Scaling. You're fitting requests into available GPU memory instead of fitting instances into capacity pools.
-
-Alex: That's precisely the right analogy. The bin size is measured in HBM bytes, the items are KV cache pages, and the SLA is time to first token and time between tokens instead of CPU utilization.
-
-Jenny: So what happens if the scheduler guesses wrong and a request grows way longer than expected?
-
-Alex: Preemption. The scheduler can swap that sequence's KV cache out to CPU RAM, free up the GPU slot, and restore it later. But here's the thing — this is basically OS virtual memory paging. And in practice, swap-based preemption is rarely used at scale.
-
-Jenny: Why not?
-
-Alex: The math is brutal. For a model like LLaMA-3 70B, a ten-thousand-token sequence has about 3.3 gigabytes of KV cache. Even on PCIe 5.0, swapping that takes around 50 milliseconds — that's one or two full decode steps. A round trip is over 100 milliseconds. So vLLM actually defaults to recompute preemption — just drop the KV cache and re-run prefill when rescheduled. In production, the real strategies are admission control to reject before you hit out-of-memory, architectural tricks like grouped-query attention to shrink the KV footprint, or FP8 quantization of the KV cache to cut memory in half.
-
-Jenny: So preemption exists as a safety valve for unexpected spikes, not as a steady-state strategy.
-
-Alex: Exactly. Continuous batching was introduced by the Orca paper in 2022, then vLLM combined it with PagedAttention in 2023, and together those two ideas are why LLM serving costs dropped dramatically. Every major serving engine implements continuous batching as the baseline now.
-
-Jenny: It's one of those ideas that seems obvious in hindsight but completely changes the economics.
-
-Alex: That's the best kind of engineering insight.
+Alex: So Jenny, I want to start today with something you already live and breathe — capacity management. Imagine you're running an EC2 fleet, and you've got a mix of requests coming in. Some take 50 milliseconds, some take 10 seconds. How do you batch those?
+Jenny: I mean, you don't batch them together naively. You'd never hold a fleet hostage waiting for the slowest request. That's like... basic queue management.
+Alex: Right. And yet, that's exactly how early LLM serving worked. They literally waited for the slowest request in a batch to finish before processing anyone else.
+Jenny: Wait, seriously? That's like running a charter bus — you load everyone up, drive to every single destination, and nobody can get off until the last person is dropped off.
+Alex: That is the exact analogy. And to understand why they did it that way — and why fixing it was so hard — we need to talk about what makes LLM inference fundamentally different from normal request serving. There are two phases, and they have completely different resource profiles. The first is called prefill. When a user sends a prompt, the model processes every single input token in parallel, in one big forward pass. It's compute-heavy, it's bursty, but it's fast because everything happens at once.
+Jenny: That sounds like a burst of CPU at instance launch — you're doing a bunch of work upfront to get the instance warm.
+Alex: Exactly. And then comes decode. This is where the model generates output tokens one at a time. You literally cannot generate token five until you know token four. It's sequential. And here's the weird part — each decode step is mostly just loading model weights from memory, not doing heavy math. It's memory-bandwidth-bound, not compute-bound.
+Jenny: Oh, so prefill is like a compute-intensive launch, and decode is like a long-running I/O-bound process that's just... sitting there reading from memory over and over.
+Alex: That's a solid way to think about it. Now here's where the scheduling problem gets brutal. Different requests generate wildly different numbers of output tokens. One user asks "is this email spam?" — that's maybe 5 tokens. Another asks "explain quantum computing in detail" — that could be 800 tokens.
+Jenny: And in naive batching, you've packed them into the same bus.
+Alex: Right. So let's say you have a batch of 32 requests. 31 of them finish in 20 tokens. One of them runs to 500 tokens. What happens?
+Jenny: The GPU is basically serving one request for... what, 96% of the time? While 31 slots sit completely empty.
+Alex: Exactly. GPU utilization drops to maybe 30 or 40 percent. And every new request sitting in the queue behind this batch? They're waiting for that one slow request to finish. It doesn't matter if the new request only needs 3 tokens — it's stuck.
+Jenny: That's horrific. That's like having a scaling group with 32 instances and 31 of them are idle because you won't release them until the last long-running job finishes. No capacity planner would accept that.
+Alex: Nobody should accept it. And that's why continuous batching changed everything. It is the single most important throughput improvement in modern LLM serving. Here's how it works. At the end of every single decode step — and we're talking every 5 to 50 milliseconds — the scheduler wakes up and asks two questions. First: did any sequences just generate an end-of-sequence token? If so, free those slots immediately. Second: are there requests waiting in the queue? If there's memory available, admit them into the freed slots right now.
+Jenny: So the batch composition is changing at every single decode step? Every 5 to 50 milliseconds you're reshuffling who's in the batch?
+Alex: Every single step. A request that only needed 5 output tokens? It's gone in 5 steps, and its GPU memory is immediately handed to a new request. A 500-token request sits in its slot for 500 steps, but it never blocks anyone else.
+Jenny: OK, so going back to the bus analogy — this is a city bus. It stops at every block. Passengers get off when they reach their stop, new passengers get on at that same stop. The bus is always full.
+Alex: Always full. And that takes GPU utilization from 30-40% up to 80-90% or higher.
+Jenny: That's a massive jump. But hang on — before we move on, I want to make sure I understand the metrics we're optimizing here, because I've heard these acronyms thrown around and I want to nail them down.
+Alex: Yeah, let's do that because these come up constantly. There are four that matter. TTFT — Time To First Token. This is how long from when a user hits send until the first token starts streaming back. It's dominated by the prefill phase. Users feel this as "how long until it starts responding."
+Jenny: So that's like time-to-first-byte in HTTP. The responsiveness metric.
+Alex: Exactly the same concept. Then there's TBT — Time Between Tokens. Once you're streaming, how smooth is it? Are tokens arriving every 30 milliseconds or every 200 milliseconds? Users feel this as the speed of the response appearing on screen.
+Jenny: That's streaming throughput. Like the bitrate of a video stream — you notice when it stutters.
+Alex: Perfect. Then E2E latency is just the total wall-clock time from submission to the last token. That's TTFT plus output length times TBT. And finally, throughput — total output tokens per second across all users. This is the one that determines your cost per query, your capacity planning, your business economics.
+Jenny: So continuous batching is primarily a throughput play, right? You're packing more useful work onto the GPU per second.
+Alex: Throughput primarily, yes. But it also helps TTFT because new requests aren't stuck waiting behind a slow batch anymore. They get admitted as soon as there's a free slot.
+Jenny: OK, so I love the city bus analogy, but I want to dig into the scheduler because that's where my brain goes. You said it runs every decode step and decides who gets in. What constraints is it solving against?
+Alex: This is where your EC2 expertise maps perfectly. The scheduler is solving a real-time bin-packing problem under two simultaneous constraints. First — and this is the big one — KV cache memory. Every active sequence holds pages of KV cache in GPU high-bandwidth memory, or HBM. And each new token generated by each sequence makes that KV cache bigger. The total across all active sequences cannot exceed available HBM.
+Jenny: So KV cache is like a warm instance pool. You're keeping pre-computed state around so you don't have to redo work on every decode step. And HBM is your capacity pool — fixed size, can't exceed it.
+Alex: That's exactly right. And the second constraint is compute. Larger batches mean more tokens to process per decode step. Beyond a certain batch size, the GPU is saturated — adding more sequences doesn't help throughput, it just adds latency.
+Jenny: So you're balancing memory pressure against compute efficiency. That's literally the same tradeoff I deal with in auto scaling — you can't just pack instances until you hit memory limits, because CPU saturation kills you first. Or vice versa.
+Alex: Exactly the same problem, just measured in different units. Your bin size is HBM bytes, your items are KV cache pages, and your SLA is TTFT and TBT rather than CPU utilization targets.
+Jenny: OK, but what happens when you get it wrong? What if you admit too many requests and a few of them generate way more tokens than expected and you're about to blow your memory budget?
+Alex: Great question. The scheduler can preempt. It saves the KV cache of a request to CPU RAM, frees the HBM slot for other requests, and restores that sequence later when memory permits.
+Jenny: That's literally OS virtual memory paging. You're swapping pages to a slower tier of storage.
+Alex: It is literally the same mechanism. But here's the thing — and this is where the numbers get interesting. Let me give you concrete figures for LLaMA 3 70B. The KV cache per token works out to about 320 kilobytes. A 10,000-token sequence? That's 3.3 gigabytes of KV cache.
+Jenny: 3.3 gigs for one sequence? That's a huge chunk of GPU memory for a single request.
+Alex: Huge. And swapping that to CPU over PCIe 5.0 at 64 gigabytes per second takes about 51 milliseconds. A round trip — swap out plus restore — is 100 milliseconds minimum. That's roughly 2 to 3 decode steps you've burned just on the swap.
+Jenny: So preemption is expensive. It's not free like context switching on a CPU.
+Alex: Not free at all. And this is why production systems almost never use swap-based preemption as a steady-state strategy. vLLM V1 actually defaults to something called recompute preemption — instead of swapping the KV cache to CPU, it just drops it entirely and re-runs prefill when that request gets rescheduled.
+Jenny: Wait, you throw away all that computed state and just redo it?
+Alex: For moderate-length sequences, recomputing prefill is actually cheaper than the PCIe round-trip. And CPU memory itself becomes a bottleneck under sustained load — if you're swapping dozens of sequences, you saturate CPU RAM fast.
+Jenny: So what do production systems actually do when KV cache pressure gets too high?
+Alex: Four main strategies, and you'll recognize all of them. One — admission control. Reject new requests before you OOM, don't let the bus get overloaded. Two — use model architectures like GQA or MLA that shrink the per-token KV footprint. Three — FP8 KV quantization, which cuts KV memory in half. And four — just cap the maximum sequence length. True swap preemption is a fallback for unexpected spikes, not how you run day-to-day.
+Jenny: That's so parallel to how we handle capacity in EC2. You don't rely on swapping instances to Spot when On-Demand runs out as your primary strategy. You set capacity limits, you right-size your instances, you use admission control at the load balancer. Preemption is your emergency valve, not your operating model.
+Alex: That's the exact right mental model. And I should mention — continuous batching, also called iteration-level scheduling, was first introduced by a system called Orca in 2022. Then vLLM came along in 2023 and combined continuous batching with PagedAttention — which is the paged memory management for KV cache — and together, those two ideas are the reason LLM serving costs dropped dramatically. Every major serving system today — SGLang, TensorRT-LLM, NVIDIA Dynamo — implements continuous batching as a baseline. It's table stakes now.
+Jenny: It went from breakthrough to baseline in about a year. That's fast even by ML standards.
+Alex: Because the improvement is so dramatic. Going from 30% GPU utilization to 80-90% is not an incremental gain. That's a 2-3x cost reduction overnight.
+Jenny: OK, so looking ahead — we've got the bus running efficiently now, always full, picking up and dropping off. But I'm already thinking about the next problems. If prefill is this big bursty compute phase that happens when you admit a new request into the batch, doesn't that disrupt all the decode work happening for existing requests?
+Alex: That is exactly the next problem, and it leads directly to something called chunked prefill — which is essentially admission control for bursty workloads. Instead of running a massive prefill all at once and spiking latency for everyone else in the batch, you break it into smaller chunks and interleave it with decode steps.
+Jenny: Rate limiting the new request so it doesn't starve existing ones. I love that.
+Alex: And beyond that, we need to talk about how the KV cache itself is managed — PagedAttention, which is the virtual memory system that makes continuous batching practical at scale. Without paged memory management, you get fragmentation, you waste HBM, and your effective batch size drops.
+Jenny: So continuous batching is the scheduling policy, and PagedAttention is the memory allocator that makes the scheduling policy work. Like... continuous batching is the auto scaler, and PagedAttention is the capacity provider.
+Alex: That is a beautiful way to put it. We'll dig into both of those next time.

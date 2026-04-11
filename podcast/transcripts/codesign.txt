@@ -1,49 +1,87 @@
-Alex: So here's something that's fundamentally changed in how frontier AI labs work. Model architecture and hardware used to be totally separate concerns. You'd design a model to score well on benchmarks, then figure out how to serve it later. That separation is basically dead now.
+Alex: So Jenny, I want to ask you something. When you were designing auto scaling policies at AWS, did you ever design the scaling policy first and then figure out what instance types you'd run on later?
 
-Jenny: Wait, what do you mean dead? Like, the people designing the model are now thinking about the GPUs it'll run on?
+Jenny: God no. That would be insane. The whole policy depends on the instance — how fast it boots, how much capacity it adds, what the cost curve looks like. You design them together.
 
-Alex: Exactly. It's called co-design. You're designing the model architecture, the training process, and the serving infrastructure as one integrated system. And there's a really clean public example of this — Kimi K2 from Moonshot AI.
+Alex: Right. So here's what's wild about the history of AI research. For basically a decade, people designed model architectures to maximize benchmark scores, and then figured out how to serve them later. Like designing your scaling policy in a vacuum and hoping it works on whatever hardware shows up.
 
-Jenny: Okay, what did they do?
+Jenny: That sounds like it worked fine until it didn't.
 
-Alex: They deliberately reduced the number of attention heads and made the attention dimension a bit smaller. But at the same time, they increased the total number of experts in their mixture-of-experts setup while keeping the number of active experts per token the same. So more experts overall, but same compute per token from the expert side.
+Alex: Exactly. And the "didn't" moment is basically now. Frontier labs — the ones building the biggest models — have completely abandoned that separation. They're now designing the model architecture, the hardware target, and the serving infrastructure as one integrated system. They're calling it co-design, and it's fundamentally changing what inference infrastructure looks like.
 
-Jenny: That sounds like a weird tradeoff. Why would fewer attention heads be a good thing?
+Jenny: Okay, I get the principle. But give me something concrete. What does a co-design decision actually look like in practice?
 
-Alex: This is where it gets beautiful. Attention scales quadratically with context length. So if you're processing 128,000 tokens and you have 64 attention heads instead of 32, you're doing twice the attention work — and that cost is growing with the square of the sequence length. It gets expensive fast.
+Alex: Perfect example. Moonshot AI released a model called Kimi K2 in 2025, and they did something unusual — they actually published a blog post explaining why they made a specific architectural tradeoff. They deliberately reduced the number of attention heads in the model.
 
-Jenny: Oh, so at long contexts, attention becomes the bottleneck.
+Jenny: Wait, attention heads are the core compute mechanism, right? That's like saying "we deliberately reduced the number of engines on our plane."
 
-Alex: Exactly. Now contrast that with MoE experts. Each expert does a fixed amount of compute per token regardless of how long the sequence is. So adding more experts increases the model's knowledge capacity without making it more expensive as context grows.
+Alex: Great instinct, but here's where it gets interesting. They didn't just remove capacity — they moved it. They reduced attention heads and simultaneously increased the number of experts in their mixture-of-experts setup. Same total model knowledge, but distributed differently. And the reason comes down to one thing: how each mechanism scales with context length.
 
-Jenny: So they're basically shifting the model's capacity away from the thing that gets expensive at long contexts and toward the thing that stays cheap. That's clever.
+Jenny: Okay, you need to unpack that. Why does it matter which mechanism holds the knowledge?
 
-Alex: That's co-design in a nutshell. They're not just asking "what architecture scores best on benchmarks." They're asking "what architecture gives us the best performance per dollar at the context lengths our users actually need."
+Alex: Because attention and experts have completely different cost curves. Think about it like two different AWS resource types. Attention scales quadratically with context length. If your sequence is twice as long, attention doesn't cost twice as much — it costs four times as much. It's O(n²).
 
-Jenny: Okay, so attention heads is one dimension. What else is being co-designed?
+Jenny: That's like... okay, that's like cross-AZ traffic in a mesh topology. Double the nodes, quadruple the connections.
 
-Alex: Three things simultaneously. First is model architecture — head count, layer count, expert sparsity, whether you use MLA or GQA or standard multi-head attention. Second is the hardware target. If you know you're deploying on H100s with FP8 support, you can train the model specifically for FP8 from the start and get roughly a two-times compute speedup at inference. You're not retrofitting quantization after the fact.
+Alex: That's actually a perfect analogy. Every token has to attend to every other token, just like every node in a full mesh has to talk to every other node. Now, experts are completely different. Each expert processes a fixed amount of compute per token regardless of how long the sequence is. It's constant cost per token. More like a stateless microservice — doesn't matter how many requests came before yours, your request costs the same to process.
 
-Jenny: So the model is literally trained knowing what GPU it'll run on.
+Jenny: Oh. So they're literally reshaping the cost curve of the model. Moving capacity from the quadratic mechanism to the constant-cost mechanism.
 
-Alex: Right. And the third dimension is context and harness — the expected context lengths in production, the tool-calling schema, the agentic workflows. A model trained with the specific harness it'll use in production learns to use tools more efficiently than one that has to adapt at inference time.
+Alex: Exactly. And think about what that means at their target context lengths. Kimi K2 is designed for 128k token contexts. At that length, if you have 64 attention heads instead of 32, you're not just doing twice the work — you're doing twice the work at 128,000 squared scale. The absolute compute difference is enormous. But swapping that capacity into more experts? The experts don't care if you're at 1k tokens or 128k tokens. Same cost.
 
-Jenny: That makes sense. Okay, I want to go back to something. You said attention scales quadratically. Is that why context length seems stuck at around a million tokens?
+Jenny: So the decision of "how many attention heads should this model have" isn't a research question anymore. It's a serving economics question.
 
-Alex: Yes! Context length has basically stalled near one million tokens for about two years now. And the reason is exactly that quadratic compute cost. FlashAttention solved the memory problem — attention used to be quadratic in both compute and memory, now it's just compute. But the compute is still unavoidably quadratic.
+Alex: That is the key mental shift. You answer that question by looking at: what's our target context length distribution in production, what's our expected request volume, and what does the serving cost per request look like under different head counts. It's capacity planning. It's infrastructure economics.
 
-Jenny: So going from one million to ten million tokens would mean...
+Jenny: Hang on though. You said they keep the number of activated experts per token constant, but they increase the total number of experts. Why? If only the same number fire per token, what does having more total experts buy you?
 
-Alex: About a hundred times more attention computation. It's just not feasible on current hardware.
+Alex: Knowledge capacity. Think of it like having a bigger fleet of specialized instance types. On any given request, you still route to the same number of instances — say, eight. But if your fleet has 256 instance types instead of 64, you can have much more specialized instances. Each one is an expert at a narrower domain. The per-request cost is the same, but the total knowledge the system can express is much larger.
 
-Jenny: So what are labs doing about it?
+Jenny: That's sparse activation. You're paying for breadth of capability without paying for it on every single request.
 
-Alex: Exactly what co-design would predict. They're reducing attention heads and replacing that capacity with things that scale linearly — more MoE experts, state space model layers like Mamba, or hybrid architectures that only use attention selectively at certain layers instead of everywhere.
+Alex: Exactly. And this is why the tradeoff works — fewer attention heads cuts your context-scaling cost, more sparse experts maintains or even increases your knowledge capacity, and the serving bill goes down at long contexts. It's not a compromise. It's a genuine Pareto improvement, but only if you design for it from the start.
 
-Jenny: So the hardware constraint is literally reshaping model architecture at the frontier.
+Jenny: Okay so that's the model architecture dimension. You said there are other dimensions being co-designed simultaneously?
 
-Alex: And that's the key mental shift here. The question "how many attention heads should this model have" is no longer a pure research quality question. It's an infrastructure economics question. You answer it by analyzing serving cost at your target context length distribution, multiplied by expected request volume. It's fundamentally a capacity planning problem.
+Alex: Two more, and they're just as important. The second is hardware target. Frontier models are now designed for a specific GPU generation. If you're training on H100s and you know you'll serve on H100s, you design the model to use FP8 natively — because H100 Tensor Cores have native FP8 support that gives you roughly two-times compute throughput. You also design your parallelism strategy around NVLink topology specifically, rather than trying to be hardware-agnostic.
 
-Jenny: That's wild. So if you're an infrastructure engineer working on AI serving, you're not just downstream of the model team anymore. You're part of the design conversation from day one.
+Jenny: So it's like writing your application to exploit specific EC2 instance features — placement groups, EBS optimized paths, Nitro offloads — instead of writing generic code and hoping the instance is fast enough.
 
-Alex: That's exactly right. And that's what makes this field genuinely different from classical systems work. The model and the infrastructure aren't separate artifacts anymore — they're one system, designed together.
+Alex: Exactly right. A model trained specifically for FP8 on H100 will have learned to be robust to that precision level during training. You don't lose quality at inference because the model never knew anything different. Versus taking a model trained in BF16 and quantizing it to FP8 after the fact — that's a lossy conversion.
+
+Jenny: What's the third dimension?
+
+Alex: Context and harness. This is the sneaky one. Labs are now training models with the specific tool-calling schemas and agentic workflows the model will actually use in production. The model learns during training how to optimally use its tools, rather than adapting to them at inference time.
+
+Jenny: Oh, that's interesting. So instead of training a general-purpose model and then prompt-engineering it to use your tool format...
+
+Alex: You bake the tool format into training. The model learns the schema, learns when tools are useful, learns how to format calls efficiently. It improves both quality and efficiency — fewer wasted tokens on malformed tool calls, fewer retries, less prompt overhead.
+
+Jenny: Okay, I want to come back to something. You mentioned attention's quadratic cost is the reason context length has basically stalled at about a million tokens. But I thought FlashAttention solved the attention scaling problem?
+
+Alex: Common misconception, and an important one. FlashAttention solved the memory scaling problem. Standard attention used to require O(n²) memory to store the full attention matrix. FlashAttention computes attention tile by tile, so memory scales linearly. But the compute is still quadratic. You still have to calculate every pairwise attention score. FlashAttention just does it more efficiently, without materializing the full matrix in memory.
+
+Jenny: So FlashAttention is like... streaming a large dataset through a fixed-memory buffer instead of loading it all into RAM. You solved the memory wall, but you still have to process every byte.
+
+Alex: Perfect. And that's why we've been stuck near a million tokens for about two years. At a million tokens on a large model, attention already dominates compute. Going to ten million tokens would mean roughly a hundred times more attention computation. That's just not feasible on current hardware at any reasonable cost.
+
+Jenny: So what's the path forward? If you can't brute-force past the quadratic wall, what do you do?
+
+Alex: Exactly what co-design predicts. You replace attention at some layers with mechanisms that scale linearly — state space models like Mamba, or hybrid architectures that use attention selectively at only certain layers instead of every layer. You keep attention where it matters most and use cheaper alternatives elsewhere.
+
+Jenny: So the hardware constraint is literally shaping what model architectures look like at the frontier. The reason some models are hybrids isn't because researchers thought hybrids were elegant — it's because quadratic attention can't scale to the context lengths the market demands.
+
+Alex: That's it. And this is what makes infrastructure engineering for AI genuinely different from classical systems work. In traditional infrastructure, you pick the best available system and optimize around it. In AI inference, the system itself is being designed around your infrastructure constraints. The model architecture is the infrastructure decision.
+
+Jenny: So looking forward — where does this go?
+
+Alex: This is where it gets really exciting. The co-design trend means infrastructure engineers are now in the room when model architecture decisions are made. The next frontier is disaggregated inference — separating prefill and decode onto different hardware because they have fundamentally different compute profiles. And that's another co-design decision. If you know your model will run on a disaggregated system, you can design the architecture to exploit that split.
+
+Jenny: So we're heading toward a world where you can't really separate "model research" from "infrastructure engineering" at all. They're the same discipline.
+
+Alex: They're converging, fast. And for someone coming from infrastructure — understanding cost curves, scaling properties, hardware constraints — you're not behind. You're actually bringing exactly the mental models that matter most right now. The question "how many attention heads should this model have" is answered with the same thinking as "what instance type mix should this fleet use." Different domain, same engineering discipline.
+
+Jenny: I love that framing. Next time, we should dig into what disaggregated inference actually looks like in practice — prefill versus decode separation and why that split matters.
+
+Alex: Absolutely. And we'll talk about how that connects to the scheduling and routing problems we've covered before. Because once you split prefill and decode, you've got a distributed systems routing problem that would feel very familiar to anyone who's built request routing at scale.
+
+Jenny: Can't wait. See you next time.

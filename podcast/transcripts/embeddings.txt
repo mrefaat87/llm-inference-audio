@@ -1,27 +1,123 @@
-Alex: So today we're talking about embeddings — the very first thing that happens every single time a language model processes your text.
-Jenny: Okay, so before attention, before all the fancy stuff, embeddings come first?
-Alex: Exactly. Here's the problem they solve. A neural network only understands floating-point numbers — vectors of numbers. But your input is text, which gets broken into tokens, and each token is just assigned an integer ID. Like "bank" might be token 4521.
-Jenny: And you can't just feed that integer in directly, right? Because the model would think "bank" is thousands of times more important than "a" which might be ID 1.
-Alex: Exactly right. The ID is just a lookup key, it has no mathematical meaning. So the solution is you maintain this big learned lookup table called the embedding matrix. For GPT-3, it's 50,257 tokens by 12,288 dimensions. That's 617 million parameters just for this one table.
-Jenny: Wait, 617 million just for the lookup table? That's wild.
-Alex: Yeah, and here's the cool part — during training, tokens that appear in similar contexts naturally drift toward similar vectors. So "king" and "queen" end up near each other in this high-dimensional space.
-Jenny: Okay, so that gives each token its identity. But what about order? "Dog bites man" and "man bites dog" have the same tokens.
-Alex: That's where positional embeddings come in. There have been several approaches. The original transformer in 2017 used fixed sine and cosine waves. GPT-2 and BERT used a second learned lookup table — position zero gets one vector, position one gets another. But the approach that's basically won is called RoPE — Rotary Position Embeddings.
-Jenny: What makes RoPE special?
-Alex: Instead of adding a position vector to your token embedding, it rotates the query and key vectors in the attention layers by an angle proportional to position. The key insight is it encodes relative position, not absolute. So the model learns "these tokens are three apart" rather than "this token is at position 47."
-Jenny: Oh, that's clever — so it generalizes better when you extend the context window beyond what was seen in training?
-Alex: Precisely. That's why LLaMA, Mistral, Gemma — basically all the modern open models use RoPE. There's also ALiBi, which just adds a distance-based penalty to attention scores, but RoPE has become dominant.
-Jenny: Okay, so when do these embeddings actually get computed during inference? Like, walk me through the timeline.
-Alex: There are two distinct phases. First is prefill — you take the entire user prompt and embed every token in parallel. One big batch lookup. Then the model processes all of them in a single forward pass, computing all the key and value vectors that'll be needed later. This phase is compute-bound — the bottleneck is raw GPU arithmetic.
-Jenny: And then generation?
-Alex: That's the decode phase. You generate one token at a time. Each new token gets embedded right before its decode step, but that lookup is basically instant — it's just fetching one row from a table. Decode is memory-bandwidth-bound instead. The GPU's math units are actually sitting idle waiting for weights to load from memory.
-Jenny: So here's something I've wondered — during decode, do the previous tokens get re-embedded every step?
-Alex: No, and that's a really common misconception. Their embeddings were computed during prefill, and the K and V vectors derived from those embeddings are sitting in the KV cache being reused. Re-embedding would be completely wasteful. The only new embedding work per step is that one freshly generated token.
-Jenny: That makes sense — it's like the KV cache is doing for embeddings what a warm instance pool does for compute. You already paid the startup cost.
-Alex: Great analogy. Now, one more thing worth knowing — weight tying. Remember that 617 million parameter embedding table? The output layer of the model, which converts hidden states back into probabilities over the vocabulary, has essentially the same shape, just transposed. So some models share the same weights for both.
-Jenny: So you cut 617 million parameters for free?
-Alex: Almost free. It works because both layers are mapping between tokens and the same hidden space. The prediction score becomes the dot product of the hidden state with the token's input embedding, which is actually good regularization. But here's the catch — at large scale, it starts to hurt. The gradients from the output side are much larger and more frequent, so the shared matrix gets optimized primarily for output, degrading the input representations.
-Jenny: So small models tie, big frontier models untie?
-Alex: Exactly. GPT-2 ties them. LLaMA-3, Mistral, DeepSeek — they all untie at scale. It's one of those engineering tradeoffs where the right answer depends entirely on your model size.
-Jenny: I love that. The very first and very last layer of the model are almost mirrors of each other, and whether you literally make them the same weights is a scale-dependent decision.
-Alex: That's a perfect way to put it.
+Alex: So Jenny, I want to start today with something that seems almost too simple — but it's one of those things where if you don't understand it deeply, everything downstream in inference infrastructure gets confusing.
+
+Jenny: Okay, I'm ready. What's the deceptively simple thing?
+
+Alex: Embeddings. The very first operation in every single forward pass through a transformer. Before attention, before any of the fancy stuff — the model has to convert your text into something it can actually do math on.
+
+Jenny: Right, because neural networks operate on floating-point vectors, not strings. That much I know.
+
+Alex: Exactly. But here's where it gets interesting. By the time your text hits the model, the tokenizer has already chopped it into tokens and mapped each one to an integer ID. So "bank" might be token ID 4521. Now, can you just feed that integer straight into a matrix multiply?
+
+Jenny: I mean... it's a number. Why not?
+
+Alex: Because the model would think "bank" is 4521 times more important than "a," which might be token ID 1. The integer is just a lookup key — it's like an index into an array. It has no semantic meaning whatsoever. It's the same reason you wouldn't sort your EC2 instances by their instance ID string and assume the alphabetical order means something about capacity.
+
+Jenny: Oh, that's a good point. The ID is just an address, not a value.
+
+Alex: Exactly. So the solution is beautifully simple. You maintain a giant lookup table — the embedding matrix. It's shaped vocab size by d_model. For GPT-3, that's about 50,000 rows by 12,288 columns. Each row is a learned vector that represents one token. To embed a token, you just fetch its row.
+
+Jenny: Wait — so it's literally a lookup table? Like a hash map?
+
+Alex: It really is. Think of it like a DNS resolver. You hand it a domain name — or in this case, a token ID — and it hands back a rich, structured record. Except instead of an IP address, you get a 12,288-dimensional vector that encodes everything the model learned about that token during training.
+
+Jenny: Okay, and you said "learned" — these vectors aren't hand-designed, right?
+
+Alex: Not at all. They're trained. During training, tokens that appear in similar contexts end up with similar vectors. So "king" and "queen" end up close together in this high-dimensional space. And here's the fun part — "bank" the financial institution and "bank" the riverbank might start at the same vector, because they share the same token ID, but as the signal flows through the attention layers, the context will push them into completely different neighborhoods.
+
+Jenny: Hang on — I want to make sure I understand the scale here. You said GPT-3's embedding table is 50,257 by 12,288. How many parameters is that?
+
+Alex: About 617 million. Just for the embedding table. Before a single attention head, before a single layer of actual computation.
+
+Jenny: 617 million parameters just to convert tokens into vectors? That's like... a medium-sized model from a few years ago is just the front door of GPT-3.
+
+Alex: Right. And that's worth keeping in your head when you're thinking about memory budgets for serving. That table has to be loaded into GPU memory and it has to stay there for the life of the model.
+
+Jenny: Okay, so we've got these beautiful semantic vectors. But I'm thinking about something — if I say "dog bites man" versus "man bites dog," those are the same three tokens. The embedding table gives them the same three vectors. So how does the model know the order matters?
+
+Alex: And that's exactly why positional embeddings exist. The embedding table gives each token its identity — what it means — but says nothing about where it sits in the sequence. You need a second signal for position.
+
+Jenny: So what, you just add another vector on top?
+
+Alex: In the simplest case, yes. The original approach — used in GPT-2 and BERT — was literally a second lookup table. Position zero gets vector A, position one gets vector B, position two gets vector C. You train both tables together and then just add them element-wise. Token embedding plus position embedding equals the input to the first layer.
+
+Jenny: That feels almost too simple. What's the catch?
+
+Alex: The catch is it only works up to the maximum sequence length you trained on. If you trained with a max of 2,048 positions, position 2,049 has no learned vector. You're off the map.
+
+Jenny: Ah, so it's like having a fixed-size routing table. Works great until traffic exceeds what you provisioned for.
+
+Alex: Perfect analogy. And that limitation drove people to look for alternatives. The original 2017 transformer paper actually used sinusoidal positional embeddings — fixed mathematical formulas using sine and cosine at different frequencies. Not learned at all, computed analytically. And because they're mathematical, they can theoretically generalize to positions the model never saw during training.
+
+Jenny: So why didn't that win? Sounds strictly better.
+
+Alex: In practice, the generalization wasn't as clean as the theory suggested. What actually won — and this is what nearly every modern model uses — is RoPE. Rotary Position Embedding. And it works fundamentally differently from both approaches.
+
+Jenny: How so?
+
+Alex: Instead of adding a positional vector to the token embedding, RoPE rotates the query and key vectors at each attention layer by an angle proportional to their position. So position information gets baked directly into the attention score computation.
+
+Jenny: Wait — so it's not modifying the embedding at all? It's modifying how attention sees the tokens?
+
+Alex: Exactly. And the key insight is that it encodes relative position, not absolute position. The attention score between token at position 5 and token at position 8 depends on the difference — 3 — not on the absolute values 5 and 8. That's why it generalizes so well when you extend context windows beyond training length.
+
+Jenny: Oh, that's like the difference between using absolute timestamps versus time deltas in a distributed system. Absolute timestamps break when you cross clock domains, but deltas are always meaningful.
+
+Alex: That's a really clean way to think about it. There's also ALiBi — Attention with Linear Biases — which takes yet another approach. Instead of any positional vector or rotation, it just adds a penalty to attention scores based on distance. Tokens further apart get a bigger negative bias. Super simple, works well, but RoPE has largely won the popularity contest. LLaMA, Mistral, Gemma — they're all RoPE.
+
+Jenny: Alright, so we've got our tokens embedded with semantic meaning and position information baked in. Now I want to talk about when this actually happens during inference, because I know inference has these two distinct phases.
+
+Alex: This is crucial. There are two phases, and they have completely different computational profiles. First is prefill — also called prompt processing. You take the entire user prompt and embed every token in parallel. One big batch lookup against the embedding table, all at once. Then the model processes all those embeddings in a single forward pass, computing the key and value vectors for every token.
+
+Jenny: So prefill is like a bulk import — process everything upfront.
+
+Alex: Right. And it's compute-bound. The bottleneck is raw arithmetic throughput — how fast your GPU can crunch through all that math. Now decode — or generation — is completely different. You're producing one new token at a time. Each new token gets embedded individually before the next decode step. But that single embedding lookup is essentially free — it's just fetching one row from a table in memory.
+
+Jenny: If the embedding lookup is free during decode, what is the bottleneck?
+
+Alex: Memory bandwidth. During decode, you need to load the model weights from HBM to the compute units for every single token you generate. The GPU's arithmetic units are actually sitting idle most of the time, waiting for data to arrive. It's like having a massive factory floor with all the machines ready, but the conveyor belt bringing in raw materials is too slow.
+
+Jenny: So prefill is CPU-bound in GPU terms, and decode is I/O-bound. That's a really fundamental difference for how you'd design your serving infrastructure.
+
+Alex: Completely fundamental. And it's why some advanced serving architectures actually disaggregate these two phases onto different hardware — but that's a later episode.
+
+Jenny: Okay, one thing I want to make sure I understand. During decode, when you're generating token number 50, do you re-embed tokens 1 through 49?
+
+Alex: No. And this is a common misconception. During prefill, you embedded all the prompt tokens and computed their K and V vectors. Those K and V vectors are stored in the KV cache and reused for every subsequent decode step. You never re-embed a token. The only new embedding cost per decode step is for the single token you just generated.
+
+Jenny: So the KV cache is doing the work of avoiding redundant computation. It's like... you've already resolved the DNS for every domain in your prompt, cached the results, and now you only resolve new domains as they come in.
+
+Alex: That's exactly right. And that's why the KV cache is so important and why it dominates memory during long-context inference. But we'll get deep into that in a future episode.
+
+Jenny: Before we wrap the core content — you mentioned the embedding table is 617 million parameters for GPT-3. Is there any way to shrink that?
+
+Alex: Great question. There's a technique called weight tying. Remember the embedding table maps token IDs to vectors — shape vocab_size by d_model. Well, at the very end of the model, there's an output projection that does the reverse — it takes the final hidden state and produces a score for every token in the vocabulary. That matrix has shape d_model by vocab_size. It's the exact transpose.
+
+Jenny: Oh — so they're mirror images of each other?
+
+Alex: Semantically, yes. Both relate tokens to the same d_model-dimensional space. So some models — GPT-2 did this — just tie them together. Use the same weights for both, just transposed. Saves you 617 million parameters at GPT-3 scale.
+
+Jenny: Free lunch?
+
+Alex: Almost. It works beautifully at small to medium scale because it acts as a regularizer — it forces the embedding space to directly encode generation probability, which is a healthy constraint. But at large scale, it starts to hurt. The gradients from the output projection are much larger and more frequent than from the input embedding side. So the shared matrix gets shaped primarily to serve output prediction, and input representation quality degrades.
+
+Jenny: So it's like having a shared connection pool that works fine when traffic is moderate, but under heavy asymmetric load, one workload starves the other.
+
+Alex: Exactly. And there's a deeper geometric conflict — some tokens should be semantically similar, like synonyms close together in embedding space, but have very different generation probabilities. Tying can't optimize for both. That's why most frontier models today — LLaMA 3, Mistral, DeepSeek — untie their embeddings. They eat the extra memory cost for better quality.
+
+Jenny: So the architectural trend is: small models tie, big models untie.
+
+Alex: That's the pattern. Alright, let's talk about where all of this leads, because embeddings are just the front door.
+
+Jenny: Yeah, give me the trailer for what's coming.
+
+Alex: So now you've got these rich vectors — semantic identity plus positional information — flowing into the first transformer layer. And the very next thing that happens is attention. Every token gets to look at every other token and decide what's relevant. And that mechanism — the way queries, keys, and values interact — is where the real magic happens. It's also where the real infrastructure challenges start, because attention is quadratic in sequence length.
+
+Jenny: Quadratic. So doubling the context window quadruples the compute?
+
+Alex: For that component, yes. And that directly impacts your prefill latency, your memory footprint, your serving costs — everything. We're going to break down exactly how attention works, why multi-head attention exists, and what that means for how you design your serving stack.
+
+Jenny: I'm especially curious about the KV cache side of it, because you keep hinting that it's the memory bottleneck during serving.
+
+Alex: It absolutely is. The KV cache is to inference what the connection pool is to a database server — it's the resource that determines how many concurrent requests you can serve, and managing it well is the difference between a system that scales and one that falls over. That's all coming next.
+
+Jenny: Can't wait. Alright, that's embeddings — the front door to every transformer forward pass. See you in the next one.

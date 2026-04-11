@@ -336,7 +336,11 @@ _orpheus_model = None
 
 
 def _get_orpheus():
-    """Initialize Orpheus TTS model on first use. Uses F16 GGUF with Metal acceleration."""
+    """Initialize Orpheus TTS model on first use. Uses default Q4_K_M (~2 GB).
+
+    Q4_K_M is the orpheus-cpp default — small enough for 16 GB Apple Silicon without
+    triggering macOS memory pressure crashes. No manual model swap needed.
+    """
     global _orpheus_model
     if _orpheus_model is not None:
         return _orpheus_model
@@ -351,28 +355,10 @@ def _get_orpheus():
             "  pip install orpheus-cpp numpy scipy"
         )
 
-    # Download the F16 (non-quantized) GGUF for best quality
-    from huggingface_hub import hf_hub_download
-    print('  [orpheus] Downloading F16 GGUF model (first run only, ~6.6 GB)...')
-    f16_path = hf_hub_download(
-        "unsloth/orpheus-3b-0.1-ft-GGUF",
-        "orpheus-3b-0.1-ft-F16.gguf"
-    )
-    print(f'  [orpheus] Model cached at: {f16_path}')
-
-    # Initialize orpheus-cpp (this downloads the SNAC decoder on first run)
-    print('  [orpheus] Initializing model with Metal acceleration...')
+    # Use the default Q4_K_M model (~2 GB) — orpheus-cpp downloads it automatically
+    print('  [orpheus] Initializing model with Metal acceleration (Q4_K_M, ~2 GB)...')
     model = OrpheusCpp(n_gpu_layers=99, verbose=False, lang="en")
-
-    # Swap in the F16 model instead of the default Q4_K_M
-    import llama_cpp
-    model.llm = llama_cpp.Llama(
-        model_path=f16_path,
-        n_gpu_layers=99,
-        n_ctx=8192,
-        verbose=False,
-    )
-    print('  [orpheus] Ready (F16 model loaded with Metal offload)')
+    print('  [orpheus] Ready (Q4_K_M model loaded with Metal offload)')
 
     _orpheus_model = model
     return model

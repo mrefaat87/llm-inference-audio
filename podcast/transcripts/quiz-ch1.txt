@@ -1,0 +1,101 @@
+Alex: Alright Jenny, I want to try something different today. We've spent the last several episodes going deep on every building block of the transformer — tokenization, embeddings, attention, layers, parameters, MoE, number formats. And I think there's a trap people fall into after learning all of those individually.
+
+Jenny: Let me guess — they can define each concept in isolation, but if you ask them to trace a single request through the whole system end to end, they freeze up.
+
+Alex: Exactly. It's like knowing what every AWS service does from the docs page but not being able to architect a system that actually uses them together. So I want to run through some challenge questions — the kind of stuff that tests whether you actually internalized how these pieces connect.
+
+Jenny: I love it. Quiz me.
+
+Alex: Okay, here's the first one. You're capacity planning for a new model deployment. Someone hands you a model card that says "7 billion parameters, BF16 weights, 32,000-token vocabulary, 4,096 embedding dimension." How much GPU memory do you need just to load this thing?
+
+Jenny: Alright, let me think. 7 billion parameters, and BF16 means 2 bytes per parameter. So that's 14 gigabytes just for the weights. But wait — does that include the embedding table, or is the embedding table counted separately?
+
+Alex: Great instinct to ask. The embedding table is part of the 7 billion. The vocab size times the embedding dimension — 32,000 times 4,096 — that's about 131 million parameters just for the lookup table. It's already counted in the 7 billion total.
+
+Jenny: Okay, so 14 gigs for the model weights. But that's not all the memory I need, right? There's the KV cache for active sequences, there's the activations during the forward pass...
+
+Alex: Right. The weights are your fixed cost — like the base AMI size. The KV cache is your variable cost that scales with concurrent users. And this is where the number format choice cascades through everything. If you quantize those weights to INT4, suddenly your 14 gigs becomes 3.5 gigs. You've just freed up 10.5 gigs of HBM for KV cache, which means dramatically more concurrent sequences.
+
+Jenny: So the number format decision isn't just about the model fitting on the GPU. It directly determines your serving capacity — how many users you can handle simultaneously.
+
+Alex: Exactly. And here's the thing that trips people up: the KV cache entries are stored in a different format than the weights. You might have INT4 weights but FP16 KV cache, or INT4 weights with INT8 KV cache. Each combination gives you a different capacity profile.
+
+Jenny: That's like running different instance types in different tiers of your architecture. Your compute layer might be c5 instances, but your caching layer is r5 because the memory profile matters more there.
+
+Alex: Perfect. Okay, next question. You're debugging latency. A request comes in with a 500-token prompt and you need to generate a 200-token response. Walk me through exactly what happens — which stages are parallelizable and which are sequential.
+
+Jenny: Okay. First, the tokenizer converts the raw text into those 500 token IDs. That's CPU work, and it's fast — basically a dictionary lookup with merge rules.
+
+Alex: Good. Then what?
+
+Jenny: Then each token ID gets its embedding vector from the lookup table. And here's the thing — for all 500 input tokens, this is parallelizable. I can fetch all 500 vectors simultaneously because they don't depend on each other. It's like doing 500 independent cache lookups.
+
+Alex: Right. And that parallel processing continues through the entire prefill phase. All 500 tokens flow through every layer — attention, FFN, attention, FFN — but they all flow together because during prefill, you already know all the input tokens. It's batch processing.
+
+Jenny: But then you hit the generation phase and everything changes. Each new token depends on the previous one. You generate token 501, feed it back through the model to get token 502, feed that back to get 503. It's completely sequential.
+
+Alex: And this is why the distinction between TTFT — time to first token — and TBT — time between tokens — matters so much. The prefill of those 500 tokens is compute-bound because you're doing massive parallel matrix multiplies. But each decode step is memory-bandwidth-bound because you're doing a full model traversal for just one token.
+
+Jenny: Oh wait, I want to make sure I understand why decode is memory-bound. You're reading all 7 billion parameters — or 3.5 billion if you quantized — through the memory bus, but you're only producing a single token's worth of useful compute. That's a terrible ratio of memory reads to useful FLOPs.
+
+Alex: That's exactly it. And now connect that back to number formats. If you quantize from BF16 to INT4, you didn't just save memory — you cut the bytes that need to flow through the memory bus by 4x on every single decode step. So your decode throughput can theoretically improve by up to 4x, because you hit the memory bandwidth ceiling 4 times later.
+
+Jenny: So quantization isn't just a memory optimization. During decode, it's a latency optimization. That's... actually a bigger deal than I initially appreciated.
+
+Alex: Huge deal. Okay, let's shift gears. Here's one that's more architectural. Why does multi-head attention exist? Why not just one big attention mechanism?
+
+Jenny: Right, so from what we covered — attention is the load balancer that routes each token's query to the most relevant keys. If you only have one attention head, you've got one routing policy. One set of criteria for what counts as "relevant."
+
+Alex: And what's the problem with that?
+
+Jenny: Well, "relevant" means different things in different contexts. "The cat sat on the mat because it was tired" — "it" needs to match to "cat" based on semantic role, but it also needs to know "sat" based on syntactic structure, and "mat" based on spatial proximity. One attention head would have to blend all those criteria into a single routing decision. It's like having one load balancer that's trying to route by latency, by content type, and by geographic affinity all at once with a single scoring function.
+
+Alex: So what does multi-head attention actually do differently?
+
+Jenny: You split the embedding dimension across, say, 32 independent heads. Each head gets its own Q, K, and V projection matrices. So head one might learn to route based on syntactic relationships, head seven might specialize in coreference — pronouns pointing back to nouns — head twenty might track positional patterns. They're independent load balancers, each with their own routing criteria.
+
+Alex: And here's the part I think is subtle — you're not duplicating compute. Each head operates on a smaller slice of the embedding dimension. 4,096 dimensions split across 32 heads means each head works with 128-dimensional vectors. Same total compute, different structure.
+
+Jenny: Oh, so it's not like spinning up 32 full-size load balancers. It's more like partitioning your routing logic into 32 specialized slices that collectively cover the same bandwidth.
+
+Alex: Exactly. And then at the end, you concatenate all 32 heads' outputs back into a single vector and apply one more linear projection to blend them. The concatenation is lossless — you're not averaging or voting. You're reassembling the full picture from 32 specialized perspectives.
+
+Jenny: Okay, I have a question for you. We talked about MoE — Mixture of Experts — and how it's like having eight specialized instance types but only activating two per request. But here's what I want to understand: where does MoE actually fit in the layer architecture? Is it replacing attention?
+
+Alex: No, and this is a common misconception. MoE replaces the FFN — the feed-forward network, the second sub-system in each layer. Remember, the FFN is where two-thirds of the parameters live. It's the knowledge store. So with MoE, instead of one massive FFN, you have, say, eight smaller expert FFNs and a learned router that picks the top two for each token.
+
+Jenny: So the attention mechanism is untouched. Every token still attends to every other token the same way. It's just the compute-and-transform step afterward that becomes sparse.
+
+Alex: Right. And the infrastructure implications are wild. Mixtral 8x7B has 46.7 billion total parameters — that's your storage and memory footprint. But for any given token, only about 12.9 billion parameters are actually activated because only 2 of 8 experts fire. So you get the quality of a much larger model with the compute cost of a much smaller one.
+
+Jenny: That's literally capacity pooling. You provision for 8 instance types but your average utilization is 2. Your peak capacity is enormous but your per-request cost stays low. The trick is that the router has to be good enough that you're always sending each request to the right specialists.
+
+Alex: And if the router gets it wrong — if it keeps sending every token to the same two experts — you've got a hot-partition problem. Same as if your load balancer kept sending all traffic to two of your eight backends. The other six are wasted capacity.
+
+Jenny: So there's a load-balancing loss during training that penalizes uneven expert utilization?
+
+Alex: Exactly. They add an auxiliary loss term that nudges the router toward uniform distribution across experts. It's literally a fairness constraint on the routing policy. Same concept as bin-packing penalties in cluster schedulers.
+
+Jenny: Alright, one more thing I want to nail down. The layers themselves. GPT-3 has 96 of them, stacked sequentially. Why so many? What does layer 50 do that layer 3 doesn't?
+
+Alex: Think of it like a multi-stage processing pipeline. The early layers are doing surface-level stuff — syntactic patterns, local word relationships, basic grammar. Like the first few middleware stages in a request pipeline that handle parsing and validation. Middle layers start building semantic understanding — resolving ambiguity, connecting concepts across the sentence. The deep layers are doing abstract reasoning, long-range dependencies, factual recall.
+
+Jenny: So each layer refines the representation. The vector that represents "bank" after layer 3 is less nuanced than the vector representing "bank" after layer 50, because by layer 50, the model has had 50 rounds of attention and FFN processing to incorporate context.
+
+Alex: Right. And here's the key — the residual connections are what make this work. Every layer adds its output to its input. It's not replacing the representation at each stage, it's refining it. Like an image processing pipeline where each filter adds detail rather than replacing the image.
+
+Jenny: So if one layer doesn't contribute much for a particular input, the residual connection lets the signal pass through mostly unchanged. The layer can't make things worse.
+
+Alex: Exactly. And that's actually the insight behind early-exit inference and layer pruning. If the representation is already "good enough" after layer 60 for a particular request, why burn compute on layers 61 through 96? Some serving systems actually detect that and skip layers.
+
+Jenny: That's like short-circuiting your middleware pipeline when the request is simple enough that it doesn't need all the processing stages.
+
+Alex: Perfect analogy. Okay, looking ahead — everything we've covered in this chapter is the model at rest. The static architecture. What transforms a pile of weights on disk into a living inference system is all the infrastructure we'll cover next: the KV cache, continuous batching, PagedAttention, scheduling — that's where the model meets the serving system. And that's where your distributed systems intuition is going to be the biggest advantage, because the serving layer looks a lot more like the systems you've already built.
+
+Jenny: So we've basically learned the anatomy. Next chapter is the physiology — how it actually runs in production under real load, real concurrency, real memory pressure.
+
+Alex: Exactly. And I promise you, when we get to PagedAttention — which is literally virtual memory paging applied to the KV cache — you're going to feel right at home. It's one of those moments where the ML world independently reinvented something the OS world solved decades ago.
+
+Jenny: I can't wait. That sounds like it'll click immediately. Alright, if you're listening and any of those questions tripped you up, go back and relisten to the individual episodes. But honestly, if you followed the connected thread today — if you can trace a request from raw text through the tokenizer, into embeddings, through attention and FFN layers, and out the other side — you've got the foundation. Everything from here builds on that.
+
+Alex: And it only gets more fun from here.

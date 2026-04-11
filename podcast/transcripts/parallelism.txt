@@ -1,57 +1,91 @@
-Alex: So today we're tackling one of the most fundamental questions in inference infrastructure — when your model is too big for one GPU, how do you split the work?
+Alex: So Jenny, here's a question for you. You've got a service that's too big to fit on a single EC2 instance. What do you do?
 
-Jenny: Right, and there's not just one way to do it. There are like five different strategies?
+Jenny: I mean, that's day one distributed systems. You either shard it across multiple instances, or you put multiple copies behind a load balancer, or you break it into stages in a pipeline. Depends on the workload.
 
-Alex: Exactly five. And each one splits a completely different dimension. Let's start with the simplest — data parallelism. Imagine you have four identical copies of your model, each on its own GPU. A load balancer just sends different requests to different copies. No communication between them at all.
+Alex: Right. And that's literally the entire taxonomy of parallelism strategies for serving large language models. You just named three of the five. The interesting part isn't what the strategies are — it's why you'd pick one over another, and why the answer is different for inference than it is for training.
 
-Jenny: So it's literally just horizontal scaling. Like putting four EC2 instances behind an ALB.
+Jenny: Okay, so let's start with the easy one. Data parallelism — that's just the load balancer approach, right? N copies of the model, each handling different requests.
 
-Alex: That's exactly the analogy. It's dead simple, it scales throughput linearly, but it has one hard limitation — the full model has to fit on each GPU. So for a 7B or 13B model, perfect. For a 70B model? You need a different strategy.
+Alex: Exactly. You take the full model, replicate it onto four GPUs, and put a load balancer in front. GPU zero gets requests one and five, GPU one gets two and six, and so on. Zero communication between them. Each replica is completely independent.
 
-Jenny: Which brings us to tensor parallelism?
+Jenny: That's literally just an Auto Scaling group behind an ALB. I could set that up in my sleep.
 
-Alex: Yes, and this is the big one for inference. Instead of copying the model, you slice every weight matrix across GPUs. Say you have an 8,192 by 8,192 weight matrix and 8 GPUs — each GPU holds a thin slice, computes its portion of the matrix multiply, and then they all share results through something called an all-reduce.
+Alex: And that's the beauty of it. For models that fit on a single GPU — your 7B, your 13B parameter models — data parallelism is the move. Maximum simplicity, horizontal scaling, you already know how to operate it. But here's the thing — what happens when your model is 70 billion parameters and it physically cannot fit on one GPU?
 
-Jenny: Wait, so every single GPU is working on the same token at the same time?
+Jenny: Then I need to split the model itself across GPUs. So that's where sharding comes in — tensor parallelism?
 
-Alex: Exactly. That's the key insight. All eight GPUs cooperate on every forward pass. You get roughly an 8x speedup on per-token latency. Your TTFT drops, your time between tokens drops.
+Alex: Right. And this is where it gets interesting because there are two fundamentally different ways to split a model across GPUs, and they have completely different performance characteristics. Let me start with tensor parallelism because it's the one that actually matters for inference. Think about a single weight matrix — say the query projection in an attention layer. For LLaMA 70B, that's an 8,192 by 8,192 matrix. With 8-way tensor parallelism, you slice that matrix into eight vertical strips. Each GPU holds one strip — 8,192 by 1,024.
 
-Jenny: But there's a catch with the communication, right? How often do they need to sync up?
+Jenny: So every GPU has a piece of every layer. It's like sharding a database by column rather than by row.
 
-Alex: Two all-reduces per layer. One after the attention projection, one after the feed-forward network. For a model like LLaMA 70B with 80 layers, that's 160 all-reduces per forward pass.
+Alex: That's a great way to think about it. And here's the key — when a token comes in, all eight GPUs compute their slice of the matrix multiply simultaneously. GPU zero multiplies the input by its strip, GPU one by its strip, all at the same time. Each one produces a partial result. Then you need to combine those partials.
 
-Jenny: That sounds like it would be brutal on network bandwidth.
+Jenny: That's the all-reduce operation?
 
-Alex: It would be — if you're using regular networking. This is why NVLink is non-negotiable. At 900 gigabytes per second, those 160 all-reduces add up to about 3 microseconds total. Over InfiniBand at 50 gig per second? You're looking at 48 microseconds, and when your decode step is only 20 milliseconds, that starts eating into your latency budget. So tensor parallelism stays within a single node — one 8-GPU server connected by NVLink.
+Alex: Exactly. All-reduce means every GPU sends its partial result to every other GPU, and they all end up with the same combined sum. Think of it as a synchronized merge step — everyone shares their partial answer, everyone gets the full answer.
 
-Jenny: OK so what about pipeline parallelism? You split layers across GPUs sequentially — GPU one gets layers 1 through 24, GPU two gets 25 through 48, and so on?
+Jenny: Okay, but that communication has to happen at every single layer, right? How expensive is that?
 
-Alex: Right, and it seems elegant, but it has a fatal flaw for inference — pipeline bubbles. When GPU one is processing a token, GPUs two through four are sitting idle waiting for it. At a batch size of one, each GPU is idle 75% of the time.
+Alex: This is where the numbers get really important. For LLaMA 70B with 80 layers, you need two all-reduces per layer — one after the attention output projection and one after the feed-forward network. That's 160 all-reduces per forward pass for a single token.
 
-Jenny: Ouch. And it doesn't even reduce latency because the token still flows through every stage sequentially.
+Jenny: A hundred and sixty! That sounds like it would completely dominate your latency.
 
-Alex: Exactly. In training you can hide the bubbles with massive batch sizes, but inference batches are tiny. Pipeline parallelism is basically a last resort for inference — only when the model won't fit on even a fully NVLink-connected node.
+Alex: It would — if you were doing it over the network. Over InfiniBand at 50 gigabytes per second, each all-reduce takes about 0.3 microseconds. Multiply by 160 and you're at 48 microseconds of communication overhead per token. Doesn't sound like much, but when your decode step is only 20 milliseconds, that's real overhead that starts eating into your SLA. Now, over NVLink at 900 gigabytes per second — each all-reduce takes about 0.02 microseconds. Total overhead: about 3 microseconds. Completely negligible.
 
-Jenny: What about expert parallelism for MoE models?
+Jenny: So that's why tensor parallelism only works within a single node. You need that NVLink backplane. It's like — you wouldn't shard a database across availability zones if every query required a synchronous cross-shard join.
 
-Alex: This one's interesting. In a Mixture of Experts model, you distribute different experts across different GPUs. When the router picks which experts handle a token, that token gets shipped to whichever GPU holds its expert. The communication pattern is all-to-all, which is the most expensive collective operation because it's completely unpredictable.
+Alex: That is exactly the right analogy. The communication pattern is too frequent and too latency-sensitive to tolerate network hops. NVLink is like a dedicated backplane inside a placement group — it's a fundamentally different class of interconnect. And the payoff is massive: 8-way tensor parallelism means all eight GPUs work on every token together. Your forward pass runs roughly eight times faster. TTFT drops by 8x. Time between tokens drops by 8x. This is the primary tool for hitting low-latency SLAs.
 
-Jenny: And you get load imbalance problems too, right? If one expert is popular, that GPU gets hammered while others sit idle.
+Jenny: Okay, so if tensor parallelism is so good, why does pipeline parallelism even exist?
 
-Alex: That's the core operational challenge. If expert three keeps getting 30% of the tokens, that GPU is a bottleneck while others are underutilized.
+Alex: Great question. Pipeline parallelism splits the model by layers instead of within layers. GPU one holds layers 1 through 24, GPU two holds 25 through 48, and so on. A token flows through sequentially — GPU one processes it, passes the activations to GPU two, which passes to GPU three.
 
-Jenny: OK, last one — context parallelism. This is for those monster-length sequences?
+Jenny: That's a microservices pipeline. Service A processes the request, hands it to service B, which hands it to service C.
 
-Alex: Right, 128K, 512K, million-token contexts. You split the sequence itself across GPUs. The trick is ring attention — each GPU keeps its own Q chunk stationary and the K/V chunks rotate around a ring. After N minus one rotations, every GPU has seen all the K/V pairs and computed full attention for its range.
+Alex: Exactly. And it has the same fundamental problem that microservice pipelines have — what's every downstream service doing while the first service is processing?
 
-Jenny: And the transfer overlaps with computation, so you're not just sitting there waiting for data?
+Jenny: Sitting idle. Waiting for input. Oh — those are the pipeline bubbles.
 
-Alex: Exactly. While one GPU computes attention with the K/V it just received, the next chunk is already in flight. Minimal overhead.
+Alex: Right. With 4-way pipeline parallelism processing a single request, each GPU is idle 75 percent of the time. Three out of four time slots are just wasted. In training, you can hide this because you have enormous batch sizes — thousands of micro-batches flowing through the pipeline, so the bubbles at the start and end are a tiny fraction of total compute. But at inference, especially with small batches or single requests, those bubbles can eat 30 to 50 percent of your step time.
 
-Jenny: So in production, you're combining these. Like tensor parallelism within a node for low latency, then data parallelism across nodes for throughput?
+Jenny: And it doesn't even help with latency, does it? The token still has to travel through every stage sequentially.
 
-Alex: That's the most common combo. TP plus DP. You get your 8x latency reduction from tensor parallelism inside each server, then you replicate those servers and load-balance across them. For MoE models, you combine TP for the attention layers with expert parallelism for the FFN layers. And if you need long context, you layer on context parallelism across nodes.
+Alex: Exactly. A single token sees the same total compute time — maybe even slightly worse because of the hand-off overhead between stages. Compare that to tensor parallelism where all eight GPUs work on the same token at the same time. Pipeline parallelism is widely used in training, but for inference it's basically a last resort — only when your model is so large it can't fit on even a full 8-GPU NVLink-connected node.
 
-Jenny: It's really about matching the parallelism strategy to the bottleneck — latency, model size, sequence length, or expert distribution.
+Jenny: Got it. So TP is the go-to for inference. What about MoE models — those have a different structure, right?
 
-Alex: That's exactly the right framing. And knowing which combination to reach for in which situation — that's what separates infrastructure leaders from infrastructure engineers.
+Alex: They do, and they need their own strategy. Expert parallelism. In a Mixture of Experts model, you have maybe 256 expert FFN sub-networks, but each token only activates two of them. You distribute different experts across different GPUs. The challenge is that when the router picks experts for a token, that token needs to physically travel to whichever GPU holds its assigned expert.
+
+Jenny: So that's an all-to-all communication — every GPU potentially sending tokens to every other GPU.
+
+Alex: Right, and all-to-all is the most expensive collective operation in distributed ML because the communication pattern is unpredictable. With all-reduce, every GPU sends the same data. With all-to-all, it depends entirely on which experts the router selects. And here's the operational nightmare — popular experts become hot GPUs. If the router consistently sends 30 percent of tokens to expert three, that GPU is overloaded while other GPUs sit cold.
+
+Jenny: That's a hot partition problem. Same thing happens with database sharding when one shard key is way more popular than the others.
+
+Alex: Exactly the same problem, exactly the same headache. Load imbalance in expert parallelism is a real production challenge.
+
+Jenny: Okay, so we've covered data, tensor, pipeline, and expert parallelism. You said there were five?
+
+Alex: Context parallelism — and this one is fascinating. It's for when you have extremely long sequences. 128K tokens, 512K, even a million. The sequence itself is too long to fit in one GPU's memory, so you split it across GPUs. Each GPU holds a contiguous chunk of the sequence.
+
+Jenny: But wait — attention needs every token to see every other token. If you split the sequence across GPUs, how does that work?
+
+Alex: Ring attention. Picture four GPUs arranged in a ring. Each one holds its chunk of Q, K, and V vectors. The Q vectors stay put — they never move. But the K and V chunks rotate around the ring. In step one, each GPU computes attention between its local Q and whatever K/V it currently holds. Then all GPUs simultaneously pass their K/V to the next GPU in the ring.
+
+Jenny: So after three rotations — N minus one steps — every GPU has seen every K/V chunk. And while it's computing attention with the current chunk, the next chunk is already in transit.
+
+Alex: Exactly. The transfer is overlapped with computation, so the communication overhead is minimal. It's an elegant solution. And this is different from sequence parallelism, which only splits non-attention parts of the layer and requires an all-gather to reconstruct the full sequence before attention. Context parallelism splits everything, including attention, which lets it scale to much longer contexts.
+
+Jenny: So in production, you'd actually combine these strategies?
+
+Alex: Always. The standard recipe is tensor parallelism within a node — 8-way TP on an 8-GPU server using NVLink. Then data parallelism across nodes for throughput — spin up N replicas. If you're serving MoE models, you add expert parallelism for the FFN layers while keeping tensor parallelism for the attention layers. And if you're handling very long contexts, you layer on context parallelism across nodes using ring attention over InfiniBand.
+
+Jenny: It's composable. Each strategy operates on a different dimension, so they don't conflict.
+
+Alex: Exactly right. And knowing which combination to deploy for a given model size, sequence length, and latency SLA — that's the judgment call that separates infra leaders from infra operators.
+
+Jenny: So looking ahead — we've talked about how to spread the model across GPUs. But all of this assumes the GPUs have enough memory in the first place. Next time we should dig into what's actually consuming that memory, especially the KV cache, and why memory management becomes the bottleneck even when you've parallelized everything perfectly.
+
+Alex: Right. Tensor parallelism gives you speed, but the KV cache is what determines how many concurrent requests you can actually serve. That's where PagedAttention comes in — and if you think of the KV cache as a memory allocator, the analogy to virtual memory paging is going to blow your mind.
+
+Jenny: Can't wait. Until next time.

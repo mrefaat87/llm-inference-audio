@@ -1,27 +1,89 @@
-Alex: So today we're talking about GPU memory and interconnects — basically, what lives where inside a GPU server, and how fast data can move between different places.
-Jenny: And this matters for inference because... the speed of moving data is actually the bottleneck, not the math?
-Alex: Exactly right. So picture a GPU like an H100. Inside it, there's this hierarchy of memory, and each level has wildly different speeds. At the very top, you've got registers — tiny bits of memory right next to each compute core. Multiple terabytes per second of bandwidth. Blazing fast, but tiny.
-Jenny: Like having a sticky note on your desk versus a filing cabinet across the room.
-Alex: Perfect analogy. Then you've got shared memory, or SRAM — about 50 megabytes total, running at roughly 20 terabytes per second. This is where FlashAttention does its magic, keeping attention tiles in this fast on-chip memory instead of going to the slower stuff.
-Jenny: And the slower stuff is HBM — the main GPU memory?
-Alex: Right. HBM is 80 gigs on an H100, with 3.35 terabytes per second of bandwidth. That sounds fast, but it's about 6x slower than SRAM. And here's the key insight — during decode, when you're generating tokens one at a time, the GPU is barely doing any math relative to the data it needs to read. You have to load the entire model weights from HBM for every single token.
-Jenny: So decode is memory-bandwidth-bound, not compute-bound. That's why people obsess over HBM bandwidth numbers.
-Alex: Exactly. It's why the H100 SXM version is meaningfully faster at decode than the H100 PCIe, even though they have identical compute. The SXM has 3.35 terabytes per second of HBM bandwidth versus 2 for PCIe. Same math speed, faster memory, faster inference.
-Jenny: OK so that's inside one GPU. What about when you need multiple GPUs working together?
-Alex: That's where NVLink comes in. On a DGX H100 system, you've got 8 GPUs connected via NVLink at 900 gigabytes per second bidirectional per GPU. And there's an NVSwitch chip that creates a full mesh — any GPU can talk to any other at full speed simultaneously.
-Jenny: Wait, 900 gigabytes per second? That's a quarter of HBM bandwidth. That's actually really fast for an interconnect.
-Alex: It is, and it's what makes tensor parallelism work. Tensor parallelism needs an all-reduce after every single layer — every GPU shares its partial results with all others. At 900 gig per second, that completes in microseconds. Totally practical.
-Jenny: So what happens when you need to go across servers? Like in a big cluster?
-Alex: You drop to InfiniBand, which runs at about 50 gigabytes per second per port. That's 18 times slower than NVLink.
-Jenny: Oh wow. So that 18x gap basically dictates your entire parallelism strategy.
-Alex: That's the single most important number in this whole space. Tensor parallelism, with its constant high-bandwidth chatter, has to stay within one NVLink node. Pipeline parallelism and context parallelism, which communicate less frequently, can span servers over InfiniBand.
-Jenny: So can GPUs on different servers actually reach into each other's memory directly?
-Alex: Yes — through RDMA, Remote Direct Memory Access, over InfiniBand. A GPU on server A can read from HBM on server B without either CPU touching the data at all. The path goes GPU memory, straight to the network card, across the InfiniBand fabric, into the remote GPU's memory. No CPU copies, no operating system involvement.
-Jenny: That's exactly how prefill-decode disaggregation works, right? The prefill worker finishes, then ships the KV cache directly into the decode worker's GPU memory?
-Alex: Spot on. And that KV cache can be tens of gigabytes for long prompts, so bypassing the CPU is critical.
-Jenny: OK, so here's what I'm wondering — does any of this change with newer hardware?
-Alex: Great question. The B200 with NVLink 5.0 doubles bandwidth to 1.8 terabytes per second per GPU. But the real game changer is NVL72 — 72 GPUs connected via NVLink switches with 130 terabytes per second of bisection bandwidth, all within a single rack.
-Jenny: So instead of 8 GPUs in your NVLink domain, you get 72?
-Alex: Right. You could potentially run tensor parallelism across 72 GPUs, which means a 70 billion parameter model might not need pipeline parallelism at all. But here's the thing — across racks, you're still on InfiniBand. The fundamental constraint hasn't disappeared, the boundary just moved from 8 GPUs to 72.
-Jenny: So the design principle stays the same — keep the chatty communication inside the fast domain, push the less frequent stuff across the slower links. The fast domain just got a lot bigger.
-Alex: Exactly. The hierarchy always wins. You just have to know where the bandwidth cliffs are and design around them.
+Alex: So Jenny, I want to start today with a question. When you think about why one GPU is faster than another for running inference, what's your first instinct?
+
+Jenny: Honestly? I'd probably look at the compute specs. Like, how many cores, what's the clock speed — the same way I'd compare EC2 instance types by vCPUs.
+
+Alex: And that's the trap almost everyone falls into. For LLM inference — specifically the token generation part, the decode phase — compute is almost never your bottleneck. Memory bandwidth is. The speed at which you can shuttle data from memory to the compute units, that's what determines how fast tokens come out.
+
+Jenny: Okay, wait. That's counterintuitive. You've got thousands of cores sitting there. How are they not the bottleneck?
+
+Alex: Because generating each token requires reading the entire model's weights from memory, but the actual math per weight is tiny — it's a multiply and an add. So picture this: you've got a warehouse full of workers ready to assemble widgets, but there's only one loading dock. The workers are idle most of the time, just waiting for parts to arrive. That loading dock is your memory bandwidth.
+
+Jenny: So it's like having a massive Auto Scaling group but your throughput is bottlenecked on the network interface to your data store, not on the compute fleet itself.
+
+Alex: Exactly that. And this is why you need to understand the GPU memory hierarchy, because there isn't just one loading dock. There are several, at very different speeds, and the entire optimization game in inference is about keeping data as close to the compute as possible.
+
+Jenny: Alright, walk me through the hierarchy. What are we looking at inside an H100?
+
+Alex: So at the very bottom, closest to the actual arithmetic units, you've got registers — tiny, per-core storage. Think of it like each worker having a small workbench. Above that is SRAM, which is on-chip fast memory sitting right next to clusters of cores. NVIDIA groups cores into what they call Streaming Multiprocessors, or SMs — think of each SM as a mini-processor with its own local cache. The H100 has 132 of these SMs. And the SRAM across all of them totals about 50 megabytes, but it's screaming fast — around 20 terabytes per second.
+
+Jenny: Fifty megabytes at 20 terabytes per second. And then HBM — the main GPU memory — is 80 gigabytes but only 3.35 terabytes per second?
+
+Alex: Right. So SRAM is roughly six times faster than HBM, but about a thousand times smaller. This is the exact same tradeoff you see in CPU cache hierarchies — L1 cache versus main memory. Small and fast, or big and slow. Pick one.
+
+Jenny: And this is why FlashAttention is such a big deal, right? I've heard people talk about it but never really understood why tiling into SRAM matters so much.
+
+Alex: Exactly. FlashAttention's whole insight is: instead of computing attention over the full sequence in HBM — reading and writing huge intermediate matrices from that 3.35 terabyte-per-second memory — you tile the computation. You load small chunks into SRAM, do as much math as possible while the data is in that fast memory, then write only the final result back. You're avoiding round trips to the slow loading dock.
+
+Jenny: So it's like — instead of shipping every intermediate result back to S3 between processing steps, you keep the working set in local instance storage and only write the final output. You're minimizing data movement, not reducing compute.
+
+Alex: That's a perfect analogy. And the speedup is massive — two to four times faster for attention, just by being smarter about where data lives during computation. No algorithmic change, no approximation. Same exact math, just better data movement.
+
+Jenny: Okay, so that's the hierarchy within one GPU. But a single GPU only has 80 gigs of HBM. A large model might need way more than that. So now you need multiple GPUs, which means they have to talk to each other. How fast can they do that?
+
+Alex: This is where NVLink comes in, and it's one of the most important pieces of infrastructure in modern AI. Within a DGX H100 server — so that's eight H100 GPUs in one box — NVLink 4.0 gives you 900 gigabytes per second bidirectional bandwidth between any pair of GPUs. And there's an NVSwitch chip that creates a full mesh — every GPU can talk to every other GPU simultaneously at that full 900 gigabytes per second. No hub-and-spoke, no ring bottleneck.
+
+Jenny: Nine hundred gig per second. That's... almost a third of the HBM bandwidth itself. That's like having a dedicated placement group backplane that's nearly as fast as local memory access.
+
+Alex: That's a great way to think about it. And this is exactly what makes tensor parallelism work. When you shard a model across GPUs using tensor parallelism — splitting each layer's computation across all eight GPUs — they need to synchronize after every single layer. It's an all-reduce operation: every GPU shares its partial result with all the others.
+
+Jenny: Every layer? That's incredibly chatty. That's like having a distributed database where every single query requires a cross-shard coordination step.
+
+Alex: Exactly. And at 900 gigabytes per second, that all-reduce finishes in microseconds. The communication overhead is small enough that you still come out way ahead by distributing the computation. But here's the critical thing — what happens when you need to go across servers?
+
+Jenny: You're on InfiniBand at that point, right? What's the bandwidth there?
+
+Alex: InfiniBand NDR 400 gives you about 50 gigabytes per second per port. So NVLink is 900, InfiniBand is 50. That's an eighteen-to-one gap.
+
+Jenny: Eighteen to one. So the all-reduce that takes microseconds over NVLink would take... eighteen times longer over InfiniBand? That would absolutely destroy your token generation latency.
+
+Alex: It would dominate the step time completely. This is the single most important number for understanding why parallelism strategies are designed the way they are. Anything that requires frequent, high-bandwidth communication — tensor parallelism — must stay within one NVLink node. You physically cannot do TP across servers without wrecking your latency.
+
+Jenny: So what do you do when a model is too big for eight GPUs? If you can't extend tensor parallelism across servers...
+
+Alex: You use pipeline parallelism across servers. Instead of splitting each layer across GPUs, you assign whole layers — or groups of layers — to different servers. Server one handles layers one through twenty, server two handles twenty-one through forty. The communication pattern is completely different: you're just passing activation tensors from one server to the next, once per layer group. It's much lower frequency, much lower bandwidth requirement.
+
+Jenny: Oh, that's like the difference between a microservices pipeline and a sharded database. The pipeline only passes messages between stages — one handoff per request per stage. The sharded database needs constant cross-shard coordination. Same distributed system, fundamentally different communication patterns.
+
+Alex: That's exactly the right mental model. And the communication pattern dictates which interconnect you can tolerate. Chatty protocols need NVLink. Pipelined handoffs can survive on InfiniBand.
+
+Jenny: Okay so one thing that blows my mind — can a GPU on one server actually reach into the memory of a GPU on a completely different server? Like, direct memory access across the network?
+
+Alex: Yes. GPUDirect RDMA over InfiniBand. A GPU on Server A can read from or write to HBM on Server B's GPU without either CPU ever touching the data. The data path goes GPU HBM, directly to the network card, across the InfiniBand fabric, into the remote GPU's network card, and straight into remote HBM. No CPU copies, no OS kernel involvement, no context switches.
+
+Jenny: That's like... VPC peering but at the memory level. The CPU doesn't even know it happened?
+
+Alex: Not involved at all. And without GPUDirect RDMA, you'd need two extra CPU memory copies on each side — GPU to CPU RAM to NIC on the sending end, then NIC to CPU RAM to GPU on the receiving end. Those copies would murder your throughput. With GPUDirect, you get about 40 gigabytes per second effective on a 400 gigabit InfiniBand link.
+
+Jenny: And this is exactly how prefill-decode disaggregation works, isn't it? You do the prefill on one machine, then ship the KV cache to the decode machine?
+
+Alex: Precisely. The prefill worker crunches through your entire prompt, builds up the KV cache — which can be tens of gigabytes for long prompts — and then that KV cache transfers via RDMA directly into the decode worker's HBM. The decode worker starts generating tokens the moment the cache arrives.
+
+Jenny: So looking forward — does any of this change with the next generation hardware? Or is this bandwidth hierarchy basically permanent?
+
+Alex: Great question. The B200 and GB200 generation bring NVLink 5.0, which doubles bandwidth to 1.8 terabytes per second per GPU. But the really wild thing is the NVL72 configuration — seventy-two B200 GPUs connected via NVLink switches in a single rack. A hundred and thirty terabytes per second of bisection bandwidth. All seventy-two GPUs behave like one giant shared-memory system.
+
+Jenny: Wait — so you could do tensor parallelism across seventy-two GPUs? That changes the entire parallelism strategy. A 70-billion parameter model could just be TP across one rack, no pipeline parallelism needed at all.
+
+Alex: Exactly. But — and this is the key insight — across racks, you're still limited to InfiniBand. The fundamental constraint hasn't changed. The NVLink domain just got a lot bigger. It went from eight GPUs to seventy-two GPUs. But beyond that boundary, you're still hitting the same eighteen-to-one bandwidth cliff.
+
+Jenny: So the optimization game stays the same — keep the chatty communication inside the fast domain, push only the pipeline-friendly communication across the slow boundary. The domain just got bigger.
+
+Alex: That's the lesson that never changes, whether you're designing GPU clusters or distributed systems. Bandwidth hierarchies are permanent. The absolute numbers go up, but the ratios between tiers stay roughly the same. Every system you design has to respect those ratios. The engineers who build fast inference systems are the ones who internalize where every byte of data lives and how fast it can move.
+
+Jenny: This feels like a great foundation for what's coming next. When we talk about actually choosing parallelism strategies for serving models — how you decide what goes where, how you handle models that are growing faster than any single node — all of that traces directly back to these bandwidth numbers we just walked through.
+
+Alex: Exactly. The hardware isn't just background context. It's the constraint set that shapes every software decision. If you understand these numbers — 3.35 terabytes per second HBM, 900 gigabytes per second NVLink, 50 gigabytes per second InfiniBand — you can reason from first principles about why any optimization works, and predict which ones will matter for the next generation of models.
+
+Jenny: Love it. So next time — we get into how you actually exploit these constraints to serve models efficiently. Same physics, higher stakes.
+
+Alex: Can't wait.

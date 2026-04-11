@@ -1,0 +1,151 @@
+Now I have the style and all four quiz questions. Let me write the script.
+
+Alex: Alright Jenny, round three. And I have to say, this one's my favorite so far. Chapters one and two were about the model — the architecture, the math, the design choices. This chapter was about the metal. The actual silicon and wires that make all of it real.
+
+Jenny: And honestly, this is where I started feeling most at home. GPU memory hierarchies, interconnect bandwidth, parallelism strategies — this is capacity planning. This is fleet design. I've been doing versions of this my whole career.
+
+Alex: Exactly. So I want to push harder this time. I'm not going to ask you to define things. I'm going to give you numbers and make you do the math. Because in my experience, the difference between someone who understands this stuff and someone who's memorized it is whether they can work the numbers on a whiteboard.
+
+Jenny: Bring it.
+
+Alex: Okay. You're deploying a large model — say 70 billion parameters — across a cluster. You've got two options for multi-GPU communication. NVLink inside your server giving you 900 gigabytes per second. Or InfiniBand across servers at about 50 gigabytes per second. Someone on your team says, "Why don't we just do tensor parallelism across two servers connected by InfiniBand? It's still 50 gig per second, that's plenty fast." What's your answer?
+
+Jenny: My gut says no, but let me work through why. Tensor parallelism requires an all-reduce after every layer, right? You split the matrix multiply across GPUs, but then you have to sync up the results before moving to the next layer.
+
+Alex: Right. And not just one all-reduce. Two per layer — one after the attention block and one after the FFN block.
+
+Jenny: Two per layer. Okay, so for a 70B model... that's about 80 layers. So that's 160 all-reduce operations in a single forward pass.
+
+Alex: Now do the math at NVLink speeds versus InfiniBand speeds.
+
+Jenny: At NVLink, 900 gig per second... each all-reduce is maybe 0.02 microseconds. Times 160 — that's about 3 microseconds of total communication overhead per forward pass. That's nothing.
+
+Alex: And at InfiniBand?
+
+Jenny: At 50 gig per second — that's 18 times slower. So each all-reduce takes about 0.3 microseconds. Times 160, that's roughly 48 microseconds total. And a decode step takes what, about 20 milliseconds?
+
+Alex: Right, around there.
+
+Jenny: So even the InfiniBand overhead is only 0.24% of the decode step. That... actually doesn't sound terrible? Why is this still a bad idea?
+
+Alex: Great question. And this is where the napkin math gets dangerous. Those numbers assume small tensors and low batch sizes. But here's the thing — tensor parallelism doesn't just do one small sync. The volume of data in each all-reduce scales with the hidden dimension and the batch size. At batch size 1 with a small hidden dimension, sure, 50 gig per second might keep up. But the moment you scale up your batch size — which you will in production to amortize costs — you start pushing real data volumes through that pipe.
+
+Jenny: Oh. So it's not that InfiniBand can't handle the frequency of communication. It's that it can't handle the bandwidth when the tensors get large.
+
+Alex: Exactly. NVLink has 18 times the bandwidth. That's not a nice-to-have margin. That's the difference between your interconnect being invisible and your interconnect being your bottleneck. Tensor parallelism generates high-frequency, high-bandwidth traffic. It's like trying to run synchronous cross-region replication over a WAN link — technically possible at low throughput, catastrophic at production load.
+
+Jenny: So the rule of thumb is: tensor parallelism stays inside the NVLink domain. Period.
+
+Alex: Period. If you need to go across nodes, you use a parallelism strategy with less frequent communication — pipeline parallelism, expert parallelism, data parallelism. Strategies where the communication pattern is more tolerant of lower bandwidth and higher latency.
+
+Jenny: That's like the difference between synchronous and asynchronous replication. You don't do synchronous replication across data centers. Same principle.
+
+Alex: Perfect. Okay, let's stay with bandwidth math but shift context. Disaggregated inference — you've got separate prefill and decode servers. A 70B model processes a 100K token request, GQA with FP16 KV cache. The total KV cache for that single request is about 32 gigabytes. You need to transfer it from the prefill server to the decode server over InfiniBand RDMA at 50 gig per second. How long?
+
+Jenny: 32 divided by 50... that's 640 milliseconds.
+
+Alex: And what's a typical TTFT SLO target?
+
+Jenny: Oh. Most services want time to first token under 500 milliseconds, some under 200. So 640 milliseconds just to transfer the KV cache — before the decode server even starts generating — already blows most SLO targets.
+
+Alex: Right. And this is the emerging bottleneck in disaggregated inference. The whole point of separating prefill and decode is to optimize each independently. But if the handoff between them takes longer than the SLO allows, you haven't optimized anything. You've just moved the bottleneck from compute to networking.
+
+Jenny: So how do people actually solve this? You can't just magically get more bandwidth.
+
+Alex: Three approaches, and they all trade something different. First — pipelining. Don't wait for the entire KV cache to be computed before you start transferring. As soon as layer one's KV is ready, start sending it while layer two is still computing.
+
+Jenny: That's streaming. You're overlapping compute and transfer. Same idea as HTTP chunked transfer encoding — don't buffer the whole response, start sending as the data becomes available.
+
+Alex: Exactly. Second approach — use FP8 for your KV cache instead of FP16. Halves the data volume. Now you're at 320 milliseconds instead of 640. Getting closer to SLO territory.
+
+Jenny: But you're losing precision in your cached attention state. There's a quality trade-off there.
+
+Alex: There is, but in practice it's surprisingly small. FP8 KV cache has been shown to work well for most workloads. The attention scores are robust to that level of quantization.
+
+Jenny: And the third?
+
+Alex: Stay on NVLink. If your prefill and decode GPUs are in the same server or the same NVLink domain, you get 900 gig per second. That 32 gig transfer drops to about 36 milliseconds.
+
+Jenny: Thirty-six milliseconds! That's nothing. But then you've lost the whole point of disaggregation, haven't you? If prefill and decode have to be in the same box, you can't scale them independently.
+
+Alex: Welcome to the fundamental tension. Disaggregation wants separation. Physics wants locality. The winning architectures are the ones that find the right granularity — maybe disaggregated within a rack connected by NVLink Switch, not disaggregated across the data center over InfiniBand.
+
+Jenny: It's the same trade-off as microservices versus monoliths. The network boundary gives you flexibility but costs you latency. At some point, the network tax eats your architectural gains.
+
+Alex: Exactly right. Okay, shifting to parallelism strategies. Pipeline parallelism. Four GPUs, batch size one. Each GPU handles a quarter of the model's layers. How much GPU time is wasted in pipeline bubbles?
+
+Jenny: Okay, let me think about this. GPU one processes its layers and passes the result to GPU two. Then GPU one sits idle while GPU two processes, then GPU three, then GPU four. So GPU one is active for one time slot and idle for three.
+
+Alex: And the same is true for every GPU in the pipeline.
+
+Jenny: Right. GPU two waits one slot, works one slot, waits two slots. GPU three waits two, works one, waits one. GPU four waits three, works one. Every GPU is active exactly one out of four time slots. That's 75% wasted.
+
+Alex: Seventy-five percent. Three-quarters of your expensive GPU time, doing nothing.
+
+Jenny: That's horrific. It's like having a four-stage assembly line but only one car on it. At any moment, three of your four stations are idle waiting for the car to reach them or waiting for it to come back.
+
+Alex: Now, why does this not kill pipeline parallelism for training?
+
+Jenny: Because training has large batch sizes. If I have a batch of 32, I can pipeline micro-batches through. While GPU one is processing micro-batch two, GPU two is processing micro-batch one. You fill the pipeline. The bubble fraction drops from 75% to something much smaller — it's roughly the pipeline depth minus one divided by the total number of micro-batches. With enough micro-batches, the bubbles become a rounding error.
+
+Alex: But for inference?
+
+Jenny: Inference is often batch size one, or very small batches. Especially for interactive serving where each user gets their own sequence. You can't pipeline multiple requests through easily because they arrive unpredictably and have different lengths. So the bubbles stay fat.
+
+Alex: So what do you use instead for inference?
+
+Jenny: Tensor parallelism. Zero bubbles — all GPUs work on the same data simultaneously. You pay the communication cost of the all-reduce, but as we just showed, within an NVLink domain that cost is negligible. It's like going from a serial assembly line to parallel workstations that all work on the same car at the same time.
+
+Alex: And now the first question connects to this one. Tensor parallelism only works because NVLink gives you the bandwidth to sync after every layer. If you were stuck on InfiniBand, you might be forced into pipeline parallelism — and its 75% bubble overhead — for inference. The interconnect determines your parallelism strategy, which determines your GPU utilization.
+
+Jenny: It all chains together. The hardware constrains the architecture constrains the economics.
+
+Alex: One more. Ring attention. Context parallelism. You've got a 100K token sequence and four GPUs. Each GPU holds a 25K chunk. How many rotation steps before every GPU has computed full attention?
+
+Jenny: Okay, ring attention. Each GPU starts with its own Q chunk and its own KV chunk. In step one, every GPU computes attention between its Q chunk and its local KV chunk. Then the KV chunks rotate — everyone sends their KV to the next GPU in the ring.
+
+Alex: Right. Step two?
+
+Jenny: Each GPU now has a new KV chunk. It computes attention between its own Q — which never moved — and this new KV chunk, and accumulates the result with step one's output. Then KV rotates again.
+
+Alex: And step three?
+
+Jenny: Another rotation, another round of attention against a new KV chunk. After step three, each GPU has seen three foreign KV chunks plus its own original one. That's four total — all of them. Full attention computed.
+
+Alex: So the answer is?
+
+Jenny: Three rotation steps. N minus one for N GPUs. Three rotations, four GPUs, everyone sees everything.
+
+Alex: And here's the part that makes ring attention actually practical. What happens to the KV transfer latency?
+
+Jenny: It's hidden! While each GPU is computing attention against its current KV chunk — which is compute-heavy, especially at these sequence lengths — it's simultaneously sending its KV chunk to the next GPU in the ring. The transfer is overlapped with the computation.
+
+Alex: And why does that overlap work so well?
+
+Jenny: Because attention at 25K tokens is computationally expensive enough that it takes longer than the transfer. The compute is the long pole. By the time the GPU finishes its attention computation, the next KV chunk has already arrived. The network transfer is completely hidden behind the compute.
+
+Alex: And when does this break down?
+
+Jenny: Hmm... if the chunks get too small? If you split across too many GPUs, each chunk shrinks, the compute per chunk gets faster, and eventually the transfer time exceeds the compute time. Then you're waiting on the network.
+
+Alex: Exactly. It's the same principle as double buffering or prefetching in any pipelined system. You need the compute stage to be longer than the transfer stage for the overlap to fully hide the latency. If you over-shard, the compute shrinks below the transfer time and the whole thing stalls.
+
+Jenny: So there's an optimal GPU count for ring attention at any given sequence length. Too few GPUs and each chunk is too large to fit in memory. Too many and the overlap breaks down. Another Goldilocks problem.
+
+Alex: And that trade-off is entirely determined by the ratio of compute throughput to network bandwidth on your specific hardware. Different GPU generations, different NVLink versions, different optimal shard counts. Hardware shapes everything.
+
+Jenny: Okay, stepping back — what strikes me about all four of these questions is that they're all bandwidth math. Every answer came down to: how much data needs to move, how fast can it move, and what breaks when the pipe isn't fat enough. That's not ML. That's infrastructure.
+
+Alex: And that's the whole point of this chapter. The model is just math. Making it fast is engineering. And most of that engineering is memory hierarchy and interconnect design — the same things that determine performance in any distributed system.
+
+Jenny: So what's next? We've got the model, we've got the hardware. What's missing?
+
+Alex: The serving system. How you actually take a model sitting on GPUs and serve thousands of concurrent users. KV cache management — which is literally virtual memory paging. Continuous batching — which is the scheduler that decides which requests get GPU time. PagedAttention, preemption, scheduling policies.
+
+Jenny: And that's where my day job basically becomes a direct translation guide. Auto scaling, request queuing, capacity management — it's all the same problems with different nouns.
+
+Alex: That's exactly right. And here's the tease — the reason PagedAttention was such a breakthrough isn't because it's clever new computer science. It's because someone finally asked, "Wait, why are we doing contiguous memory allocation for variable-length sequences when the OS solved this problem with virtual memory pages in the 1960s?" The answer was obvious in hindsight. It just required someone who understood both worlds.
+
+Jenny: Someone who speaks both infrastructure and ML. Which is exactly what we're building here. Alright, Chapter 4 — let's go.
+
+Alex: See you there.

@@ -246,7 +246,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <button class="ch-header" onclick="toggleChapter('ch1')">
       <span class="ch-arrow">&#9656;</span>
       <span class="ch-title">The Model</span>
-      <span class="ch-count" id="count-ch1">0/8</span>
+      <span class="ch-count" id="count-ch1">0/9</span>
     </button>
     <div class="ch-topics">
       <button class="nav-item active" data-sec="tokenization" onclick="show('tokenization')">Tokenization</button>
@@ -257,36 +257,39 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
       <button class="nav-item" data-sec="params" onclick="show('params')">Parameter Count</button>
       <button class="nav-item" data-sec="moe" onclick="show('moe')">Mixture of Experts</button>
       <button class="nav-item" data-sec="numformats" onclick="show('numformats')">Number Formats</button>
+      <button class="nav-item" data-sec="quiz-ch1" onclick="show('quiz-ch1')">Chapter 1 Quiz</button>
     </div>
   </div>
   <div class="ch-group" data-ch="ch2">
     <button class="ch-header" onclick="toggleChapter('ch2')">
       <span class="ch-arrow">&#9656;</span>
       <span class="ch-title">Architecture Frontier</span>
-      <span class="ch-count" id="count-ch2">0/3</span>
+      <span class="ch-count" id="count-ch2">0/4</span>
     </button>
     <div class="ch-topics">
       <button class="nav-item" data-sec="mla" onclick="show('mla')">MLA & Attention Variants</button>
       <button class="nav-item" data-sec="mtp" onclick="show('mtp')">Multi-token Prediction</button>
       <button class="nav-item" data-sec="codesign" onclick="show('codesign')">Model-Hardware Co-design</button>
+      <button class="nav-item" data-sec="quiz-ch2" onclick="show('quiz-ch2')">Chapter 2 Quiz</button>
     </div>
   </div>
   <div class="ch-group" data-ch="ch3">
     <button class="ch-header" onclick="toggleChapter('ch3')">
       <span class="ch-arrow">&#9656;</span>
       <span class="ch-title">The Hardware</span>
-      <span class="ch-count" id="count-ch3">0/2</span>
+      <span class="ch-count" id="count-ch3">0/3</span>
     </button>
     <div class="ch-topics">
       <button class="nav-item" data-sec="nvlink" onclick="show('nvlink')">GPU Memory & Interconnects</button>
       <button class="nav-item" data-sec="parallelism" onclick="show('parallelism')">Parallelism Types</button>
+      <button class="nav-item" data-sec="quiz-ch3" onclick="show('quiz-ch3')">Chapter 3 Quiz</button>
     </div>
   </div>
   <div class="ch-group" data-ch="ch4">
     <button class="ch-header" onclick="toggleChapter('ch4')">
       <span class="ch-arrow">&#9656;</span>
       <span class="ch-title">Optimization</span>
-      <span class="ch-count" id="count-ch4">0/8</span>
+      <span class="ch-count" id="count-ch4">0/9</span>
     </button>
     <div class="ch-topics">
       <button class="nav-item" data-sec="batching" onclick="show('batching')">Continuous Batching</button>
@@ -297,13 +300,14 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
       <button class="nav-item" data-sec="marlin" onclick="show('marlin')">Marlin Kernel</button>
       <button class="nav-item" data-sec="specdecode" onclick="show('specdecode')">Speculative Decoding</button>
       <button class="nav-item" data-sec="optlist" onclick="show('optlist')">Full Optimization List</button>
+      <button class="nav-item" data-sec="quiz-ch4" onclick="show('quiz-ch4')">Chapter 4 Quiz</button>
     </div>
   </div>
   <div class="ch-group" data-ch="ch5">
     <button class="ch-header" onclick="toggleChapter('ch5')">
       <span class="ch-arrow">&#9656;</span>
       <span class="ch-title">Serving at Scale</span>
-      <span class="ch-count" id="count-ch5">0/6</span>
+      <span class="ch-count" id="count-ch5">0/8</span><!-- 7 topics + 1 quiz -->
     </button>
     <div class="ch-topics">
       <button class="nav-item" data-sec="reqlen" onclick="show('reqlen')">Request Length Strategies</button>
@@ -313,6 +317,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
       <button class="nav-item" data-sec="multiturn" onclick="show('multiturn')">Multi-turn Inference</button>
       <button class="nav-item" data-sec="agentic" onclick="show('agentic')">Agentic Inference</button>
       <button class="nav-item" data-sec="disagg" onclick="show('disagg')">Disaggregation</button>
+      <button class="nav-item" data-sec="quiz-ch5" onclick="show('quiz-ch5')">Chapter 5 Quiz</button>
     </div>
   </div>
   <div class="ch-group" data-ch="ch6">
@@ -915,8 +920,13 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   </table>
 
   <div class="resource-bar">📖 <a href="https://arxiv.org/abs/2209.05433" target="_blank">FP8 Formats for Deep Learning (NVIDIA/ARM/Intel)</a><a href="https://arxiv.org/abs/2211.10438" target="_blank">SmoothQuant paper — solving activation outliers for INT8</a></div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('moe')">&#8592; Mixture of Experts</a><a class="pn-link pn-next" onclick="show('mla')">MLA & Attention Variants &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('moe')">&#8592; Mixture of Experts</a><a class="pn-link pn-next" onclick="show('quiz-ch1')">Chapter 1 Quiz &#8594;</a></div>
+</div>
 
+<div id="sec-quiz-ch1" class="hidden">
+<div class="breadcrumb">The Model &rsaquo; Quiz</div>
+<h2>Chapter 1 Quiz — The Model</h2>
+  <p class="subtitle">Test your understanding of tokenization, embeddings, attention, layers, parameters, MoE, and number formats</p>
   <div class="quiz">
     <div class="quiz-title">Chapter 1 Quiz — The Model</div>
     <details class="quiz-q">
@@ -944,6 +954,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
       <div class="quiz-a">Dramatically faster. With a 32K English-centric tokenizer, Japanese requires ~3 tokens per word. With 128K vocab optimized for multilingual, this drops to ~1.5-2 tokens per word — roughly <strong>2× fewer tokens</strong>, meaning 2× fewer decode steps, 2× less KV cache, and 2× lower latency for the same content.</div>
     </details>
   </div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('numformats')">&#8592; Number Formats</a><a class="pn-link pn-next" onclick="show('mla')">MLA & Attention Variants &#8594;</a></div>
 </div>
 
 <div id="sec-mla" class="hidden">
@@ -1040,8 +1051,13 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   <div class="highlight">The key mental shift: "how many attention heads should this model have?" is no longer purely a research quality question. It is an infrastructure economics question, answered by analyzing serving cost at the target context length distribution, multiplied by the expected request volume. This is what makes modern AI infrastructure engineering genuinely different from classical systems work.</div>
 
   <div class="resource-bar">📖 <a href="https://arxiv.org/abs/2205.01068" target="_blank">Chinchilla scaling laws — the original co-design framework for training</a></div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('mtp')">&#8592; Multi-token Prediction</a><a class="pn-link pn-next" onclick="show('nvlink')">GPU Memory & Interconnects &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('mtp')">&#8592; Multi-token Prediction</a><a class="pn-link pn-next" onclick="show('quiz-ch2')">Chapter 2 Quiz &#8594;</a></div>
+</div>
 
+<div id="sec-quiz-ch2" class="hidden">
+<div class="breadcrumb">Architecture Frontier &rsaquo; Quiz</div>
+<h2>Chapter 2 Quiz — Architecture Frontier</h2>
+  <p class="subtitle">Test your understanding of MLA, multi-token prediction, and model-hardware co-design</p>
   <div class="quiz">
     <div class="quiz-title">Chapter 2 Quiz — Architecture Frontier</div>
     <details class="quiz-q">
@@ -1057,6 +1073,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
       <div class="quiz-a">The auxiliary heads predict tokens N+2, N+3, N+4, but acceptance rate drops with distance — the model is less certain about N+4 than N+2. With ~70% acceptance on the first draft and declining on subsequent ones, the expected accepted tokens per step is ~1.8, not 4. This is the same acceptance-rate dynamic as external speculative decoding, just with better alignment because the draft heads were trained jointly.</div>
     </details>
   </div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('codesign')">&#8592; Model-Hardware Co-design</a><a class="pn-link pn-next" onclick="show('nvlink')">GPU Memory & Interconnects &#8594;</a></div>
 </div>
 
 <div id="sec-nvlink" class="hidden">
@@ -1399,8 +1416,13 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   </table>
 
   <div class="resource-bar">📖 <a href="https://arxiv.org/abs/1909.08053" target="_blank">Megatron-LM — tensor + pipeline parallelism</a><a href="https://arxiv.org/abs/2310.01889" target="_blank">Ring Attention paper</a><a href="https://huggingface.co/docs/transformers/en/perf_train_gpu_many" target="_blank">HuggingFace parallelism guide</a></div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('nvlink')">&#8592; GPU Memory & Interconnects</a><a class="pn-link pn-next" onclick="show('batching')">Continuous Batching &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('nvlink')">&#8592; GPU Memory & Interconnects</a><a class="pn-link pn-next" onclick="show('quiz-ch3')">Chapter 3 Quiz &#8594;</a></div>
+</div>
 
+<div id="sec-quiz-ch3" class="hidden">
+<div class="breadcrumb">The Hardware &rsaquo; Quiz</div>
+<h2>Chapter 3 Quiz — The Hardware</h2>
+  <p class="subtitle">Test your understanding of GPU memory, interconnects, and parallelism strategies</p>
   <div class="quiz">
     <div class="quiz-title">Chapter 3 Quiz — The Hardware</div>
     <details class="quiz-q">
@@ -1420,6 +1442,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
       <div class="quiz-a"><strong>3 steps</strong> (N-1 rotations for N GPUs). Each GPU starts with its own KV chunk and receives one new chunk per step. After 3 rotations, every GPU has seen all 4 KV chunks and accumulated the full attention result for its Q range. The key insight: K/V transfer to the next GPU is overlapped with the current step's computation, hiding transfer latency.</div>
     </details>
   </div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('parallelism')">&#8592; Parallelism Types</a><a class="pn-link pn-next" onclick="show('batching')">Continuous Batching &#8594;</a></div>
 </div>
 
 <div id="sec-batching" class="hidden">
@@ -1956,8 +1979,13 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   </table>
   <p style="font-size:12px; color:#475569; margin-top:8px;">FlashAttention and Speculative Decoding have dedicated sections in the nav. MLA and MTP are covered in Architecture (Advanced).</p>
   <div class="resource-bar">📖 <a href="https://lilianweng.github.io/posts/2023-01-10-inference-optimization/" target="_blank">LLM Inference Optimization — Lilian Weng's blog (best comprehensive survey)</a></div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('specdecode')">&#8592; Speculative Decoding</a><a class="pn-link pn-next" onclick="show('reqlen')">Request Length Strategies &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('specdecode')">&#8592; Speculative Decoding</a><a class="pn-link pn-next" onclick="show('quiz-ch4')">Chapter 4 Quiz &#8594;</a></div>
+</div>
 
+<div id="sec-quiz-ch4" class="hidden">
+<div class="breadcrumb">Optimization &rsaquo; Quiz</div>
+<h2>Chapter 4 Quiz — Optimization</h2>
+  <p class="subtitle">Test your understanding of batching, KV cache, FlashAttention, quantization, and speculative decoding</p>
   <div class="quiz">
     <div class="quiz-title">Chapter 4 Quiz — Optimization</div>
     <details class="quiz-q">
@@ -1981,6 +2009,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
       <div class="quiz-a">KV cache values are <strong>already-computed outputs</strong> with more regular distributions than raw intermediate activations. The extreme outlier problem that plagues activation quantization (a few values 100× larger than typical) is less severe in cached K/V vectors. FP8's exponent bits handle remaining dynamic range automatically, while INT8's fixed linear scale would still struggle with any outliers.</div>
     </details>
   </div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('optlist')">&#8592; Full Optimization List</a><a class="pn-link pn-next" onclick="show('reqlen')">Request Length Strategies &#8594;</a></div>
 </div>
 
 <div id="sec-reqlen" class="hidden">
@@ -2424,8 +2453,13 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <tr><td>Long contexts (&gt;32K) where prefill takes seconds</td><td>Simplicity is a priority — one fleet, one scaling policy</td></tr>
   </table>
   <div class="warn">Berkeley's retrospective finding: chunked prefill closes 60-80% of disaggregation's latency benefit at much lower complexity. The real win of disaggregation is independent scaling, not per-request latency.</div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('agentic')">&#8592; Agentic Inference</a><a class="pn-link pn-next" onclick="show('traintoserve')">Training-to-Serving &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('agentic')">&#8592; Agentic Inference</a><a class="pn-link pn-next" onclick="show('quiz-ch5')">Chapter 5 Quiz &#8594;</a></div>
+</div>
 
+<div id="sec-quiz-ch5" class="hidden">
+<div class="breadcrumb">Serving at Scale &rsaquo; Quiz</div>
+<h2>Chapter 5 Quiz — Serving at Scale</h2>
+  <p class="subtitle">Test your understanding of request routing, scheduling, admission control, and disaggregation</p>
   <div class="quiz">
     <div class="quiz-title">Chapter 5 Quiz — Serving at Scale</div>
     <details class="quiz-q">
@@ -2449,6 +2483,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
       <div class="quiz-a"><strong>Yes, very useful.</strong> Even a noisy predictor that correctly identifies the shortest 25% and longest 25% enables SJF-like scheduling with 2-3× reduction in average latency for short requests. You don't need exact token counts — you need relative ordering. Add aging (priority boost with wait time) to prevent long-request starvation: <code>effective_priority = shortness_score + aging_factor × wait_time</code>.</div>
     </details>
   </div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('disagg')">&#8592; Disaggregation</a><a class="pn-link pn-next" onclick="show('traintoserve')">Training-to-Serving &#8594;</a></div>
 </div>
 
 <div id="sec-traintoserve" class="hidden">
@@ -2750,7 +2785,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
 /* ══════════════════════════════════════════════════════════
    SECTION ORDER + NAMES
    ══════════════════════════════════════════════════════════ */
-const order = ['tokenization','embeddings','qkv','multihead','layers','params','moe','numformats','mla','mtp','codesign','nvlink','parallelism','batching','kvcache','chunked','flashattn','quant','marlin','specdecode','optlist','reqlen','scheduling','outputpred','reqseqbatch','multiturn','agentic','disagg','traintoserve','engines','benchmarking','costeconomics','mfu'];
+const order = ['tokenization','embeddings','qkv','multihead','layers','params','moe','numformats','quiz-ch1','mla','mtp','codesign','quiz-ch2','nvlink','parallelism','quiz-ch3','batching','kvcache','chunked','flashattn','quant','marlin','specdecode','optlist','quiz-ch4','reqlen','scheduling','outputpred','reqseqbatch','multiturn','agentic','disagg','quiz-ch5','traintoserve','engines','benchmarking','costeconomics','mfu'];
 
 const sectionNames = {};
 document.querySelectorAll('.nav-item').forEach(btn => {

@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 """
-Generate real conversational podcast audio using Claude (via CLI) + edge-tts.
+Generate real conversational podcast audio using Claude (via CLI) + TTS.
+
+TTS backends:
+  - edge-tts (default): Microsoft Azure voices, fast, free, sounds robotic
+  - orpheus: Orpheus-TTS via llama.cpp, runs locally on Apple Silicon (Metal),
+             natural conversational quality with emotion support
 
 Pipeline:
   1. Extract section text from index.html
   2. Send to `claude -p` to generate a two-host conversation script
   3. Parse the script into speaker turns
-  4. Voice each turn with edge-tts (different voice per speaker)
+  4. Voice each turn with the selected TTS engine
   5. Concatenate into final MP3
 
 Usage:
-    python3 generate_real_podcast.py --sections tokenization   # One section
-    python3 generate_real_podcast.py --all                      # All 33 sections
-    python3 generate_real_podcast.py --list                     # List sections
+    python3 generate_real_podcast.py --sections tokenization              # edge-tts (default)
+    python3 generate_real_podcast.py --all --tts orpheus                  # Orpheus TTS
+    python3 generate_real_podcast.py --all --tts orpheus --force          # Regenerate audio only
+    python3 generate_real_podcast.py --all --tts orpheus --force-transcript  # Regenerate everything
+    python3 generate_real_podcast.py --list                               # List sections
 
-Requires: claude CLI (Claude Code), edge-tts, beautifulsoup4
+Requires: claude CLI, beautifulsoup4
+  edge-tts backend: pip install edge-tts
+  orpheus backend:  pip install orpheus-cpp numpy scipy
+                    pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal
 """
 
 import asyncio
@@ -27,11 +37,6 @@ import sys
 from pathlib import Path
 
 try:
-    import edge_tts
-except ImportError:
-    sys.exit("Install edge-tts: pip install edge-tts")
-
-try:
     from bs4 import BeautifulSoup
 except ImportError:
     sys.exit("Install beautifulsoup4: pip install beautifulsoup4")
@@ -41,9 +46,13 @@ SOURCE = BASE_DIR / "index.html"
 PODCAST_DIR = BASE_DIR / "podcast"
 TRANSCRIPT_DIR = BASE_DIR / "podcast" / "transcripts"
 
-# Voices for the two hosts
-VOICE_HOST = "en-US-GuyNeural"       # Alex — the explainer
-VOICE_COHOST = "en-US-JennyNeural"   # Jenny — the curious questioner
+# Voices for the two hosts — edge-tts
+EDGE_VOICE_HOST = "en-US-GuyNeural"       # Alex — the explainer
+EDGE_VOICE_COHOST = "en-US-JennyNeural"   # Jenny — the curious questioner
+
+# Voices for the two hosts — Orpheus TTS
+ORPHEUS_VOICE_HOST = "leo"     # Alex — male, clear explainer voice
+ORPHEUS_VOICE_COHOST = "tara"  # Jenny — female, recommended as best quality
 
 AUDIENCE = """The listener is a senior engineering leader at AWS — strong background in distributed systems, cloud infrastructure, and GPU workload scaling at cloud scale, but relatively new to ML internals. He learns best through concrete analogies mapped to infrastructure concepts he already knows: auto scaling, bin packing, memory hierarchies, distributed systems, EC2 capacity management."""
 
@@ -273,10 +282,11 @@ def parse_conversation(script: str) -> list[dict]:
     return turns
 
 
-# ── Audio generation ──
+# ── Audio generation: edge-tts backend ──
 
 async def tts_with_retry(text: str, voice: str, output_path: Path, max_retries: int = 3):
     """Call edge-tts with retry on 503/rate limit errors."""
+    import edge_tts
     for attempt in range(max_retries):
         try:
             communicate = edge_tts.Communicate(text, voice, rate="+5%")
@@ -291,14 +301,14 @@ async def tts_with_retry(text: str, voice: str, output_path: Path, max_retries: 
                 raise
 
 
-async def generate_audio(turns: list[dict], output_path: Path):
+async def generate_audio_edge(turns: list[dict], output_path: Path):
     """Generate MP3 from conversation turns using edge-tts."""
     temp_dir = output_path.parent / '.temp'
     temp_dir.mkdir(exist_ok=True)
 
     temp_files = []
     for i, turn in enumerate(turns):
-        voice = VOICE_HOST if turn['speaker'] == 'Alex' else VOICE_COHOST
+        voice = EDGE_VOICE_HOST if turn['speaker'] == 'Alex' else EDGE_VOICE_COHOST
         temp_path = temp_dir / f'{output_path.stem}_{i:03d}.mp3'
 
         await tts_with_retry(turn['text'], voice, temp_path)
@@ -319,9 +329,129 @@ async def generate_audio(turns: list[dict], output_path: Path):
         pass
 
 
+# ── Audio generation: Orpheus TTS backend ──
+
+# Lazy-initialized Orpheus model (heavy, only load once)
+_orpheus_model = None
+
+
+def _get_orpheus():
+    """Initialize Orpheus TTS model on first use. Uses F16 GGUF with Metal acceleration."""
+    global _orpheus_model
+    if _orpheus_model is not None:
+        return _orpheus_model
+
+    try:
+        from orpheus_cpp import OrpheusCpp
+    except ImportError:
+        sys.exit(
+            "Orpheus TTS not installed. Run:\n"
+            "  pip install llama-cpp-python "
+            "--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal\n"
+            "  pip install orpheus-cpp numpy scipy"
+        )
+
+    # Download the F16 (non-quantized) GGUF for best quality
+    from huggingface_hub import hf_hub_download
+    print('  [orpheus] Downloading F16 GGUF model (first run only, ~6.6 GB)...')
+    f16_path = hf_hub_download(
+        "unsloth/orpheus-3b-0.1-ft-GGUF",
+        "orpheus-3b-0.1-ft-F16.gguf"
+    )
+    print(f'  [orpheus] Model cached at: {f16_path}')
+
+    # Initialize orpheus-cpp (this downloads the SNAC decoder on first run)
+    print('  [orpheus] Initializing model with Metal acceleration...')
+    model = OrpheusCpp(n_gpu_layers=99, verbose=False, lang="en")
+
+    # Swap in the F16 model instead of the default Q4_K_M
+    import llama_cpp
+    model.llm = llama_cpp.Llama(
+        model_path=f16_path,
+        n_gpu_layers=99,
+        n_ctx=8192,
+        verbose=False,
+    )
+    print('  [orpheus] Ready (F16 model loaded with Metal offload)')
+
+    _orpheus_model = model
+    return model
+
+
+def generate_turn_orpheus(text: str, voice: str) -> 'numpy.ndarray':
+    """Generate audio samples for a single turn using Orpheus TTS.
+
+    Returns numpy int16 array of audio samples at 24kHz.
+    """
+    model = _get_orpheus()
+    sample_rate, samples = model.tts(text, options={
+        "voice_id": voice,
+        "max_tokens": 4096,   # longer turns need more tokens
+        "temperature": 0.6,   # lower = more stable/consistent voice
+        "top_p": 0.9,
+    })
+    # samples shape is (1, N) — squeeze to 1D
+    return samples.squeeze()
+
+
+async def generate_audio_orpheus(turns: list[dict], output_path: Path):
+    """Generate MP3 from conversation turns using Orpheus TTS."""
+    import numpy as np
+    from scipy.io.wavfile import write as write_wav
+
+    temp_dir = output_path.parent / '.temp'
+    temp_dir.mkdir(exist_ok=True)
+
+    all_samples = []
+    for i, turn in enumerate(turns):
+        voice = ORPHEUS_VOICE_HOST if turn['speaker'] == 'Alex' else ORPHEUS_VOICE_COHOST
+        print(f'    Turn {i+1}/{len(turns)} ({turn["speaker"]}): {len(turn["text"])} chars')
+
+        # Run TTS in executor to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
+        samples = await loop.run_in_executor(
+            None, generate_turn_orpheus, turn['text'], voice
+        )
+        all_samples.append(samples)
+
+        # Add a short silence between turns (0.3s at 24kHz)
+        silence = np.zeros(7200, dtype=np.int16)
+        all_samples.append(silence)
+
+    # Concatenate all audio
+    full_audio = np.concatenate(all_samples)
+
+    # Write WAV then convert to MP3 via ffmpeg
+    wav_path = temp_dir / f'{output_path.stem}.wav'
+    write_wav(str(wav_path), 24000, full_audio)
+
+    # Convert WAV → MP3
+    result = subprocess.run(
+        ['ffmpeg', '-y', '-i', str(wav_path), '-codec:a', 'libmp3lame',
+         '-b:a', '128k', str(output_path)],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f'    ffmpeg error: {result.stderr[:200]}')
+        # Fallback: just copy the WAV as-is (browser can play WAV too)
+        import shutil
+        wav_out = output_path.with_suffix('.wav')
+        shutil.move(str(wav_path), str(wav_out))
+        print(f'    Saved as WAV instead: {wav_out.name}')
+        return
+
+    # Cleanup
+    wav_path.unlink(missing_ok=True)
+    try:
+        temp_dir.rmdir()
+    except OSError:
+        pass
+
+
 # ── Main ──
 
-async def process_section(sec_id: str, paragraphs: list[str], section_names: dict):
+async def process_section(sec_id: str, paragraphs: list[str], section_names: dict,
+                          tts_engine: str = 'edge'):
     """Full pipeline for one section: text → conversation → audio."""
     title = section_names.get(sec_id, sec_id)
     output_mp3 = PODCAST_DIR / f'{sec_id}.mp3'
@@ -354,9 +484,12 @@ async def process_section(sec_id: str, paragraphs: list[str], section_names: dic
     total_words = sum(len(t['text'].split()) for t in turns)
     print(f'  [{sec_id}] {len(turns)} turns ({alex_turns} Alex, {jenny_turns} Jenny, ~{total_words} words)')
 
-    # Step 3: Generate audio
-    print(f'  [{sec_id}] Generating audio...')
-    await generate_audio(turns, output_mp3)
+    # Step 3: Generate audio with the selected TTS engine
+    print(f'  [{sec_id}] Generating audio ({tts_engine})...')
+    if tts_engine == 'orpheus':
+        await generate_audio_orpheus(turns, output_mp3)
+    else:
+        await generate_audio_edge(turns, output_mp3)
     size_kb = output_mp3.stat().st_size / 1024
     print(f'  [{sec_id}] -> {output_mp3.name} ({size_kb:.0f} KB)')
     return True
@@ -376,10 +509,12 @@ def get_section_names(html_path: Path) -> dict:
 
 async def main():
     parser = argparse.ArgumentParser(
-        description='Generate real conversational podcast using Claude CLI + edge-tts')
+        description='Generate real conversational podcast using Claude CLI + TTS')
     parser.add_argument('--all', action='store_true', help='Generate all sections')
     parser.add_argument('--sections', nargs='*', help='Specific section IDs')
     parser.add_argument('--list', action='store_true', help='List sections')
+    parser.add_argument('--tts', choices=['edge', 'orpheus'], default='edge',
+                        help='TTS engine: edge (default, Microsoft Azure) or orpheus (local, natural voice)')
     parser.add_argument('--force', action='store_true',
                         help='Regenerate even if MP3 exists (keeps cached transcripts)')
     parser.add_argument('--force-transcript', action='store_true',
@@ -389,6 +524,18 @@ async def main():
     if not any([args.all, args.sections, args.list]):
         parser.print_help()
         return
+
+    # Validate TTS engine dependencies
+    if args.tts == 'edge':
+        try:
+            import edge_tts  # noqa: F401
+        except ImportError:
+            sys.exit("Install edge-tts: pip install edge-tts")
+    elif args.tts == 'orpheus':
+        # Check ffmpeg is available (needed for WAV→MP3 conversion)
+        if subprocess.run(['which', 'ffmpeg'], capture_output=True).returncode != 0:
+            sys.exit("ffmpeg is required for Orpheus TTS. Install: brew install ffmpeg")
+        # Orpheus model loads lazily on first use
 
     sections = extract_sections(SOURCE)
     section_names = get_section_names(SOURCE)
@@ -422,7 +569,8 @@ async def main():
             continue
 
         try:
-            success = await process_section(sec_id, sections[sec_id], section_names)
+            success = await process_section(sec_id, sections[sec_id], section_names,
+                                            tts_engine=args.tts)
             if success:
                 generated += 1
         except Exception as e:
@@ -430,7 +578,7 @@ async def main():
             print(f'  [{sec_id}] Skipping, will retry on next run')
             continue
 
-    print(f'\nDone! {generated} podcast episodes generated in {PODCAST_DIR}/')
+    print(f'\nDone! {generated} podcast episodes generated in {PODCAST_DIR}/ (TTS: {args.tts})')
     print(f'Transcripts cached in {TRANSCRIPT_DIR}/')
 
 

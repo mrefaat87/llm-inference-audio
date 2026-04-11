@@ -45,24 +45,132 @@ TRANSCRIPT_DIR = BASE_DIR / "podcast" / "transcripts"
 VOICE_HOST = "en-US-GuyNeural"       # Alex — the explainer
 VOICE_COHOST = "en-US-JennyNeural"   # Jenny — the curious questioner
 
-SYSTEM_PROMPT = """You are a podcast script writer. Convert the following technical content into a natural, engaging conversation between two hosts:
+AUDIENCE = """The listener is a senior engineering leader at AWS — strong background in distributed systems, cloud infrastructure, and GPU workload scaling at cloud scale, but relatively new to ML internals. He learns best through concrete analogies mapped to infrastructure concepts he already knows: auto scaling, bin packing, memory hierarchies, distributed systems, EC2 capacity management."""
 
-- **Alex** (male): The main explainer. Deeply understands the material. Speaks clearly and uses analogies.
-- **Jenny** (female): The curious co-host. Asks smart questions, pushes for clarity, reacts genuinely, connects ideas to practical implications.
+# Map section IDs to their chapter for context
+CHAPTER_MAP = {
+    'tokenization': 'ch1', 'embeddings': 'ch1', 'qkv': 'ch1', 'multihead': 'ch1',
+    'layers': 'ch1', 'params': 'ch1', 'moe': 'ch1', 'numformats': 'ch1',
+    'mla': 'ch2', 'mtp': 'ch2', 'codesign': 'ch2',
+    'nvlink': 'ch3', 'parallelism': 'ch3',
+    'batching': 'ch4', 'kvcache': 'ch4', 'chunked': 'ch4', 'flashattn': 'ch4',
+    'quant': 'ch4', 'marlin': 'ch4', 'specdecode': 'ch4', 'optlist': 'ch4',
+    'reqlen': 'ch5', 'scheduling': 'ch5', 'outputpred': 'ch5', 'reqseqbatch': 'ch5',
+    'multiturn': 'ch5', 'agentic': 'ch5', 'disagg': 'ch5',
+    'traintoserve': 'ch6', 'engines': 'ch6', 'benchmarking': 'ch6',
+    'costeconomics': 'ch6', 'mfu': 'ch6',
+}
 
-Rules:
-1. This must feel like a REAL conversation — not two people reading a textbook. Include reactions ("Oh wow", "That's clever", "Wait, so..."), interruptions, building on each other's points.
-2. Cover ALL the key concepts from the source material. Don't skip important details.
-3. Use analogies and real-world comparisons to make technical concepts accessible.
-4. Jenny should ask the questions that a smart engineer new to this topic would ask.
-5. Keep it concise — aim for a 3-5 minute conversation when spoken aloud (~500-800 words).
-6. Output ONLY the dialogue, no stage directions or notes.
+CHAPTER_NAMES = {
+    'ch1': 'The Model (how transformers work internally)',
+    'ch2': 'Architecture Frontier (cutting-edge model designs)',
+    'ch3': 'The Hardware (GPUs, memory, interconnects)',
+    'ch4': 'Optimization (batching, caching, quantization, kernels)',
+    'ch5': 'Serving at Scale (scheduling, routing, disaggregation)',
+    'ch6': 'Operations (engines, benchmarking, cost economics)',
+}
 
+# Analogies pre-generated for each chapter to seed the conversation
+CHAPTER_ANALOGIES = {
+    'ch1': [
+        'Tokenizer = the codec/serializer at the API gateway — encodes raw input into the internal representation the system processes',
+        'Embedding table = a lookup cache mapping IDs to rich feature vectors, like a DNS resolver mapping names to IP addresses',
+        'Attention = a load balancer that routes each token\'s query to the most relevant keys across the full sequence',
+        'Multi-head attention = multiple independent load balancers, each specializing in different routing criteria (syntax, semantics, position)',
+        'Layers = stages in a processing pipeline — each layer refines the representation, like successive middleware in a request pipeline',
+        'Parameters = the total state the system must load into memory to serve — directly determines instance sizing',
+        'MoE = capacity pooling with sparse routing — like having 8 specialized instance types but only activating 2 per request',
+        'Number formats (FP16, BF16, FP8) = compression ratios for the model weights — smaller formats trade precision for throughput, like JPEG quality levels',
+    ],
+    'ch2': [
+        'MLA = compressing the KV cache by projecting keys/values into a smaller latent space — like compressing session state before storing it',
+        'Multi-token prediction = speculative execution — predict multiple future steps in parallel instead of one at a time',
+        'Hardware co-design = designing your application architecture around the constraints of your infrastructure (memory bandwidth, compute ratios)',
+    ],
+    'ch3': [
+        'GPU HBM = main memory, SRAM = L1 cache — the entire optimization game is keeping data close to compute',
+        'NVLink = a high-bandwidth backplane between GPUs, like a dedicated low-latency network between instances in a placement group',
+        'Tensor parallelism = sharding a model across GPUs like sharding a database across nodes — each shard processes its portion and they synchronize',
+        'Pipeline parallelism = assembly-line processing — each GPU handles a different stage of the model, like microservices in a pipeline',
+    ],
+    'ch4': [
+        'Continuous batching = a city bus that picks up and drops off passengers at every stop, vs. a charter that waits until full before departing',
+        'KV cache = a warm instance pool — pre-computed state you keep around to avoid re-doing work on every decode step',
+        'PagedAttention = virtual memory paging for the KV cache — allocate in fixed-size blocks, no fragmentation, can evict and reload',
+        'Chunked prefill = rate limiting long prompts so they don\'t starve decode requests — like admission control for bursty workloads',
+        'FlashAttention = a kernel that fuses multiple memory-bound operations into one pass — like combining multiple API calls into a batch request',
+        'Quantization = lossy compression of model weights — trading bits of precision for 2-4x throughput, like downsampling images for faster CDN delivery',
+        'Speculative decoding = optimistic concurrency — draft multiple tokens cheaply, then verify in one batch, accepting the ones that match',
+    ],
+    'ch5': [
+        'Request scheduling = the scheduler in an auto-scaling group deciding which instance handles which request',
+        'Admission control = a circuit breaker — reject requests early when the system is at capacity rather than letting them queue and timeout',
+        'Output length prediction = capacity planning — estimate how much resource a request will consume before committing to serve it',
+        'Disaggregation = separating prefill (compute-heavy) from decode (memory-heavy) onto different instance types, like splitting reads and writes to different database replicas',
+    ],
+    'ch6': [
+        'Engine comparison = choosing between ECS, EKS, and Lambda — each inference engine makes different tradeoffs for different workloads',
+        'Benchmarking = load testing your inference endpoint — the metrics that matter and how to avoid misleading results',
+        'Cost economics = unit economics of inference — cost-per-token is the new cost-per-request',
+        'MFU = the utilization metric for GPUs — like CPU utilization but for matrix math throughput, and much harder to max out',
+    ],
+}
+
+def build_prompt_for_section(section_text: str, section_title: str, sec_id: str) -> str:
+    """Build a tailored prompt for each section based on its chapter and content."""
+    chapter = CHAPTER_MAP.get(sec_id, 'ch1')
+    chapter_name = CHAPTER_NAMES.get(chapter, 'LLM Inference')
+    analogies = CHAPTER_ANALOGIES.get(chapter, [])
+
+    analogies_block = '\n'.join(f'  - {a}' for a in analogies)
+
+    return f"""You are writing a podcast script for a two-host show about LLM inference infrastructure.
+
+AUDIENCE:
+{AUDIENCE}
+
+HOSTS:
+- **Alex** (male): The main explainer. Has deep expertise in ML inference. Speaks with authority but accessibly. Uses analogies constantly — especially ones drawn from distributed systems and cloud infrastructure.
+- **Jenny** (female): A sharp, curious co-host. Comes from an infrastructure/systems background (like the listener). Asks the exact questions the listener would ask. Pushes Alex to go deeper, not just define terms. Reacts genuinely ("Oh wait, that's exactly like...", "So you're saying...", "Hang on, why not just...").
+
+CONTENT TO COVER:
+This episode covers "{section_title}" from the chapter "{chapter_name}".
+
+Here is the source material:
+---
+{section_text}
+---
+
+PRE-GENERATED ANALOGIES (use these as a starting point, adapt and extend them):
+{analogies_block}
+
+NARRATIVE INSTRUCTION:
+Do NOT survey the concepts one by one like a textbook. Build a connected story where each concept leads naturally to the next. Start with a hook that connects to something the listener already understands, then build outward. Each new concept should feel like the natural next question.
+
+DEPTH INSTRUCTION:
+For EVERY concept, explain WHY it works the way it does — not just WHAT it is. When Alex explains something, Jenny should push: "But why not just...?", "What breaks if you don't do that?", "How does that play out at scale?" Go slow. Let the concepts breathe. If a concept has 3 important aspects, give each one its own exchange — don't compress three ideas into one paragraph.
+
+CONVERSATION INSTRUCTION:
+This must sound like two real people talking — not reading from a script. Include:
+- Natural reactions and interruptions
+- Jenny connecting new ideas back to infrastructure concepts she knows
+- Moments where Alex corrects a misconception or refines an analogy
+- Occasional humor or surprise
+- Building on each other's points rather than alternating monologues
+
+CLOSING:
+After covering the section content, close with a 2-minute "connect forward" segment where Alex and Jenny preview what comes next and why it matters — tease the listener about where these concepts lead.
+
+LENGTH:
+Aim for 8-12 minutes when spoken aloud (~1200-1800 words). This is longer than a quick overview — take the time to go deep.
+
+FORMAT:
+Output ONLY the dialogue lines. No stage directions, no notes, no headers.
 Format each line EXACTLY as:
 Alex: <what Alex says>
 Jenny: <what Jenny says>
 
-Do not use any other format. Start the conversation directly."""
+Start the conversation directly."""
 
 
 # ── Text extraction (reused from generate_podcast.py) ──
@@ -113,15 +221,9 @@ def table_to_text(table) -> str:
 
 # ── Conversation generation via Claude CLI ──
 
-def generate_conversation(section_text: str, section_title: str) -> str:
+def generate_conversation(section_text: str, section_title: str, sec_id: str = '') -> str:
     """Call claude -p to generate a podcast conversation script."""
-    prompt = f"""Here is a technical article section titled "{section_title}":
-
----
-{section_text}
----
-
-{SYSTEM_PROMPT}"""
+    prompt = build_prompt_for_section(section_text, section_title, sec_id)
 
     result = subprocess.run(
         ['claude', '-p', prompt, '--output-format', 'text'],
@@ -233,7 +335,7 @@ async def process_section(sec_id: str, paragraphs: list[str], section_names: dic
         # Generate conversation via Claude
         section_text = '\n\n'.join(paragraphs)
         print(f'  [{sec_id}] Generating conversation via Claude CLI...')
-        script = generate_conversation(section_text, title)
+        script = generate_conversation(section_text, title, sec_id)
         if not script:
             print(f'  [{sec_id}] Failed to generate conversation')
             return False

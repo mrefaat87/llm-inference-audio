@@ -226,6 +226,29 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
 /* ── Audio Fallback Message ── */
 .audio-fallback { font-size: 12px; color: #64748b; padding: 4px 0; }
 .audio-fallback code { font-size: 11px; }
+
+/* ── Speed Slider ── */
+.speed-control { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.speed-slider { -webkit-appearance: none; appearance: none; width: 80px; height: 4px; border-radius: 2px; background: #2d3748; outline: none; cursor: pointer; }
+.speed-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #3b82f6; cursor: pointer; border: none; }
+.speed-slider::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: #3b82f6; cursor: pointer; border: none; }
+.speed-label { font-size: 12px; font-weight: 600; color: #93c5fd; min-width: 32px; text-align: center; }
+
+/* ── Completion Indicators (sidebar) ── */
+.nav-item { position: relative; padding-right: 28px; }
+.completion-dot { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid #2d3748; background: transparent; cursor: pointer; transition: all 0.15s; flex-shrink: 0; }
+.completion-dot:hover { border-color: #64748b; }
+.completion-dot.in-progress { background: #eab308; border-color: #eab308; }
+.completion-dot.done { background: #22c55e; border-color: #22c55e; }
+
+/* ── Notes Section ── */
+.notes-section { margin-top: 32px; padding-top: 20px; border-top: 1px solid #1e2a3a; }
+.notes-label { font-size: 13px; font-weight: 600; color: #94a3b8; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+.notes-textarea { width: 100%; min-height: 120px; padding: 12px; border-radius: 8px; border: 1px solid #2d3748; background: #131825; color: #e2e8f0; font-family: inherit; font-size: 14px; line-height: 1.6; resize: vertical; outline: none; }
+.notes-textarea:focus { border-color: #3b82f6; }
+.notes-textarea::placeholder { color: #4a5568; }
+.notes-saved { font-size: 11px; color: #22c55e; opacity: 0; transition: opacity 0.3s; }
+.notes-saved.visible { opacity: 1; }
 </style>
 </head>
 <body>
@@ -351,7 +374,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <strong id="listenTitle">Tokenization</strong>
     <div class="audio-progress" id="listenProgress">Section 1/33</div>
   </div>
-  <button class="audio-rate" id="listenRateBtn" onclick="cycleRate('listen')" title="Playback speed">1.0x</button>
+  <div class="speed-control"><input type="range" class="speed-slider" id="listenSpeedSlider" min="0.5" max="3" step="0.05" value="1" oninput="setRate(this.value)" title="Playback speed"><span class="speed-label" id="listenSpeedLabel">1x</span></div>
   <label class="audio-toggle"><input type="checkbox" id="listenAutoAdvance" onchange="setAutoAdvance(this.checked)"> Auto</label>
   <audio id="listenPlayer" preload="metadata" style="display:none;"></audio>
   <div class="audio-fallback" id="listenFallback" style="display:none;font-size:12px;color:#64748b;">Run <code>generate_podcast.py --narration</code></div>
@@ -366,7 +389,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
       <strong id="podcastTitle">Tokenization</strong>
       <div class="audio-progress" id="podcastProgress">Section 1/33</div>
     </div>
-    <button class="audio-rate" id="podcastRateBtn" onclick="cycleRate('podcast')" title="Playback speed">1.0x</button>
+    <div class="speed-control"><input type="range" class="speed-slider" id="podcastSpeedSlider" min="0.5" max="3" step="0.05" value="1" oninput="setRate(this.value)" title="Playback speed"><span class="speed-label" id="podcastSpeedLabel">1x</span></div>
     <label class="audio-toggle"><input type="checkbox" id="podcastAutoAdvance" onchange="setAutoAdvance(this.checked)"> Auto</label>
   </div>
   <audio id="podcastPlayer" preload="metadata" style="display:none;"></audio>
@@ -3094,24 +3117,26 @@ function formatTime(s) {
 }
 
 /* ══════════════════════════════════════════════════════════
-   RATE CONTROL
+   RATE CONTROL (slider)
    ══════════════════════════════════════════════════════════ */
-const rates = [0.75, 1, 1.25, 1.5, 2];
+function formatRate(r) {
+  r = parseFloat(r);
+  return (r % 1 === 0) ? r + 'x' : r.toFixed(r * 100 % 10 === 0 ? 1 : 2) + 'x';
+}
 
-function cycleRate(mode) {
-  const idx = rates.indexOf(currentRate);
-  currentRate = rates[(idx + 1) % rates.length];
+function setRate(val) {
+  currentRate = parseFloat(val);
   localStorage.setItem('llm-ref-rate', currentRate);
-  // Apply to both players
   Object.values(players).forEach(p => { if (p) p.playbackRate = currentRate; });
-  // Update both rate buttons
-  document.getElementById('listenRateBtn').textContent = currentRate + 'x';
-  document.getElementById('podcastRateBtn').textContent = currentRate + 'x';
+  // Sync both sliders and labels
+  document.getElementById('listenSpeedSlider').value = currentRate;
+  document.getElementById('podcastSpeedSlider').value = currentRate;
+  document.getElementById('listenSpeedLabel').textContent = formatRate(currentRate);
+  document.getElementById('podcastSpeedLabel').textContent = formatRate(currentRate);
 }
 
 // Restore saved rate on load
-document.getElementById('listenRateBtn').textContent = currentRate + 'x';
-document.getElementById('podcastRateBtn').textContent = currentRate + 'x';
+setRate(currentRate);
 
 /* ══════════════════════════════════════════════════════════
    AUTO-ADVANCE
@@ -3138,7 +3163,7 @@ function onSectionChanged(id) {
    KEYBOARD SHORTCUTS
    ══════════════════════════════════════════════════════════ */
 document.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
   const idx = order.indexOf(currentSec);
 
   // Arrow keys = navigate sections
@@ -3159,6 +3184,75 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowRight') { e.preventDefault(); audioNav(1); }
     if (e.key === 'ArrowLeft')  { e.preventDefault(); audioNav(-1); }
   }
+});
+
+/* ══════════════════════════════════════════════════════════
+   COMPLETION CHECKBOXES (none → yellow → green)
+   ══════════════════════════════════════════════════════════ */
+const completionState = JSON.parse(localStorage.getItem('llm-ref-completion') || '{}');
+
+function cycleCompletion(secId, dot, e) {
+  e.stopPropagation(); // Don't navigate to the section
+  const cur = completionState[secId] || 0;
+  const next = (cur + 1) % 3; // 0=none, 1=in-progress, 2=done
+  if (next === 0) {
+    delete completionState[secId];
+  } else {
+    completionState[secId] = next;
+  }
+  localStorage.setItem('llm-ref-completion', JSON.stringify(completionState));
+  applyDotState(dot, next);
+}
+
+function applyDotState(dot, state) {
+  dot.classList.remove('in-progress', 'done');
+  if (state === 1) dot.classList.add('in-progress');
+  if (state === 2) dot.classList.add('done');
+}
+
+// Add dots to all nav items
+document.querySelectorAll('.nav-item[data-sec]').forEach(btn => {
+  const dot = document.createElement('span');
+  dot.className = 'completion-dot';
+  dot.title = 'Click: mark progress (yellow → green → clear)';
+  const secId = btn.dataset.sec;
+  applyDotState(dot, completionState[secId] || 0);
+  dot.addEventListener('click', (e) => cycleCompletion(secId, dot, e));
+  btn.appendChild(dot);
+});
+
+/* ══════════════════════════════════════════════════════════
+   NOTES SECTION (per-page free text)
+   ══════════════════════════════════════════════════════════ */
+const notesData = JSON.parse(localStorage.getItem('llm-ref-notes') || '{}');
+let noteSaveTimer = null;
+
+function saveNote(secId, textarea, indicator) {
+  const val = textarea.value;
+  if (val.trim()) {
+    notesData[secId] = val;
+  } else {
+    delete notesData[secId];
+  }
+  localStorage.setItem('llm-ref-notes', JSON.stringify(notesData));
+  indicator.classList.add('visible');
+  clearTimeout(noteSaveTimer);
+  noteSaveTimer = setTimeout(() => indicator.classList.remove('visible'), 1500);
+}
+
+// Inject notes section into every content section
+document.querySelectorAll('.content > div[id^="sec-"]').forEach(sec => {
+  const secId = sec.id.replace('sec-', '');
+  const notesDiv = document.createElement('div');
+  notesDiv.className = 'notes-section';
+  notesDiv.innerHTML =
+    '<div class="notes-label">My Notes <span class="notes-saved" id="notesSaved-' + secId + '">Saved</span></div>' +
+    '<textarea class="notes-textarea" placeholder="Add your notes, questions, or teach-back summaries here..." id="notesArea-' + secId + '"></textarea>';
+  sec.appendChild(notesDiv);
+  const textarea = notesDiv.querySelector('textarea');
+  const indicator = notesDiv.querySelector('.notes-saved');
+  if (notesData[secId]) textarea.value = notesData[secId];
+  textarea.addEventListener('input', () => saveNote(secId, textarea, indicator));
 });
 
 /* ══════════════════════════════════════════════════════════

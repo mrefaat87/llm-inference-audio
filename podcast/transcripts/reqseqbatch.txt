@@ -1,0 +1,29 @@
+Alex: So today we need to untangle three terms that get thrown around almost interchangeably in inference serving, and it drives me crazy. Request, sequence, and batch.
+Jenny: Oh, these come up constantly. I feel like every paper uses them slightly differently.
+Alex: Exactly. But here's the thing — they're actually describing the same unit of work, just at three different layers of the stack. A request is what the outside world sees. Someone hits your API with a prompt, wants a completion back. It arrives, it queues, it gets processed, response goes out. Simple lifecycle, doesn't change.
+Jenny: Okay, so request is the external view. What happens once it gets inside the engine?
+Alex: That's where it becomes a sequence. Once a request is admitted into the engine and gets KV cache allocated on the GPU, it's now a sequence. And unlike a request, a sequence is alive — it grows with every decode step as new tokens get generated. It can be preempted, swapped out to CPU memory, brought back later.
+Jenny: Wait, so the key distinction is that a sequence has actual GPU resources tied to it?
+Alex: Exactly. A request is just bytes. A sequence is expensive — it's holding real estate in GPU memory.
+Jenny: And then batch is the GPU's view?
+Alex: Right. The batch is whatever set of sequences the GPU is crunching through in one forward pass. It loads the model weights once and processes all batch members simultaneously. And with continuous batching, that composition changes every single decode step.
+Jenny: Okay, that's clean. So let me trace through a real example. Say I have 72 requests hitting the system...
+Alex: Great, let's use real numbers. You've got 72 requests in flight, but most of them — like 60 plus — are just sitting in a message queue. Cheap, just bytes in memory. Then you've got a prefetch buffer of maybe 5 that have been delivered to the worker but aren't on the GPU yet. Still cheap. And then only 5 to 7 are actual active sequences on the GPU with KV cache allocated.
+Jenny: So out of 72 requests, only 5 to 7 are actually costing you GPU memory?
+Alex: Exactly. And that's the whole point of having a queue in front of your engine. You're keeping requests in the cheap place — the message queue — instead of the expensive place — GPU memory. The prefetch count is literally the knob that controls how many requests cross that boundary into becoming sequences.
+Jenny: That's a great way to think about it. It's like... a restaurant with a waiting area versus actual tables. You want people waiting in the lobby, not all crammed at tables ordering nothing.
+Alex: Perfect analogy. Now here's where batch size gets really interesting. Going from a batch size of 1 to 64, you can see a 25x throughput improvement.
+Jenny: Twenty-five x? From just batching?
+Alex: Think about it. The GPU has to load all the model weights for every forward pass regardless. With batch size 1, you load all those weights and produce one token. With batch size 64, same weight load, 64 tokens out. You're amortizing that massive memory bandwidth cost across more useful work.
+Jenny: So it's like heating up a giant industrial oven to bake one cookie versus filling it with 64 cookies. Same energy cost for the oven, way more output.
+Alex: That's exactly it. And this is why continuous batching is so critical — it keeps that oven full. The moment one sequence finishes, a new one slides in.
+Jenny: Okay, but there's something that confused me. The word batch means different things during prefill versus decode, right?
+Alex: Yes, and this trips people up constantly. During prefill, you might have a single sequence with a 2,000 token prompt, and all 2,000 tokens get processed in one forward pass. That's a "batch" of 2,000 tokens, but it's all from one sequence. The batch dimension is tokens within a sequence.
+Jenny: And during decode?
+Alex: Completely different. During decode, you might have 64 sequences each contributing exactly one new token. So your batch is 64 tokens, but across 64 different sequences. The batch dimension flips from tokens to sequences.
+Jenny: Oh, so when someone says "batch size 64 with sequence length 2,048"...
+Alex: The 64 is how many sequences, the 2,048 is per-sequence length. During decode, each sequence contributes one token per step, so you're processing 64 tokens total but for 64 different users essentially.
+Jenny: That distinction is really important. Because the compute profile is completely different — prefill is this big parallel chunk for one request, decode is many tiny steps across many requests.
+Alex: And that's actually why some systems are starting to separate prefill and decode onto different hardware entirely. But that's a whole other conversation.
+Jenny: Alright, so the takeaway — request is the API's view, sequence is the engine's view with real GPU cost, batch is the GPU's view of what it's crunching right now. And keep your expensive sequences small while your cheap queue absorbs the load.
+Alex: Couldn't have said it better.

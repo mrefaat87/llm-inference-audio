@@ -1,0 +1,41 @@
+Alex: So today we're talking about Q, K, and V — queries, keys, and values. These are the three projections that make attention work in transformers, and honestly, once you get this, so much of how large language models work just clicks.
+
+Jenny: Okay, I know attention is like the core mechanism, but I've always found Q, K, V a bit abstract. Can you ground it for me?
+
+Alex: Absolutely. Here's my favorite example. Take the sentence: "The bank near the river was flooded. It was too damaged to reopen." The model hits the word "it" and needs to figure out — what does "it" refer to? Bank? River? That's exactly the problem Q, K, V solve.
+
+Jenny: Oh, so it's basically a reference resolution problem.
+
+Alex: Exactly. So each token gets three separate vectors computed from its embedding. The Query is like a question the token is asking — "it" generates a Q that essentially says "I'm a pronoun looking for a concrete, damageable noun." The Key is like an advertisement — each token broadcasts what it contains. "Bank" advertises "I'm a physical structure that can be damaged and closed." "River" says "I'm a body of water." And "was" says "I'm a verb" — terrible match for a pronoun needing a noun.
+
+Jenny: That's a great way to think about it. So the Query is the search, and the Key is the label you're searching against. But then what's the Value?
+
+Alex: This is the clever part. Once "it" decides "bank" is the best match by comparing Q against K, it doesn't pull in bank's Key. It pulls in bank's Value — which is a much richer representation. The Key was the label on the filing cabinet drawer. The Value is everything inside the drawer.
+
+Jenny: Wait, so why not just make Key and Value the same thing? Why the separation?
+
+Alex: Because if they were the same, you'd be forced to use your full rich representation as your search index. That's noisy and inefficient. By separating them, the model learns to optimize the Key purely for matching and the Value purely for information transfer. It's actually one of the most elegant design decisions in the whole transformer architecture.
+
+Jenny: That is clever. Okay so walk me through the actual math. How does the model go from these vectors to deciding "it" means "bank"?
+
+Alex: Five steps. First, "it" takes its Q vector and computes a dot product with every other token's K vector. That gives you a similarity score — higher means more relevant. "Bank" gets a high score, "river" medium, grammar words near zero. Second, you scale those scores by dividing by the square root of the head dimension. Without this, the dot products get too large and softmax saturates — you get near-zero gradients and training just stops.
+
+Jenny: So that's why it's called "scaled" dot-product attention.
+
+Alex: Exactly. Third, you apply a causal mask — in autoregressive generation, a token can't attend to future tokens it hasn't generated yet, so you set those to negative infinity. Fourth, softmax converts everything into probabilities that sum to one. "It" might put 70% weight on "bank," 20% on "river," 10% spread across everything else. And fifth, you take a weighted sum of all the Value vectors using those probabilities.
+
+Jenny: So the output isn't the word "bank" — it's a blended vector?
+
+Alex: Right, and that's a really important subtlety. The model doesn't make a binary choice. It carries forward a weighted blend of context from every relevant token. That blended vector flows into the next layer carrying the resolved meaning.
+
+Jenny: Okay, now the practical angle — these Q, K, V vectors have to be stored somewhere, right? How big are we talking?
+
+Alex: So each one is computed by multiplying the token's embedding by a learned weight matrix. For GPT-3, the embedding is 12,288 dimensions, and each head projects that down to 128 dimensions. The real problem is the KV cache. During generation, every new token needs to attend to all previous tokens, so you store their K and V vectors in GPU memory. For GPT-3, that's about 4.7 megabytes per token. A 100,000 token context needs roughly 470 gigabytes just for the KV cache.
+
+Jenny: 470 gigabytes! So long-context serving is fundamentally a memory problem, not a compute problem.
+
+Alex: You nailed it. That's exactly why techniques like GQA and MQA exist — they share K and V across attention heads to shrink that cache. And it's why PagedAttention was such a breakthrough — it manages KV cache memory the way an operating system pages virtual memory.
+
+Jenny: This all connects back to why inference infrastructure is so interesting. The math is elegant, but serving it at scale is a completely different engineering challenge.
+
+Alex: And that tension between the elegance of the algorithm and the brutality of the memory constraints — that's really the story of modern inference.

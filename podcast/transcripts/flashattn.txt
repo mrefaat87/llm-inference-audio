@@ -1,0 +1,27 @@
+Alex: So FlashAttention — this is one of those ideas that sounds simple in hindsight but completely changed what's possible with large language models. Let me set up the problem first.
+Jenny: Yeah, let's start with why we even needed it.
+Alex: Okay, so in standard attention, you're computing a score matrix — every token compared against every other token. For a 32,000 token context, that's over a billion entries. In FP16, that's about 2 gigabytes just for this one intermediate matrix, per layer.
+Jenny: Per layer? So for a model with like 96 layers...
+Alex: Exactly — you're talking hundreds of gigabytes of memory traffic just for attention intermediates. And it's not just the size. That matrix has to be written to HBM — that's the GPU's main memory — then read back for softmax, written again, read again for the value weighting. Four round trips to HBM per layer.
+Jenny: So the GPU cores are just sitting there waiting for data to show up?
+Alex: That's exactly it. The arithmetic units — the Tensor Cores — are incredibly fast. They can crunch numbers way faster than HBM can feed them. So standard attention is memory-bandwidth-bound, not compute-bound. Adding more TFLOPS literally doesn't help.
+Jenny: That's frustrating. You've got all this horsepower and you can't use it.
+Alex: Right. And these two problems compound — the quadratic memory means there's a hard ceiling on context length. Once that score matrix doesn't fit in HBM, you just can't run attention at all.
+Jenny: Okay so how does FlashAttention fix this?
+Alex: The key insight is you don't actually need the full N-by-N matrix to exist all at once. You can compute attention in small tiles that fit in SRAM — that's the on-chip memory, way faster than HBM, like 20 terabytes per second fast.
+Jenny: But wait — softmax needs to see all the scores to normalize, right? You need the denominator across everything.
+Alex: That's the clever part. There's a technique called online softmax. As you process each tile, you maintain a running maximum and a running normalization factor. You update them tile by tile, and the final result is mathematically identical to standard softmax. You never need all the scores at once.
+Jenny: Oh, that's really elegant. So the full score matrix just... never exists in HBM?
+Alex: Never. You load a tile of queries into SRAM, then for each tile of keys and values, you compute partial scores, update your running stats, accumulate the weighted values, and move on. When you're done with that query tile, you write the final output to HBM once. Q, K, and V each read once. Output written once. That's it.
+Jenny: So memory goes from quadratic to linear?
+Alex: Exactly. O(n²) down to O(n). And in practice it's 2 to 4x faster because you're not starving the compute cores anymore. You're approaching compute-bound instead of memory-bound.
+Jenny: Has it evolved since the original paper?
+Alex: Yeah, three versions so far. FlashAttention-1 in 2022 proved the concept. FlashAttention-2 in 2023 added better parallelism — the first version only parallelized across batch and heads, but FA2 also parallelizes across the sequence dimension, so you actually use all the GPU thread blocks. Roughly 2x faster than FA1.
+Jenny: And there's a version 3?
+Alex: FlashAttention-3 in 2024 is specifically tuned for H100 GPUs — it uses asynchronous memory movement, FP8 tensor cores, better pipelining. It's approaching the theoretical hardware speed-of-light for attention.
+Jenny: So here's what I want to make sure I understand — FlashAttention didn't reduce the compute, right? It's still O(n²) FLOPs?
+Alex: That's a critical distinction and people get this wrong all the time. The compute is still quadratic — you're still doing the Q times K-transpose matmul, which is O(n² times d) FLOPs. FlashAttention just does those same FLOPs in SRAM tiles instead of materializing the full matrix in HBM. It removed the memory explosion, not the compute.
+Jenny: So long contexts are still slow, just... physically possible now.
+Alex: Exactly. Before FlashAttention, 128K token contexts were physically impossible — the score matrices alone would blow past all available memory. After FlashAttention, they're feasible. But the quadratic compute still means they're expensive. That's why the next frontier is things like GQA, MLA, state-space layers — actually reducing the number of quadratic operations, not just making each one more memory efficient.
+Jenny: So FlashAttention is the enabler — it shifted the bottleneck from attention memory to KV cache memory, and then all these other techniques address that new bottleneck.
+Alex: That's the perfect summary. It's what we call an unhobbler — it didn't just make things faster by a constant factor. It changed what context lengths are physically possible to serve. Basically every long-context system in production today depends on it.

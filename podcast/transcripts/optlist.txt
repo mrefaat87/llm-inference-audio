@@ -1,0 +1,30 @@
+Alex: So today we're doing something fun — we're going to run through every major inference optimization technique and talk about what each one actually does under the hood.
+Jenny: Every single one? That sounds like a lot.
+Alex: It is, but here's the trick that makes it manageable. Every optimization attacks one of just three bottlenecks — compute throughput, memory bandwidth, or memory capacity. Once you know which bottleneck a technique targets, it clicks into place.
+Jenny: Okay, I like that framing. So let's start with compute. What's wasting our GPU cycles?
+Alex: The biggest one is continuous batching. So picture a city bus route. The old way of batching — static batching — is like a charter bus. It waits until every seat is full, drives the whole route, then comes back for the next group. Continuous batching is the city bus. People hop on and off at every stop. The bus never sits idle waiting.
+Jenny: So you're swapping requests in and out at every single decode step?
+Alex: Exactly. A request finishes generating? Great, evict it, pull in a new one immediately. No waiting. That alone takes GPU utilization from something like 30% up to 85% or higher.
+Jenny: That's a massive jump. Okay, what about memory capacity? I've heard KV cache is the real bottleneck there.
+Alex: It absolutely is, and that's where PagedAttention comes in. Think of it like OS virtual memory. Instead of pre-allocating one big contiguous block of memory for each request's KV cache — which wastes tons of space — you break it into small pages. Allocate them on demand, scatter them wherever there's room.
+Jenny: Oh, like how your operating system doesn't actually give a program one continuous block of RAM — it just maps virtual pages to whatever physical frames are free.
+Alex: Exactly that analogy. And the result? KV cache fragmentation drops from around 60% wasted space to nearly zero. You can fit way more concurrent requests in the same GPU memory.
+Jenny: That's elegant. Now what about latency? Because I've seen these nasty spikes where a long prompt comes in and suddenly everyone's decode tokens stall.
+Alex: You're describing exactly the problem chunked prefill solves. Instead of processing a 10,000-token prompt all at once — which hogs the GPU and blocks decode tokens from other requests — you chop it into fixed-size chunks. Process one chunk per step, mixed right in with the decode tokens from other requests.
+Jenny: So it's like time-slicing. The long prefill shares the GPU with everyone else instead of monopolizing it.
+Alex: Right. Those 500-millisecond TBT spikes? Gone.
+Jenny: Okay, this is great. What about when you have a bunch of requests that all share the same system prompt? Like in a RAG application where everyone gets the same context documents?
+Alex: That's prefix caching, sometimes called radix attention. You compute the KV vectors for that shared prefix once, cache them, and reuse them for every request that starts with the same text. Hash-based matching finds the common prefix.
+Jenny: So you're basically eliminating redundant prefill compute. That would crush TTFT for those repeated prompts.
+Alex: Exactly. Now, speculative decoding is a totally different trick — it attacks decode latency. You run a tiny draft model that proposes, say, five tokens really fast. Then the big model verifies all five in one parallel forward pass. If the first four match but the fifth doesn't, you keep the four good ones, correct the fifth, and move on.
+Jenny: Wait, so you get multiple tokens per step from the big model, but the quality is identical because you're still verifying against it?
+Alex: Identical. No quality loss. Two to three x decode throughput for free, basically.
+Jenny: That's clever. Okay, FlashAttention — I keep hearing about this one.
+Alex: FlashAttention is attacking memory bandwidth. Standard attention computes that full N-by-N attention matrix and stores it in HBM — your main GPU memory. FlashAttention tiles the computation so everything stays in SRAM — the tiny, ultra-fast on-chip memory. It uses an online softmax trick so it never needs to materialize the full matrix.
+Jenny: So you go from quadratic memory to linear, and it's two to four x faster because you're not bottlenecked on the HBM bandwidth anymore.
+Alex: Bingo. And that's what makes long context windows even possible. Without it, a 128K context would just blow up your memory.
+Jenny: Last couple — GQA and KV cache quantization?
+Alex: Both attack KV cache size from different angles. GQA — grouped query attention — shares key and value heads across multiple query heads. Instead of every query head having its own K and V, a group shares one set. MQA takes it to the extreme with just one global K/V head. And KV cache quantization simply stores those vectors in INT8 or FP8 instead of FP16. Half the bits, double the sequences you can serve.
+Jenny: So GQA shrinks the cache architecturally, and quantization shrinks it numerically. And you can stack them.
+Alex: You absolutely can, and most production systems do. That's the beautiful thing — these techniques are composable. Continuous batching plus PagedAttention plus FlashAttention plus GQA plus KV cache quantization — layer them all together and you get a system that's radically more efficient than any one technique alone.
+Jenny: It's like each one removes a different ceiling. Love it. This was a great overview.

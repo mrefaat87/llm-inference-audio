@@ -1,0 +1,49 @@
+Alex: So today we're tackling something that's absolutely fundamental to how LLMs actually work in practice — the KV cache, prompt caching, and how you route requests smartly across a cluster.
+
+Jenny: Okay, let's start with the KV cache. I know it's important, but I want to understand why it's not just an optimization — why people say inference literally doesn't work without it.
+
+Alex: Right, so here's the thing. When an LLM generates text, it produces one token at a time, and every new token needs to attend to all the previous tokens. That attention step requires these K and V vectors — key and value vectors — for every prior token.
+
+Jenny: So without caching those, what happens?
+
+Alex: You'd recompute every previous token's K and V vectors from scratch on every single decode step. Generating token 500 means recomputing tokens 1 through 499. Then for token 501, you do tokens 1 through 500 all over again. Total compute scales as O(N squared) in the output length. You'd be recomputing token 1's vectors 499 times for a 500-token response. It's completely infeasible.
+
+Jenny: That's wild. So the KV cache just stores those vectors once and reuses them?
+
+Alex: Exactly. Compute once during prefill, store them in GPU memory, and each new decode step just loads the cached values and runs attention once. Goes from O(N squared) to O(N). Non-negotiable.
+
+Jenny: Okay, so now the problem becomes managing all that GPU memory. That's where PagedAttention comes in?
+
+Alex: Exactly. The naive approach is to allocate a big contiguous block of GPU memory for each request, sized for the maximum possible response length. But you don't know how long a response will be, so you over-allocate massively. And as requests finish at different lengths, you get fragmentation — little unusable gaps everywhere. vLLM measured 60 to 80 percent memory waste from this.
+
+Jenny: Wait, 60 to 80 percent waste? That's enormous.
+
+Alex: It's brutal. So PagedAttention does exactly what your operating system does with virtual memory. It divides GPU memory into fixed-size blocks — say, 16 tokens worth of K and V vectors. Each sequence gets a page table mapping its logical positions to physical blocks. Blocks are allocated on demand, they don't need to be contiguous, and they can even be shared across sequences.
+
+Jenny: Oh, shared — like if multiple requests start with the same system prompt?
+
+Alex: Exactly, and that's the bridge to prompt caching. Think about a customer support bot where every request starts with a 2,000-token system prompt. Without prompt caching, every single request independently runs prefill on that identical prefix. Pure compute waste. Prompt caching stores those KV vectors and reuses them. For a big model like LLaMA-3 70B, that's roughly 100 milliseconds saved per request.
+
+Jenny: That adds up fast at scale. But wait — if you have multiple GPU workers in a cluster, doesn't this create a problem? Worker A has the cached prefix, Worker B doesn't.
+
+Alex: And that's the distributed systems problem. Your load balancer now has to be cache-aware. You could use consistent hashing on the prompt prefix — route all requests with the same prefix to the same worker. Great cache hit rate, but if that prefix is popular, you've just created a hotspot.
+
+Jenny: Classic tradeoff. Perfect cache locality versus even load distribution.
+
+Alex: Exactly. So production systems use hybrid policies — consistent hash as the primary signal, with overflow to other workers when the primary is too loaded. It's genuinely unsettled territory.
+
+Jenny: Now I've also heard about SGLang doing something different with a radix tree. What's the advantage there?
+
+Alex: So vLLM hashes blocks of 16 tokens. Works great for linear shared prefixes. But real workloads branch — five different system prompts, each with different few-shot examples, multi-turn conversations that diverge. A radix tree stores these naturally. The shared root is stored once, and branches fork at the divergence points. With hash-based caching, that shared root gets duplicated in every branch's cache entry.
+
+Jenny: So if I have a math few-shot branch and a code few-shot branch, the radix tree shares the system prompt between them instead of storing it twice?
+
+Alex: Precisely. And a new request walks the tree, matches as deep as it can, and only prefills the remaining tokens. SGLang's cache-aware router reportedly gets 1.9x throughput improvement just from routing similar prefixes to the same worker to maximize those tree hits.
+
+Jenny: That's a massive gain from what's essentially a smarter data structure choice. One last thing — if a token changes mid-prefix, does it blow the whole cache?
+
+Alex: Not the whole cache, no. In vLLM, it invalidates from the block boundary containing the change onward. So if token 50 changes in a 1,024-token prefix with 16-token blocks, the first 3 blocks — tokens 0 through 47 — still hit. Everything from block 4 onward misses because of the hash chain. The radix tree approach has finer granularity since it works at arbitrary segment lengths rather than fixed blocks.
+
+Jenny: So you get partial reuse either way, just at different granularities. This whole stack — KV cache making inference feasible, PagedAttention making memory efficient, prompt caching avoiding redundant compute, and smart routing tying it all together at cluster scale — it's really elegant how each layer builds on the last.
+
+Alex: That's exactly right. And every one of these layers is an active area of optimization. This is where a lot of the real inference performance gains are happening right now.

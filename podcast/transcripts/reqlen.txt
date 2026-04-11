@@ -1,0 +1,26 @@
+Alex: So here's something that took me a while to really internalize — not all inference requests are created equal. In fact, you can break them into four completely different serving problems just based on prompt length and output length.
+Jenny: Four different problems? Like, short prompt short output, short prompt long output...
+Alex: Exactly. Short-short, short-long, long-short, long-long. And the reason they're so different comes down to a fundamental asymmetry in how GPUs work during inference. Prefill and decode are bottlenecked by completely different things.
+Jenny: Okay, break that down for me.
+Alex: So prefill — processing all your input tokens in parallel — is compute-bound. It's pure math. The bottleneck is TFLOPS, how many trillion arithmetic operations your GPU can crunch per second. More TFLOPS, faster prefill. The H100 has roughly three times the TFLOPS of the A100, and you really feel that difference during prefill.
+Jenny: And decode is different?
+Alex: Totally different. Decode is memory-bandwidth-bound. Every single decode step has to load all the model weights from GPU memory just to produce one token. So the bottleneck isn't math speed, it's how fast you can shuttle bytes from memory to the compute units. That's why the H100 SXM version with its 3.35 terabytes per second of bandwidth crushes the PCIe version at decode, even though they have similar compute.
+Jenny: Wait, so you could have a GPU that's amazing at prefill but mediocre at decode, or vice versa?
+Alex: Exactly. And that insight is the seed for something really important we'll get to. But first, let's walk through the four request types. Short prompt, short output — think chatbot one-liners. The challenge is pure throughput. You're getting thousands of requests per second, and per-request scheduling overhead starts to matter. You want big dynamic batches, continuous batching, and prefix caching for repeated system prompts.
+Jenny: That makes sense. What about short prompt, long output?
+Alex: This one's sneaky. Prefill is cheap because the prompt is short. But then decode runs for hundreds or thousands of steps, and the KV cache just keeps growing. One long-running request can hog GPU memory for minutes. So you need memory-aware admission control — basically saying "I can only handle this many active sequences before I run out of KV cache budget." And if you overflow, you swap KV cache to CPU RAM.
+Jenny: So it's a memory management problem more than a compute problem.
+Alex: Exactly. Now flip it — long prompt, short output. Say you upload a 50,000-token document and ask a yes-or-no question. Prefill takes multiple seconds, and during that entire time, every other decode sequence on that GPU is stalled. Your time to first token is terrible.
+Jenny: Oh, that's the chunked prefill thing, right? Break the prefill into smaller pieces so decode can interleave?
+Alex: Spot on. Chunked prefill is the main defense here. And then long prompt, long output is just... the worst of both worlds. Long prefill blocks decode, long decode eats all your memory. You really can't batch these efficiently with short requests without causing severe interference.
+Jenny: So what do you do? Just throw more hardware at it?
+Alex: Better than that — you split the hardware by function. This is disaggregated inference. The key insight is that since prefill and decode want fundamentally different hardware profiles, why run them on the same machines? You create two specialized pools. Prefill workers handle all the incoming prompts — they're optimized for compute, high TFLOPS. They run prefill, generate the KV cache, and they're done. They never decode.
+Jenny: And then the KV cache gets shipped to a decode worker?
+Alex: Right, transferred over InfiniBand using RDMA — the GPU writes directly into the other GPU's memory without even involving the CPU. The decode workers are optimized for memory bandwidth, and they just generate tokens until the response is complete. Each fleet scales independently.
+Jenny: That's elegant. But wait — how big are these KV cache transfers? That seems like it could be a bottleneck.
+Alex: You're asking exactly the right question. For a model like LLaMA-3 70B, the KV cache is about 320 kilobytes per token. So a 100,000-token prompt produces roughly 31 gigabytes of KV cache. Even on 400 gigabit InfiniBand, that's 625 milliseconds just for the transfer. That's over half a second before you generate a single output token.
+Jenny: That blows most latency budgets by itself!
+Alex: It does. This is the emerging research frontier — KV transfer scheduling, pipelining transfers with decode, sending KV chunks incrementally while prefill is still running. Mooncake uses zero-copy RDMA, NVIDIA's Dynamo has a dedicated KV transfer scheduler. It's an active problem.
+Jenny: And this is what Anthropic is building toward in production?
+Alex: This is Anthropic's production serving direction. The academic foundations are DistServe out of OSDI 2024 and Splitwise from ISCA 2024. If you can clearly articulate why prefill and decode need different hardware, how the KV transfer works, and where the bottlenecks are — that's high signal in any inference infrastructure conversation.
+Jenny: Four request types, one fundamental asymmetry, and the solution is to stop pretending they're the same problem. I love it.

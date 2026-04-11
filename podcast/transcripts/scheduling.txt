@@ -1,0 +1,25 @@
+Alex: So today we're diving into something that separates toy inference systems from production ones — scheduling and admission control.
+Jenny: Okay, so when we say admission control, we're basically deciding whether to even accept a request, right?
+Alex: Exactly. And here's the key insight — it's called the Mooncake pattern. Before you accept a request, you estimate whether you can actually finish it within the SLO. If not, you reject it immediately with a 503.
+Jenny: Wait, why not just accept it and try your best?
+Alex: Because if you accept it, you start burning GPU compute on prefilling tokens, generating partial output — and then if you miss the deadline, all of that work was wasted. You used expensive GPU cycles on tokens that never reach the user.
+Jenny: Oh, that's like accepting a restaurant reservation when you know you're fully booked. The customer shows up, waits an hour, and leaves angry. Better to just say "sorry, we're full" upfront.
+Alex: Perfect analogy. And the way you estimate is pretty straightforward math. Total time equals queue wait plus prefill time plus decode time. Prefill time is your prompt tokens divided by prefill throughput. Decode time is predicted output tokens divided by decode throughput. If that total exceeds your SLO deadline, reject immediately.
+Jenny: But here's the tricky part — how do you know how many tokens the model is going to generate before it actually generates them?
+Alex: That's the hard part. Output length prediction is its own research area. But even rough estimates give you massive wins over blind acceptance.
+Jenny: Okay, so that's admission. Now what about the requests you do accept — how do you decide who goes first?
+Alex: This is where goodput comes in, and it's a really important distinction. Goodput is not the same as throughput. Throughput is total tokens per second. Goodput is only the requests that actually met their SLO. You could have a system doing a hundred requests per second, but if only 95 meet their latency target, your goodput is 95.
+Jenny: So you're optimizing for the metric that actually matters to users.
+Alex: Right. And sometimes that means counterintuitive decisions. Like, sometimes it's better to delay a new request — let its time-to-first-token suffer a little — rather than cramming it in and causing token-by-token latency violations for requests already in flight.
+Jenny: That's interesting. You sacrifice one metric to protect another.
+Alex: Exactly. Now in multi-tenant systems, you also need priority tiers. Think Weighted Fair Queuing — you assign weights to different classes. Enterprise gets a weight of 8, paid users get 4, free authenticated gets 2, anonymous or batch jobs get 1.
+Jenny: So under overload, the free tier gets squeezed but not completely starved?
+Alex: Right, that's the key. Free gets one-sixteenth of capacity, not zero. And this maps beautifully to AWS capacity pools — Tier 0 and 1 are your Reserved Instances, always available. Tier 2 is On-Demand. Tier 3 is Spot — first to get reclaimed when capacity is tight.
+Jenny: Oh, I love that mapping. Now what happens when you're under real memory pressure and you have to kick someone out? Who gets evicted?
+Alex: So vLLM defaults to FCFS — last arrived gets evicted first. Simple, but it can evict a request that's 90% done, which is terrible. A smarter approach is least-progress-first — evict the request that generated the fewest tokens. You waste the least compute that way.
+Jenny: Because losing ten tokens of work is way better than losing five hundred.
+Alex: Exactly. Or in multi-tenant systems, you evict lowest-priority-first. And if you have output length predictions, you can do longest-remaining-first — evict the request that would tie up the most memory going forward.
+Jenny: So the engines actually differ in how they handle all this?
+Alex: Quite a bit. vLLM V1 uses priority-based FCFS with chunked prefill on by default and recompute-only preemption — no swapping to CPU. SGLang does something clever called predictive reservation — it estimates future decode memory needs before admitting, which prevents that painful cycle of admit-then-evict. TensorRT-LLM has compiled engines that know exact memory requirements upfront, so admission is more precise. And Dynamo does two-level scheduling with a global planner routing to separate prefill and decode workers.
+Jenny: So the whole game is really about being honest with yourself about what you can handle, rather than optimistically accepting everything and hoping for the best.
+Alex: That's it. Reject what you can't serve, prioritize what matters, and when you have to evict, be smart about minimizing wasted work. That's how you go from high throughput to high goodput.

@@ -1,0 +1,49 @@
+Alex: So here's something that's fundamentally changed in how frontier AI labs work. Model architecture and hardware used to be totally separate concerns. You'd design a model to score well on benchmarks, then figure out how to serve it later. That separation is basically dead now.
+
+Jenny: Wait, what do you mean dead? Like, the people designing the model are now thinking about the GPUs it'll run on?
+
+Alex: Exactly. It's called co-design. You're designing the model architecture, the training process, and the serving infrastructure as one integrated system. And there's a really clean public example of this — Kimi K2 from Moonshot AI.
+
+Jenny: Okay, what did they do?
+
+Alex: They deliberately reduced the number of attention heads and made the attention dimension a bit smaller. But at the same time, they increased the total number of experts in their mixture-of-experts setup while keeping the number of active experts per token the same. So more experts overall, but same compute per token from the expert side.
+
+Jenny: That sounds like a weird tradeoff. Why would fewer attention heads be a good thing?
+
+Alex: This is where it gets beautiful. Attention scales quadratically with context length. So if you're processing 128,000 tokens and you have 64 attention heads instead of 32, you're doing twice the attention work — and that cost is growing with the square of the sequence length. It gets expensive fast.
+
+Jenny: Oh, so at long contexts, attention becomes the bottleneck.
+
+Alex: Exactly. Now contrast that with MoE experts. Each expert does a fixed amount of compute per token regardless of how long the sequence is. So adding more experts increases the model's knowledge capacity without making it more expensive as context grows.
+
+Jenny: So they're basically shifting the model's capacity away from the thing that gets expensive at long contexts and toward the thing that stays cheap. That's clever.
+
+Alex: That's co-design in a nutshell. They're not just asking "what architecture scores best on benchmarks." They're asking "what architecture gives us the best performance per dollar at the context lengths our users actually need."
+
+Jenny: Okay, so attention heads is one dimension. What else is being co-designed?
+
+Alex: Three things simultaneously. First is model architecture — head count, layer count, expert sparsity, whether you use MLA or GQA or standard multi-head attention. Second is the hardware target. If you know you're deploying on H100s with FP8 support, you can train the model specifically for FP8 from the start and get roughly a two-times compute speedup at inference. You're not retrofitting quantization after the fact.
+
+Jenny: So the model is literally trained knowing what GPU it'll run on.
+
+Alex: Right. And the third dimension is context and harness — the expected context lengths in production, the tool-calling schema, the agentic workflows. A model trained with the specific harness it'll use in production learns to use tools more efficiently than one that has to adapt at inference time.
+
+Jenny: That makes sense. Okay, I want to go back to something. You said attention scales quadratically. Is that why context length seems stuck at around a million tokens?
+
+Alex: Yes! Context length has basically stalled near one million tokens for about two years now. And the reason is exactly that quadratic compute cost. FlashAttention solved the memory problem — attention used to be quadratic in both compute and memory, now it's just compute. But the compute is still unavoidably quadratic.
+
+Jenny: So going from one million to ten million tokens would mean...
+
+Alex: About a hundred times more attention computation. It's just not feasible on current hardware.
+
+Jenny: So what are labs doing about it?
+
+Alex: Exactly what co-design would predict. They're reducing attention heads and replacing that capacity with things that scale linearly — more MoE experts, state space model layers like Mamba, or hybrid architectures that only use attention selectively at certain layers instead of everywhere.
+
+Jenny: So the hardware constraint is literally reshaping model architecture at the frontier.
+
+Alex: And that's the key mental shift here. The question "how many attention heads should this model have" is no longer a pure research quality question. It's an infrastructure economics question. You answer it by analyzing serving cost at your target context length distribution, multiplied by expected request volume. It's fundamentally a capacity planning problem.
+
+Jenny: That's wild. So if you're an infrastructure engineer working on AI serving, you're not just downstream of the model team anymore. You're part of the design conversation from day one.
+
+Alex: That's exactly right. And that's what makes this field genuinely different from classical systems work. The model and the infrastructure aren't separate artifacts anymore — they're one system, designed together.

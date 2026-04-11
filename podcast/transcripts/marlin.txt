@@ -1,0 +1,25 @@
+Alex: So here's something that tripped up a lot of teams early on — you quantize your model weights down to INT4, you're using a quarter of the memory, and then you run inference and it's actually slower than the original FP16 model.
+Jenny: Wait, slower? How is that possible? You're moving less data.
+Alex: Right, you'd think so. But here's the catch — GPU Tensor Cores don't compute in INT4. They work in FP16 or FP8. So before you can do the actual matrix multiply, you have to dequantize those INT4 weights back to FP16.
+Jenny: Okay, but that's just a conversion step, how expensive can it be?
+Alex: It's not the conversion itself — it's where the data goes. The naive approach uses two separate kernel calls. First kernel loads INT4 weights from HBM, converts to FP16, writes the FP16 result back to HBM. Second kernel loads those FP16 weights from HBM again and does the matrix multiply.
+Jenny: Oh no. So you're reading from HBM twice for the same weights.
+Alex: Exactly. And HBM bandwidth is the bottleneck during decode. You've basically negated the whole point of quantization. You saved memory at rest, but at runtime you're doing more memory traffic than the original FP16 model.
+Jenny: That's like compressing a file to save disk space, but then decompressing it to a temporary file every time you read it. You haven't saved anything at runtime.
+Alex: Perfect analogy. And that's exactly the problem Marlin solves.
+Jenny: So what does Marlin actually do differently?
+Alex: It fuses the dequantization and the matrix multiply into a single CUDA kernel. The key insight is about SRAM versus HBM. SRAM, the on-chip memory, runs at around 20 terabytes per second. HBM is about 3.35 terabytes per second. That's a 6x gap.
+Jenny: So if you can keep the data on-chip...
+Alex: You never pay that HBM penalty twice. Here's Marlin's strategy. It loads a small tile of INT4 weights from HBM into shared memory — that's your one and only HBM read for those weights. Then it dequantizes the INT4 values to FP16 directly in registers. The FP16 form exists only momentarily — it never touches HBM, it doesn't even go back to SRAM. It gets consumed immediately by the Tensor Core matrix multiply.
+Jenny: So the FP16 weights are like this ephemeral thing that flashes into existence just long enough to be used.
+Alex: Exactly. And while all that computation is happening, Marlin is asynchronously prefetching the next tile of INT4 weights from HBM. So by the time you're done with the current tile, the next one is already sitting in SRAM ready to go. No stalls.
+Jenny: That pipelining is clever. You're hiding the memory latency behind the computation.
+Alex: Right. And the net result is dramatic. With naive dequantization, you effectively read each weight from HBM twice. With Marlin, you read each weight once, and it's in INT4 form — so it's a quarter the size of an FP16 read. You've gone from two full HBM reads to essentially a quarter of one.
+Jenny: So what's the actual speedup?
+Alex: Three to four x faster than the naive approach. And here's the exciting part — an AWQ INT4 model running with the Marlin kernel can actually outperform the same model in FP16 at decode time. Because you're loading four times less data per step and the dequantization cost is essentially free since it happens in registers.
+Jenny: That's wild. So quantization goes from being a memory optimization that hurts performance to being a performance optimization too.
+Alex: Exactly. And this is the same fundamental principle behind FlashAttention. Minimize HBM reads, do all your work in SRAM and registers, pipeline memory loads with computation.
+Jenny: So when people talk about "fused kernels" giving speedups, this is always what they mean? Eliminating that round trip to HBM between operations?
+Alex: That's exactly it. Two sequential operations with an HBM round-trip between them get collapsed into one operation where intermediate results stay on-chip. And because that SRAM-to-HBM bandwidth gap is 6x, every HBM read you eliminate is huge.
+Jenny: It's funny — kernel engineering sounds like low-level plumbing work, but it produces these massive end-to-end speedups.
+Alex: That's the thing about inference optimization. The biggest wins aren't from clever algorithms — they're from understanding the memory hierarchy and keeping data where it's fast. The hardware is incredibly powerful. You just have to stop making it wait for memory.

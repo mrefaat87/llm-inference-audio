@@ -1,0 +1,29 @@
+Alex: So today we're talking about agentic inference, and why it basically breaks every assumption that inference serving systems were built on.
+Jenny: Okay, bold claim. What do you mean by "agentic" here exactly?
+Alex: Think about the difference between a normal chat request and something like Claude Code. Normal chat is simple — request comes in, you prefill the prompt, decode the response, done. Five to thirty seconds, one and done. But an agentic workload? You might have twenty, thirty, fifty tool calls in a single session that lasts minutes or even hours.
+Jenny: Oh wow, so the session just... stays alive that whole time?
+Alex: Exactly. And the context keeps growing. Every tool call, every tool result gets appended. The context grows monotonically — it never shrinks. So by turn twenty in a deep agent session, you might be sitting on eighty thousand tokens of context.
+Jenny: That sounds expensive.
+Alex: It is. Here's the thing that surprised me — a tool call isn't some special system event. The model just generates regular output tokens that happen to look like a tool invocation. JSON, XML, whatever format. The serving system watches for a stop sequence, like a closing tag, and when it sees it, it halts decoding.
+Jenny: Wait, so the GPU is just generating tokens and the system is doing string matching on every single one?
+Alex: Yep. And there's this subtle problem — partial stop matching. Say your stop sequence is the closing tag "tool" in angle brackets. The model generates the opening bracket and "too" — is that the start of your stop sequence or just the word "tooth"? The system has to buffer those ambiguous tokens until it knows for sure.
+Jenny: That's clever but also kind of annoying. Does that cause latency issues?
+Alex: Small ones. The streaming output can stutter briefly at partial matches. Usually negligible, but it's happening on every token.
+Jenny: Okay so the tool call gets detected. Then what?
+Alex: This is where it gets really interesting. The system has to pause decoding for that sequence, but the session isn't done — it's waiting for tool results. Maybe a file read that takes two seconds, maybe an API call that takes sixty seconds. During all that time, the GPU is idle but the KV cache is just sitting there, occupied.
+Jenny: So you've got this expensive GPU memory locked up doing nothing.
+Alex: Right. And that KV cache is not small. A hundred thousand token conversation on a seventy billion parameter model uses about thirty-two gigabytes of KV cache. One session, consuming a huge chunk of your GPU.
+Jenny: That's wild. So what are the options? You can't just hold everything in GPU memory forever.
+Alex: You've got a few choices. Hold it in GPU memory, which is simplest but wasteful. Swap it to CPU memory, which frees the GPU but adds a few hundred milliseconds of latency when you resume. There's disaggregated KV stores where you put the cache in a separate storage tier — any GPU can pick it up. Or you just discard it entirely and rely on prefix caching to rebuild what you need.
+Jenny: Prefix caching seems crucial here. If the context keeps growing, re-prefilling everything from scratch each turn would be brutal.
+Alex: Brutal is the right word. Without prefix caching, by turn twenty you're spending sixteen seconds just on prefill before generating a single output token. With prefix caching, you only prefill the new tokens since the last turn. The shared prefix — all the previous turns — hits the cache at near-zero cost.
+Jenny: So that's why this is the critical optimization for agentic workloads.
+Alex: Exactly. Now there's another dimension — extended thinking. Those thinking tokens are real tokens. They go through the same decode pass, extend the KV cache. A response with ten thousand thinking tokens and two thousand visible tokens has a twelve-thousand-token KV footprint.
+Jenny: And that messes with your latency metrics too, right? If the model is "thinking" for forty-five seconds, your autoscaler might think the system is degraded.
+Alex: Exactly. You need two TTFT metrics now — time to first thinking token and time to first visible token. Traditional latency-based autoscaling gets completely confused.
+Jenny: So where is the industry landing on all this?
+Alex: Two tiers are emerging. For API-served agents like Claude Code, it's stateless serving with aggressive prefix caching. Send the full context each turn, let the system handle KV reuse transparently. Simple, robust. For latency-critical stuff with really long contexts, you need session-aware serving with KV persistence or disaggregated stores.
+Jenny: So the simple approach works until your context gets so big that even prefix caching can't save you from the re-prefill cost.
+Alex: That's exactly the dividing line. And the research on inference-time compute scaling makes this even more intense — a seven billion parameter model with a hundred times more inference compute can outperform a seventy billion parameter model. Your serving system needs to handle a hundred-x variance in per-request compute cost.
+Jenny: That is a fundamentally different problem than traditional serving. This really is like going from stateless web servers to long-lived WebSocket connections.
+Alex: Perfect analogy. And just like that transition reshaped how we think about load balancing and scaling, agentic inference is reshaping how we think about GPU scheduling and memory management.

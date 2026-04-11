@@ -1,0 +1,31 @@
+Alex: So today we're talking about multi-turn inference — basically, what happens mechanically when you have a conversation with an AI model, not just a single question and answer.
+Jenny: Right, because most people think of it as just sending messages back and forth, but there's a lot more going on under the hood.
+Alex: Exactly. Here's the key thing — in a single-turn request, the model processes your prompt, generates a response, and forgets everything. Totally stateless. But in a conversation, every new message you send depends on the entire history of everything before it.
+Jenny: So the model needs to see the whole conversation every time?
+Alex: That's the naive approach, yes. You concatenate the full history into the prompt each turn. Turn one might be 500 tokens. Turn two is now 1,100 because you include turn one's response plus your new message. By turn ten, you could be looking at 8,000 to 15,000 tokens. It compounds.
+Jenny: Oh wow, so multi-turn is really just a long-context problem that keeps getting worse.
+Alex: Exactly right. And this leads to two fundamentally different architectures for handling it. The first is stateless — what most systems use today. Every time a new turn comes in, the server re-prefills the entire conversation from scratch. It already processed those earlier tokens, but it threw away the KV cache, so it does it all over again.
+Jenny: That sounds incredibly wasteful. Why would anyone do that?
+Alex: Because it's operationally beautiful. Every server is interchangeable. No session affinity needed. Load balancing is trivial. Any server can handle any turn of any conversation. Think of it like a stateless web server — horizontally scalable, easy to reason about.
+Jenny: Okay, I see the appeal. So what's the alternative?
+Alex: Architecture two — KV persistence. After each turn, you keep the KV cache alive. Maybe in GPU memory, maybe in CPU RAM, maybe in a dedicated store. The next turn only prefills the new tokens and appends to the existing cache. A ten-turn conversation goes from re-prefilling a growing sum every turn to just processing the new message each time.
+Jenny: That's a massive savings. But I'm guessing there's a catch?
+Alex: Four catches, actually. First — routing affinity. If your KV cache lives on Server A, every subsequent turn must go to Server A. You need consistent hashing on conversation ID, and that creates hot spots. Some servers get hammered with long conversations while others sit idle.
+Jenny: That's literally the session affinity problem from traditional web infrastructure.
+Alex: Exactly the same pattern. Second problem — memory pressure. These KV caches are live. You can't evict them without losing the ability to continue cheaply. And they're not small. For something like LLaMA-3 70B, a 10,000-token conversation holds about 3 gigabytes of GPU memory, on top of the 140 gigs of model weights.
+Jenny: Wait, 3 gigs for one conversation?
+Alex: One long conversation, yes. Now imagine thousands of concurrent sessions. You need eviction policies — LRU across conversations, priority by recency. If you evict, you fall back to full re-prefill from the text. The user doesn't notice, it's just slower and more expensive.
+Jenny: So what about the storage tiers? How does that work in practice?
+Alex: Think of it as hot, warm, and cold. Hot conversations stay in GPU HBM — fastest access. Idle conversations get demoted to CPU RAM. And cold conversations drop to text-only, meaning full re-prefill if they come back. Each tier has a different restoration cost.
+Jenny: That's like a caching hierarchy — L1, L2, and going back to disk.
+Alex: Perfect analogy. And there's a third challenge I haven't mentioned — disaggregated architectures. If you separate prefill workers from decode workers, where does the KV cache live between turns? If it's on the decode worker, you lose scheduling flexibility. If it's in a separate store, you add latency loading it back. There's no clean answer today.
+Jenny: And the fourth challenge?
+Alex: Dual representation. The conversation text is kilobytes and must be stored durably — it's the source of truth. The KV cache is gigabytes and is derived from that text. Two representations with completely different storage economics and lifecycles.
+Jenny: So where does something like Anthropic's prompt caching fit in?
+Alex: Great question. Prompt caching handles static prefixes — system prompts, long documents that don't change. Multi-turn caching is the dynamic extension of that same idea, but harder because the cache key grows with every turn instead of staying fixed.
+Jenny: One thing I'm curious about — what happens if the model gets updated? Does the cache survive?
+Alex: No, and this is important. KV cache vectors come from specific model weights. Even a minor checkpoint update changes the latent space geometry, so all cached tensors become numerically wrong. You have to throw them away. Production systems handle this with versioned cache namespacing and blue-green deployments — new replicas spin up, traffic shifts gradually, and old replicas serve warm sessions until they finish.
+Jenny: But changing something like temperature between turns — that's fine?
+Alex: Yes, because sampling parameters are applied after the forward pass. They don't affect the KV vectors. Though there's a subtle edge case — if different sampling settings produced different tokens in earlier turns, the cached KV for those tokens would be wrong. Systems like vLLM handle this by including generated token IDs in the cache key hash.
+Jenny: So the cache validates not just the prompt but also what was actually generated. That's clever.
+Alex: It has to. Correctness can't be optional when you're serving at scale.

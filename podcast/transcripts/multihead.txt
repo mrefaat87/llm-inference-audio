@@ -1,0 +1,27 @@
+Alex: So here's the problem with running just one attention operation. You get one shot at figuring out relationships between words. But think about a sentence like "The animal didn't cross the street because it was too tired."
+Jenny: Okay, seems straightforward enough.
+Alex: Right, but look at what the model needs to figure out simultaneously. "It" refers back to "animal" — that's coreference. "Cross" needs to find its subject. "Tired" needs to know what it's modifying. "Didn't" needs to scope over "cross." That's four completely different relationship types happening at once.
+Jenny: And a single attention head can only learn one of those patterns?
+Alex: Exactly. It's like having one detective investigate four unrelated cases at the same time. They'll get okay at one, but they can't specialize in all four. So multi-head attention says: what if we hire H detectives, each working their own case in parallel?
+Jenny: So you literally run multiple attention operations at the same time?
+Alex: Yes. Instead of one set of Q, K, V weight matrices, you have H sets — one per head. But here's the clever part. You don't multiply the compute. Each head works in a smaller subspace. If your model dimension is, say, 12,288 and you have 96 heads, each head only works with 128 dimensions.
+Jenny: Oh, so you're splitting the space, not adding to it. Same total work, just divided up.
+Alex: Exactly. Each head produces a small output vector, you concatenate all of them back together to get your full-size vector, run it through one final projection matrix, and that's your layer output.
+Jenny: And the heads actually end up specializing? Like, that's not just a hope?
+Alex: It's been confirmed by research. Some heads learn to track syntax — subject-verb relationships. Others handle coreference, like resolving pronouns. Some just attend to the previous token. Others pick up semantic similarity or even specialize in rare words. And nobody programs this. It's entirely emergent from training.
+Jenny: That's wild. Gradient descent just figures out that dividing labor is optimal.
+Alex: Right. And in something like GPT-3, you have 96 heads per layer times 96 layers — over 9,000 total attention heads. That's an enormous space for diverse specialization.
+Jenny: Wait, I want to make sure I understand the heads-versus-layers thing. Heads are width, layers are depth?
+Alex: Perfect way to put it. Within a single layer, your multiple heads give you parallel specialization at the same level of abstraction. Then stacking layers gives you depth — each layer builds more abstract representations on top of whatever the previous layer produced. Heads in layer 1 learn completely different things than heads in layer 50, because by layer 50 the input is already this highly processed, abstract representation.
+Jenny: Okay, so this is great for quality, but I'm guessing there's a cost. Every head needs its own K and V vectors in the cache, right?
+Alex: And this is where it gets expensive. For GPT-3, the KV cache works out to about 4.7 megabytes per token. Scale that to long contexts and you're eating through GPU memory fast. It grows linearly with the number of heads.
+Jenny: So what do you do about that?
+Alex: Three variants, each progressively more aggressive. Standard multi-head attention, or MHA, is the baseline — every query head gets its own K and V head. Then there's grouped query attention, GQA, where you group query heads together and have them share K/V heads. Like, LLaMA 3 70B has 64 query heads but only 8 K/V head groups.
+Jenny: That's an 8x reduction in KV cache size. But doesn't sharing hurt quality?
+Alex: Minimally, and here's the intuition: K and V information is more redundant across heads than Q information. The queries are asking diverse questions, but the keys and values they're searching over are more compressible. So sharing them costs you very little.
+Jenny: And the most extreme version?
+Alex: Multi-query attention, MQA. One single K head and one V head shared across all query heads. That's a 1-over-H reduction — massive savings. PaLM and Falcon use this. You lose a bit more quality than GQA, but for long-context serving, the memory savings can be the difference between fitting on your GPU or not.
+Jenny: So it's really a spectrum. Full independence with MHA, moderate sharing with GQA, maximum sharing with MQA. And in practice, GQA has become the sweet spot?
+Alex: That's the trend. LLaMA 3, Mistral, Gemma — they've all landed on GQA. You get most of the cache savings with almost none of the quality loss. For a hundred-thousand-token context, we're talking hundreds of gigabytes saved in HBM.
+Jenny: Hundreds of gigabytes. That's not an optimization, that's a requirement for the system to even work.
+Alex: Exactly. Multi-head attention gave us the quality. GQA made it actually servable.

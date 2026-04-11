@@ -1,0 +1,27 @@
+Alex: So today we're talking about quantization — which is basically how you take a massive language model and shrink it down so it actually fits on your hardware.
+Jenny: Right, because a 70 billion parameter model in full precision is what, 140 gigabytes? That's not fitting on most GPUs.
+Alex: Exactly. But if you quantize it down to 4-bit integers, that same model is around 35 gigs. That's the difference between "we need a whole cluster" and "one GPU handles it."
+Jenny: Okay, so you're just using smaller numbers to represent the weights. But there's got to be a catch — you lose quality, right?
+Alex: That's where it gets interesting. There are two fundamentally different approaches, and the tradeoff is different for each. First: weight-only quantization — methods like AWQ, GPTQ, and GGUF. You store the weights in low precision, but before the actual matrix multiply — the GEMM, which is THE core operation in inference, every attention projection and every feed-forward layer is a GEMM —
+Jenny: Wait, GEMM?
+Alex: General Matrix Multiply. Pronounced "gem." It's the single most important operation in neural network inference. So with weight-only methods, before each GEMM, you dequantize the weights back to FP16. The math still happens at full precision. You save memory and bandwidth — you're loading four times less data per step — but you don't get a compute speedup.
+Jenny: So it's like compressing a file for storage but decompressing it every time you use it.
+Alex: That's a great analogy. Now the second approach — weight plus activation quantization, like FP8 or SmoothQuant INT8. Here, both the weights AND the activations flowing between layers are quantized. The GEMM itself runs at low precision end-to-end. On an H100, FP8 GEMMs run about two times faster than FP16.
+Jenny: So you get actual compute speedup, not just memory savings. Why wouldn't everyone just do that?
+Alex: Because activations are much harder to quantize than weights. Activations have outliers — these wild spikes in certain channels that destroy naive quantization. Weights are well-behaved, nice bell curves. Activations? Not so much.
+Jenny: Okay, so walk me through the main methods. Let's start with GPTQ and AWQ since those are both weight-only INT4.
+Alex: GPTQ goes layer by layer. For each layer, it runs a calibration dataset through the model, looks at the Hessian — which tells you how sensitive the output is to changes in each weight — and then finds the quantized values that minimize the error in that layer's output. It's solving a least-squares problem.
+Jenny: So it's not just rounding to the nearest integer. It's being smart about which weights matter most.
+Alex: Exactly. AWQ takes a different angle. Its insight is: not all weight channels are equally important. The ones that correspond to large activation magnitudes carry more signal. So AWQ scales those channels up before quantizing — spreading them out within the INT4 range — and reverses the scaling at inference for free by absorbing it into an adjacent operation.
+Jenny: That's clever. And AWQ generally beats GPTQ on quality?
+Alex: Yeah, especially on reasoning tasks. Both need calibration data though — and here's a practical gotcha: if you calibrate on English text but serve multilingual traffic, you can see two to five perplexity points of degradation on languages like Arabic or Korean. The fix is mixing in ten to twenty percent of your target language into calibration.
+Jenny: Good to know. Now FP8 — you said that's the production standard on H100s?
+Alex: It's converging on being the default for H100 serving. FP8 keeps the floating-point format — sign, exponent, mantissa — so it handles outliers naturally. The exponent bits let you represent both 0.001 and 500 in the same tensor without precision collapse. Quality loss versus FP16 is often undetectable on benchmarks, and you get that two-times compute speedup natively from the Tensor Cores. Often no calibration data needed either.
+Jenny: What about A100s that don't have FP8 support?
+Alex: That's where SmoothQuant comes in. It uses INT8, which gets about 1.5x speedup on A100 Tensor Cores. The trick is elegant — you multiply activations by a scaling factor to squash those outliers, then divide the corresponding weights by the same factor. Mathematically identical output, but now both distributions are INT8-friendly.
+Jenny: You're migrating the quantization difficulty from activations to weights.
+Alex: Precisely, and weights are easier to handle because their distribution is more regular.
+Jenny: And GGUF? I see that everywhere for local models.
+Alex: GGUF is the llama.cpp format for CPU inference. The cool thing is it supports mixed precision within a single model — sensitive layers like attention get higher precision, while the big feed-forward layers get compressed more aggressively. It uses CPU SIMD instructions for fast dequantization. Not for GPU production serving, but it's why you can run models on a laptop.
+Jenny: So the decision tree is basically: H100? Use FP8. A100? SmoothQuant INT8. Need INT4 on GPU? AWQ first, GPTQ as fallback. Running on a laptop? GGUF.
+Alex: That's a perfect summary. The hardware you have determines which method makes sense, and the method determines whether you're saving just memory or getting actual compute speedup too.

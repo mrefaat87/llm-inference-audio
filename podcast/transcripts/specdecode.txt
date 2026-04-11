@@ -1,0 +1,25 @@
+Alex: So here's something that bugs me about how large language models generate text — during the decode phase, where you're producing tokens one by one, the GPU is actually sitting there mostly idle.
+Jenny: Wait, idle? I thought inference was supposed to be compute-intensive.
+Alex: The prefill phase is, yeah. But decode is memory-bandwidth-bound. Every single step, the GPU has to load all the model weights from memory just to produce one token. The arithmetic units are literally waiting around for data to arrive. For a 70 billion parameter model, each decode step takes like 20 to 50 milliseconds, and most of that time is just moving data, not doing math.
+Jenny: So you've got all this spare compute just going to waste.
+Alex: Exactly. And speculative decoding is a brilliant hack to exploit that spare capacity. Here's the idea — you take a small, fast draft model, maybe 1 billion parameters, and you let it race ahead and propose a bunch of candidate tokens. Then you feed all those candidates into the big model in one parallel pass.
+Jenny: Oh, that's clever. But wait — I thought tokens had to be generated sequentially because each one depends on the last?
+Alex: For generation, yes. But for verification, you already have all the proposed tokens. So you can process them all at once, just like prefill. The big model looks at each position and asks, does my probability distribution agree with what the draft model proposed? If yes, accept. If no, reject and use the big model's own prediction instead.
+Jenny: So you're basically speculating on what the next few tokens will be, and then checking your work in bulk.
+Alex: That's it. And the beautiful part is — that one verification pass over, say, four tokens costs roughly the same as generating one token normally. So if the draft model proposes four tokens and three get accepted, you just advanced three tokens in the time it usually takes to do one.
+Jenny: Okay, so the acceptance rate is everything here.
+Alex: You nailed it. At 90 percent acceptance, you're looking at roughly 3x decode throughput. At 70 percent, about 2x. Below 40 percent, the overhead of running the draft model actually eats your gains.
+Jenny: What determines whether the draft model's guesses are good?
+Alex: How well its probability distribution matches the big model's, which depends heavily on the type of text. Predictable stuff like code templates or repetitive patterns — high acceptance rates. Creative writing or niche domain-specific text — much lower.
+Jenny: And here's what I really want to know — does this hurt quality at all?
+Alex: This is the best part. No. Zero quality loss. It's mathematically identical to just running the big model by itself. The rejection sampling scheme formally preserves the verifier's exact probability distribution. You're not approximating anything.
+Jenny: That's kind of remarkable. Free throughput with no quality tradeoff.
+Alex: Right, the only costs are system complexity and memory. You need both models in GPU memory at the same time. A 7B draft plus a 70B verifier in FP16, that's 154 gigabytes — you're already on multiple GPUs, and now you have less headroom for KV cache.
+Jenny: Are there ways around the memory problem?
+Alex: Several. You can use fewer layers from the verifier itself as the draft, which is what approaches like Medusa do. Or if the model was trained with multi-token prediction heads, those are basically built-in draft heads with zero extra memory. There's even an n-gram lookup approach — for repetitive text like RAG documents, you just pattern-match against tokens you've already generated. No model needed at all.
+Jenny: How does this work in production though, where you're batching multiple requests?
+Alex: Batched speculative decoding is actually the standard production form. The draft model proposes candidates for all requests in the batch simultaneously, and the verifier checks them all in one batched pass. The tricky part is variable acceptance rates — one request might accept 90 percent while another accepts only 30 percent. Each sequence tracks its own accepted tokens independently.
+Jenny: So you need the average acceptance across the batch to be high enough.
+Alex: Right, research shows you need above roughly 60 to 70 percent acceptance across the batch to break even. That's why it works best for workloads with predictable outputs — coding assistants, structured data generation, template-heavy applications.
+Jenny: So to sum it up — speculative decoding is using spare GPU compute to gamble on future tokens, verify cheap, and get two to three times the throughput for free when the gamble pays off.
+Alex: Couldn't have said it better. It's one of the rare optimizations in this space where you genuinely get something for nothing — as long as your acceptance rates hold up.

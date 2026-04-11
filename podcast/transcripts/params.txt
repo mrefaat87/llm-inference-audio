@@ -1,0 +1,29 @@
+Alex: So today we're talking about parameter count — what it actually means when someone says a model has 175 billion parameters.
+Jenny: Yeah, because people throw those numbers around like they're self-explanatory. "Oh, it's a 70B model." Okay, but what does that actually mean?
+Alex: It's surprisingly simple. A parameter is just a single number stored in a weight matrix. During training, these numbers get adjusted through gradient descent. Once training is done, they're frozen — locked in place. And the total parameter count? It's literally just the sum of every single number in every weight matrix in the entire network.
+Jenny: That's it? No magic?
+Alex: No magic. Now, why it matters — parameter count determines two things. First, how much memory you need to load the model. A 7B model in FP16, which is 2 bytes per number, takes 14 gigs of GPU memory. Scale that up to 70B, you're at 140 gigs. GPT-3 at 175B? 350 gigabytes.
+Jenny: 350 gigs just to hold the weights? That's like five A100 GPUs before you even process a single request.
+Alex: Exactly. The second thing parameter count tells you is roughly how much the model can "know." But here's what trips people up — parameter count does NOT equal inference compute cost.
+Jenny: Wait, how can that be? More parameters, more math, right?
+Alex: Only for dense models, where every parameter activates on every token. But Mixture of Experts models — MoE — have tons of total parameters but only activate a subset per token. Imagine a model with 400 billion total parameters but only 50 billion active per token. The compute cost per forward pass is the same as a dense 50B model, but the knowledge capacity is potentially that of a 400B model.
+Jenny: Oh, that's clever. So parameter count and compute cost only track together for dense models.
+Alex: Right. Now let's look at where the parameters actually live. GPT-3 is a great example — 175 billion parameters, 96 layers, with a model dimension of 12,288.
+Jenny: Break it down for me.
+Alex: Three main buckets. First, attention layers. Each layer has four weight matrices — Q, K, V, and the output projection. Each one is d_model by d_model, so that's about 603 million parameters per layer. Across 96 layers, roughly 58 billion — about a third of the model.
+Jenny: And the rest?
+Alex: The feedforward network in each layer is the big one. It expands from d_model to four times d_model, then contracts back. That's about 1.2 billion per layer. Across 96 layers — 116 billion parameters. Two-thirds of the entire model.
+Jenny: Two-thirds! And then the embedding table is...
+Alex: Basically a rounding error. 50,257 vocabulary tokens times 12,288 dimensions — about 617 million. Less than half a percent.
+Jenny: So the FFN is the monster. That explains why MoE specifically replaces the FFN, right? It's the biggest lever.
+Alex: Exactly. Replace one FFN with eight expert FFNs but only activate two per token — you get eight times the knowledge storage at just two times the FFN compute. Not eight times.
+Jenny: Okay but here's what confuses me. If FFN has two-thirds of the parameters, why does everyone obsess over optimizing attention? GQA, FlashAttention, KV cache compression — it's all attention stuff.
+Alex: This is one of the most important distinctions in inference. Parameter distribution and runtime bottleneck distribution are completely different things. The FFN is a fixed cost per token — it doesn't grow, doesn't accumulate state, and it parallelizes trivially. Attention, on the other hand, creates the KV cache, which grows with every token generated and every request in the batch.
+Jenny: So the KV cache is the dynamic resource that actually constrains you.
+Alex: Think of it like auto scaling. The FFN is your fixed instance cost — it matters, but it's predictable. The KV cache is the resource that scales with demand and is always the thing you're fighting. Running out of KV cache memory is the primary out-of-memory cause in production inference.
+Jenny: Can you put numbers on that?
+Alex: Sure. Take a 70B model like LLaMA-3. Weights in FP16 — 140 gigs, needs at least two H100s. KV cache for just 100 concurrent requests at 2,000 tokens each? About 64 gigs. That's nearly another entire GPU just for KV cache. Add activations, and you're at 214 gigs — three H100s minimum.
+Jenny: And with quantization?
+Alex: INT4 quantization drops the weights from 140 gigs to 35. Now your total is 109 gigs — fits on two GPUs instead of three. Quantization isn't just a nice optimization. It often determines whether a model is deployable at all.
+Jenny: So the takeaway is — parameter count tells you the size of the model and roughly its capacity, but the actual serving cost depends on what's dense versus sparse, how the KV cache scales, and whether you quantize.
+Alex: That's exactly right. The parameter count is the starting point, not the whole story.

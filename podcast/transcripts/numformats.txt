@@ -1,0 +1,49 @@
+Alex: So today we're talking about number formats — FP32, FP16, BF16, FP8, INT8, INT4. These are the building blocks that make quantization actually make sense.
+
+Jenny: Okay, so every weight in a neural network is just a number stored in some binary format, right? Why does the format matter so much?
+
+Alex: It comes down to two things: memory and precision. Fewer bits means a smaller model that's faster to move around in memory, but it also means more rounding error. And in inference, memory bandwidth is usually the bottleneck, so smaller numbers can literally make your model faster.
+
+Jenny: Got it. So walk me through how these floating-point numbers actually work.
+
+Alex: Every floating-point number has three parts. One sign bit — positive or negative. Then exponent bits, which set the scale, like the order of magnitude. And mantissa bits, which set the precision within that scale.
+
+Jenny: Oh, like scientific notation! The exponent is like the "times ten to the twenty-third" part, and the mantissa is the "6.022" part.
+
+Alex: Exactly. If you only have one digit of mantissa, you get 6 times 10 to the 23rd — same ballpark, just less precise. More mantissa digits, finer precision. Same idea, just in base 2.
+
+Jenny: So FP32 has 8 exponent bits and 23 mantissa bits. That's a ton of precision.
+
+Alex: Right, about 7 decimal digits of precision and a massive dynamic range — 10 to the negative 38 all the way up to 10 to the 38. FP16 cuts that in half to 16 bits total, with 5 exponent bits and 10 mantissa bits. You get about 3 decimal digits and the range tops out around 65,000.
+
+Jenny: And then there's BF16, which is also 16 bits but distributed differently?
+
+Alex: This is the clever one. BF16 keeps all 8 exponent bits like FP32, so it has the same dynamic range. But it only has 7 mantissa bits, so lower precision. Google designed it specifically for training, because during training you need to represent both tiny gradients and huge activations without overflow. Dynamic range matters more than precision there.
+
+Jenny: That makes sense. For inference, you'd rather have the precision of FP16 or the efficiency of FP8.
+
+Alex: Exactly right. Now here's where it gets really interesting — the jump to 8-bit formats. FP8 comes in two flavors: E4M3 with 4 exponent and 3 mantissa bits, and E5M2 with 5 exponent and 2 mantissa bits. Both are a quarter the size of FP32.
+
+Jenny: And then INT8 is also 8 bits. So what's the difference?
+
+Alex: This is the key insight. Integer formats have NO exponent. INT8 is just a fixed linear scale from negative 128 to 127, with every step the same size. And this is actually the root of the biggest problem in quantization.
+
+Jenny: Wait, why is a fixed scale a problem?
+
+Alex: Because neural network activations — the values flowing between layers — have massive outliers. A small number of activations might be 100 times larger than the typical ones. Now imagine you're mapping everything into INT8's range of negative 128 to 127. If your activations go from 0.01 to 500, you set your scale to cover 500. Now each INT8 step represents about 4 units. Anything smaller than 4 in magnitude? It all collapses to the same quantized value. You've destroyed all the precision for 99% of your activations just to accommodate a few outliers.
+
+Jenny: Oh wow, so that's why naive INT8 quantization of activations just falls apart for large language models.
+
+Alex: Exactly. And that's why techniques like SmoothQuant, AWQ, and GPTQ exist — they're all solving this outlier problem in different ways. SmoothQuant redistributes the difficulty from activations to weights. GPTQ and AWQ use INT4 for weights only, which works because weights tend to be more uniformly distributed.
+
+Jenny: So then FP8 sidesteps the whole problem because it still has an exponent?
+
+Alex: That's the beautiful part. Even with just 4 exponent bits, FP8 can represent both 0.001 and 500 in the same tensor without precision collapse. The exponent automatically scales. No manual calibration, no clipping decisions. On H100s with native FP8 tensor cores, you get near-FP16 quality at a fraction of the compute cost.
+
+Jenny: So the format choice basically determines which quantization strategy you need and what quality tradeoffs you're making.
+
+Alex: That's exactly it. KV cache quantization uses INT8 or FP8 because key-value vectors have more regular distributions — so you can fit twice as many sequences in memory. FP8 inference on H100 gives you both memory and compute savings with minimal quality loss. And INT4 weight quantization with GPTQ gives you 8x compression versus FP32 for the weights specifically.
+
+Jenny: It all comes back to understanding what those bits are actually doing. The exponent versus mantissa tradeoff, the outlier problem, why floating-point handles dynamic range that integers can't.
+
+Alex: Exactly. Once you understand the formats, every quantization method stops feeling arbitrary and starts feeling inevitable.

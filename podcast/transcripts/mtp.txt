@@ -1,0 +1,57 @@
+Alex: So today we're talking about multi-token prediction, or MTP, and I think the best way to start is with the problem it solves. Standard language models generate one token per forward pass. One token, one full trip through the entire model.
+
+Jenny: Right, so if you want a hundred tokens of output, that's a hundred forward passes. That's the bottleneck everyone talks about with autoregressive decoding.
+
+Alex: Exactly. It's a hard ceiling. And MTP attacks this from a really interesting angle — it actually starts in training, not inference. Instead of training the model to predict just the next token, you train it to predict the next K tokens simultaneously.
+
+Jenny: Wait, so like, given tokens one through N, instead of just predicting N plus one, the model predicts N plus one, N plus two, N plus three, all at once?
+
+Alex: Exactly. You have K prediction heads, one for each look-ahead position, and they all train together in each forward pass. So the model gets gradient signal from all K predictions simultaneously.
+
+Jenny: That's a lot more learning signal per training step. But doesn't that just make training more expensive?
+
+Alex: It does add cost, yes. But here's what's really clever about DeepSeek's implementation — the auxiliary heads aren't independent classifiers. They share the main model's internal representations. They're plugged into the same backbone.
+
+Jenny: Oh, so they're forcing the model to build representations that are useful not just for the immediate next token but for multiple steps ahead.
+
+Alex: Right. And that creates this consistency constraint. Think of it this way — if your prediction for token N plus one is inconsistent with what makes sense for token N plus three, the multi-step gradient penalizes that. The model has to maintain coherent internal plans, not just make locally optimal guesses.
+
+Jenny: That's like the difference between a chess player thinking one move ahead versus three moves ahead. You make better immediate moves when you're planning further out.
+
+Alex: That's a perfect analogy. And DeepSeek actually observed this empirically — smoother training loss curves, better performance on reasoning tasks that require multi-step coherence. The regularization effect is real.
+
+Jenny: Okay, so that's the training side. But you said this connects to inference too?
+
+Alex: This is where it gets really exciting. Do you remember speculative decoding?
+
+Jenny: Yeah — you use a small draft model to propose several tokens, then the big model verifies them all in parallel, and you keep however many match.
+
+Alex: Right. The problem with that approach is you need a separate draft model sitting in GPU memory alongside your main model. And that draft model has different characteristics — it might be worse on certain domains, which tanks your acceptance rate.
+
+Jenny: And if the acceptance rate is low, you're not really saving anything.
+
+Alex: Exactly. So here's the MTP insight — those auxiliary prediction heads you trained? They ARE your draft model. They're already built into the main model. During inference, when the primary head generates token N plus one, the auxiliary heads simultaneously propose N plus two, N plus three, N plus four. Next step, instead of just processing one token, you verify all those proposals in parallel.
+
+Jenny: Oh wow. So you get speculative decoding for free, basically. No separate model, no extra memory.
+
+Alex: And because those heads were trained jointly with the main model, sharing its representations, they tend to have much higher acceptance rates than an external draft model would. They were literally trained to be consistent with the verifier.
+
+Jenny: That's clever. How much speedup are we talking about?
+
+Alex: DeepSeek V3 reported roughly 1.8x decode throughput improvement in practice.
+
+Jenny: So not quite double, but close. That's significant for long outputs.
+
+Alex: And that's the key qualifier — it helps most when outputs are long. Agentic tasks, extended reasoning chains, long-form generation. For very short outputs, the overhead of the auxiliary heads might not pay for itself.
+
+Jenny: Makes sense. The amortization argument — you need enough tokens for the speedup to outweigh the per-step overhead.
+
+Alex: Exactly. And I think what's really compelling here is the dual benefit. You're not just bolting on an inference optimization — the same mechanism that speeds up decoding also makes training better. That's rare. Usually training tricks and inference tricks are totally separate concerns.
+
+Jenny: So where does this go? Does MTP eventually break the one-token-per-step ceiling entirely?
+
+Alex: That's the open question. Right now it gives you a useful constant improvement — roughly 1.8x. Whether it can go further as the technique matures across more architectures, or whether we'll always be bounded by some acceptance rate ceiling, that's still being figured out. But it's one of the most promising approaches to unhobbling decode throughput without needing exotic hardware changes.
+
+Jenny: It's a software solution to what feels like a hardware problem. I love that.
+
+Alex: And it's already shipping in production models. This isn't theoretical — DeepSeek V3 is using it today.

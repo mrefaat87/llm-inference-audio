@@ -1,0 +1,27 @@
+Alex: So today we're talking about how to actually measure whether you're getting your money's worth from a GPU. And the key metric is MFU — Model FLOP Utilization.
+Jenny: Okay, break that down. What exactly is MFU measuring?
+Alex: It's simple in concept. Your GPU has a theoretical max — say an H100 can do about 494 teraFLOPS in BF16. MFU is just: of that maximum, how much is actually doing useful model computation? If you're hitting 200 teraFLOPS of real work, your MFU is about 40%.
+Jenny: And 40% is... good?
+Alex: State of the art for training is 35 to 50 percent. Above 50 is excellent. Most naive implementations are below 30. So yeah, 40% is solid.
+Jenny: Wait, so even the best systems are wasting over half their GPU's potential? Where does all that go?
+Alex: Great question. The biggest one for inference is the memory bandwidth bottleneck. Think of it this way — your GPU's math units are like a team of incredibly fast chefs, but they're stuck waiting for ingredients to arrive from a slow warehouse. That warehouse is HBM memory. The chefs finish chopping and then just stand there idle, waiting for the next delivery.
+Jenny: So throwing more compute power at the problem doesn't help if the data can't get there fast enough.
+Alex: Exactly. And then there's communication overhead. When you split a model across multiple GPUs with tensor parallelism, they all have to stop and share results — like a relay race where everyone has to wait at the handoff. More GPUs means more handoffs.
+Jenny: So there's actually a sweet spot where adding more GPUs starts hurting you.
+Alex: Right, there's an optimal TP degree beyond which you're spending more time talking than computing. Then you've got kernel launch overhead — fixed cost every time you kick off a computation — pipeline bubbles where GPUs sit idle waiting for the previous stage, and attention's quadratic scaling eating into things at long sequences.
+Jenny: That's a lot of friction. So how do you think about all this systematically? Just chase each bottleneck one by one?
+Alex: This is where SOL comes in — Speed of Light. It's Jensen Huang's concept. Before you ask "why is this slow," first ask "what is the theoretical fastest this could possibly be, given physics?" That ceiling is your Speed of Light. MFU measures how close you are to it.
+Jenny: Oh, that's a powerful framing. So the gap between your actual performance and SOL tells you exactly how much room there is to improve.
+Alex: And more importantly, it helps you separate what's fundamental physics — like, communication physically has to happen — from engineering inefficiencies you can actually fix. Every optimization technique is basically an attack on some specific piece of that gap.
+Jenny: Okay but here's what's bugging me. You said decode gets like 1 to 5 percent MFU. That sounds terrible. Is decode just hopelessly inefficient?
+Alex: This is the critical insight. MFU is actually the wrong metric for decode. Decode is bottlenecked by memory bandwidth, not compute. A GPU at 1% MFU during decode can be at 95% memory bandwidth utilization. You're measuring the wrong resource — it's like judging a delivery truck by how fast its engine revs instead of how much cargo it's moving.
+Jenny: So what should you measure instead?
+Alex: MBU — Model Bandwidth Utilization. Actual HBM bandwidth used divided by peak bandwidth. A well-tuned decode system should hit 70 to 90 percent MBU. And then for the business side: tokens per second per dollar, TTFT and TBT at P99, and KV cache utilization, which is basically like capacity pool utilization in auto scaling — if your KV cache is full, you're blocking new requests no matter how much compute you have free.
+Jenny: That's such a good analogy. Okay, so we've talked about measuring efficiency and improving constants. But you mentioned something called "unhobblers" that sounds like a different category entirely?
+Alex: Yeah, this is the concept that really ties everything together. An unhobbler isn't a 10% speedup. It's a discovery that removes a constraint that was previously capping what was even possible. It changes the shape of the scaling curve, not just the constants.
+Jenny: Give me an example.
+Alex: FlashAttention. Before it, attention had O(n-squared) memory cost, which made contexts beyond about 4K tokens economically infeasible. FlashAttention didn't just make attention faster — it unlocked the entire long-context era. 4K to 32K to 128K to a million tokens. That's not optimization, that's a paradigm shift.
+Jenny: So the key question when evaluating any new technique is: does this improve a constant factor, or does it change what's possible?
+Alex: Exactly. Quantization, kernel fusion, better batching — those are constant-factor improvements. They make existing things faster. But the attention mechanism itself, MoE architecture, MLA for the KV cache memory wall, multi-token prediction — those are unhobblers. They make previously impossible things possible. That distinction tells you how transformative something is likely to be.
+Jenny: I love that. So to sum it up: measure the right resource — MFU for compute-bound work, MBU for memory-bound work. Use SOL thinking to know how much headroom exists. And when evaluating breakthroughs, ask whether it's moving a constant or removing a ceiling.
+Alex: That's it. And honestly, that SOL mindset is something every infrastructure engineer should internalize. It works for GPUs, it works for distributed systems, it works for anything where you need to separate physics from engineering.

@@ -1,0 +1,31 @@
+Alex: So today we're tackling chunked prefill, which solves one of the nastiest problems in LLM serving — prefill and decode fighting over the same GPU.
+Jenny: Okay, set the stage for me. Why do they fight?
+Alex: They have completely opposite resource profiles. Prefill is compute-bound — you're crunching thousands of input tokens in parallel, maxing out the GPU's math units. A long prompt, say 10,000 tokens, can take 200 to 500 milliseconds and just hogs the entire GPU.
+Jenny: And decode?
+Alex: Decode is memory-bandwidth-bound. Each step loads model weights from memory, spits out one token, takes maybe 10 to 20 milliseconds, and barely touches the arithmetic units. So they want different things from the hardware.
+Jenny: But they're sharing the same GPU in continuous batching, right?
+Alex: Exactly. And here's the killer — the GPU runs one forward pass at a time. There's no interleaving. So when a new request shows up with a massive prompt, its prefill runs, and every single decode sequence in the batch just... freezes. Users streaming responses see their output completely stall for half a second.
+Jenny: That's terrible for user experience. Can't you just run them as separate forward passes somehow?
+Alex: Nope. The hardware doesn't support it. Whatever's in the current batch is what gets computed, full stop. The only thing you control is what goes into each batch.
+Jenny: So what's the fix?
+Alex: Instead of processing that entire 10,000-token prompt in one giant forward pass, you break it into chunks — say, 512 tokens each. Then each forward pass becomes a mixed batch: 512 prefill tokens from the new request plus one decode token from each ongoing sequence. They all run together in one pass.
+Jenny: Oh, that's clever. So the decode users get their next token every step, they never freeze?
+Alex: Right. Each step takes maybe 20 to 25 milliseconds instead of 10 to 20, so there's a slight bump. But nobody gets blocked for 500 milliseconds. After about 20 steps, the full prompt is prefilled and that request joins the decode stream normally.
+Jenny: Wait, but doesn't spreading the prefill across 20 steps mean the new request waits longer for its first token?
+Alex: Yes, and that's the core tradeoff. TTFT — time to first token — goes up for the new request. It's higher but predictable. Meanwhile, time between tokens for everyone already streaming stays smooth and bounded. No more random 500-millisecond freezes.
+Jenny: And for something like a chat application, the streaming smoothness matters more than shaving a bit off the initial wait?
+Alex: Exactly what Anthropic optimizes for. Users tolerate a slightly longer wait before the response starts. What they hate is the stream stuttering once it's going.
+Jenny: So the chunk size is basically a dial between those two things?
+Alex: Precisely. Bigger chunks mean fewer steps to finish prefill — lower TTFT — but each step is more disruptive to decode. Smaller chunks give buttery-smooth decode but stretch out the prefill. In vLLM you tune this with the max-num-batched-tokens parameter.
+Jenny: How does the attention even work when you've got prefill and decode tokens mixed in the same batch? They need different visibility, right?
+Alex: Great question. It uses a block-diagonal attention mask. Prefill tokens in the current chunk attend to all previously computed chunks already in the KV cache, plus they attend to each other causally within the chunk. Decode tokens only see their own sequence's KV cache. No sequence ever sees another.
+Jenny: So they're isolated despite sharing a forward pass. That's neat. Is there a compute penalty for mixing them?
+Alex: There is. Prefill wants big matrix-matrix multiplications, decode wants matrix-vector. Running both together means the GPU can't fully optimize for either regime. There's a Pareto curve — the Sarathi-Serve paper showed this explicitly.
+Jenny: Now what about disaggregated inference, where prefill and decode run on separate machines? Does chunked prefill even matter there?
+Alex: The original motivation goes away — there's nothing to interfere with on a dedicated prefill worker. But it's still useful for two reasons. First, head-of-line blocking. Without chunking, one 50,000-token monster prompt monopolizes a prefill worker while shorter prompts queue behind it. Chunking lets you interleave short and long prompts.
+Jenny: Like a supermarket express lane versus everyone in one line.
+Alex: Good analogy. And second — this is the exciting one — you can start shipping completed KV cache chunks to decode workers before prefill even finishes. The decode worker might start generating tokens while the prefill is still running on later chunks.
+Jenny: So you're overlapping prefill computation with KV transfer and early decode? That sounds like pipelining in CPU design.
+Alex: That's exactly what it is. Pipeline the stages instead of doing them sequentially. It's still an active research area, but the potential latency savings are significant.
+Jenny: So chunked prefill went from "stop blocking my decodes" to enabling some pretty sophisticated scheduling across distributed systems.
+Alex: That's the beauty of it. Simple idea — break big work into small pieces — but it unlocks smooth serving, predictable tail latency, and even pipelining in disaggregated setups.

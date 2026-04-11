@@ -125,7 +125,7 @@ def generate_conversation(section_text: str, section_title: str) -> str:
 
     result = subprocess.run(
         ['claude', '-p', prompt, '--output-format', 'text'],
-        capture_output=True, text=True, timeout=120
+        capture_output=True, text=True, timeout=300
     )
 
     if result.returncode != 0:
@@ -173,6 +173,22 @@ def parse_conversation(script: str) -> list[dict]:
 
 # ── Audio generation ──
 
+async def tts_with_retry(text: str, voice: str, output_path: Path, max_retries: int = 3):
+    """Call edge-tts with retry on 503/rate limit errors."""
+    for attempt in range(max_retries):
+        try:
+            communicate = edge_tts.Communicate(text, voice, rate="+5%")
+            await communicate.save(str(output_path))
+            return
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait = 5 * (attempt + 1)  # 5s, 10s, 15s
+                print(f'    TTS retry {attempt+1}/{max_retries} after {wait}s ({e})')
+                await asyncio.sleep(wait)
+            else:
+                raise
+
+
 async def generate_audio(turns: list[dict], output_path: Path):
     """Generate MP3 from conversation turns using edge-tts."""
     temp_dir = output_path.parent / '.temp'
@@ -183,8 +199,7 @@ async def generate_audio(turns: list[dict], output_path: Path):
         voice = VOICE_HOST if turn['speaker'] == 'Alex' else VOICE_COHOST
         temp_path = temp_dir / f'{output_path.stem}_{i:03d}.mp3'
 
-        communicate = edge_tts.Communicate(turn['text'], voice, rate="+5%")
-        await communicate.save(str(temp_path))
+        await tts_with_retry(turn['text'], voice, temp_path)
         temp_files.append(temp_path)
 
     # Concatenate all clips
@@ -304,9 +319,14 @@ async def main():
             print(f'  [{sec_id}] Skipping (already exists)')
             continue
 
-        success = await process_section(sec_id, sections[sec_id], section_names)
-        if success:
-            generated += 1
+        try:
+            success = await process_section(sec_id, sections[sec_id], section_names)
+            if success:
+                generated += 1
+        except Exception as e:
+            print(f'  [{sec_id}] ERROR: {e}')
+            print(f'  [{sec_id}] Skipping, will retry on next run')
+            continue
 
     print(f'\nDone! {generated} podcast episodes generated in {PODCAST_DIR}/')
     print(f'Transcripts cached in {TRANSCRIPT_DIR}/')

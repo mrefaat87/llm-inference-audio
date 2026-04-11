@@ -1,0 +1,31 @@
+Alex: So let's talk about the thing that keeps infrastructure teams up at night — how much does it actually cost to run inference?
+Jenny: Yeah, I feel like everyone throws around "tokens per dollar" but I've never seen the actual math broken down.
+Alex: It's surprisingly simple. There's really one core formula. You take your GPU cost per hour, divide it by your throughput in tokens per second, times a small constant — 0.0036 — and you get your cost per million tokens.
+Jenny: Okay, but make that real for me. What does that look like with actual hardware?
+Alex: Sure. Take LLaMA 3 70B on an H100, which costs about two fifty an hour. With continuous batching at a batch size of 64, you're pushing around 2,000 output tokens per second. Plug that in and you get about 35 cents per million tokens.
+Jenny: That sounds incredibly cheap.
+Alex: It is! But here's the kicker — run that same model with a single request, no batching, you're doing maybe 35 tokens per second. Same GPU, same model, now you're paying almost twenty dollars per million tokens.
+Jenny: Wait — that's like a 57x difference just from batching?
+Alex: Exactly. Which is why continuous batching is the single most important optimization in inference economics. Nothing else even comes close.
+Jenny: So the GPU is the same price either way — you're just wasting it when you don't batch.
+Alex: Right, think of it like a city bus. You're paying for the bus to run the route regardless. Continuous batching fills every seat. Without it, you're running a charter bus for one passenger.
+Jenny: Okay, so 35 cents per million tokens sounds great on paper. But that assumes the GPU is busy all the time, right?
+Alex: And that's where utilization and goodput come in — the two hidden multipliers that kill your real-world economics. If your GPUs are only busy 60% of the time, that 35 cents becomes 58 cents. Every idle hour at two fifty per GPU is pure waste.
+Jenny: Which is literally why autoscaling matters so much.
+Alex: Exactly — it's not just an ops convenience, it's a direct cost lever. And then there's goodput. Not every token you generate is useful. Some requests get preempted, some time out, speculative decoding has rejected tokens. If only 80% of your raw throughput is actually useful work, your effective cost jumps again.
+Jenny: So the real formula is more like base cost divided by utilization divided by goodput.
+Alex: Exactly. A worked example — two H100s serving LLaMA 70B. Five dollars an hour total, 2,500 tokens per second batched, that's 56 cents per million tokens. Adjust for 70% utilization, you're at 80 cents. Then 85% goodput compliance, and you land at 94 cents per million tokens output.
+Jenny: And compare that to what API providers charge — Claude Sonnet 4 is fifteen dollars per million output tokens. So there's like a 16x margin there?
+Alex: Right, and that margin covers a lot — R&D, safety infrastructure, RLHF training, API reliability, peak capacity headroom. It's not pure profit by any stretch.
+Jenny: What about the difference between input and output costs? I've always wondered why providers charge so much more for output.
+Alex: Great question. Input tokens — the prefill phase — are compute-bound. You process thousands of tokens in parallel, super efficient. Output tokens are generated one at a time per sequence, bottlenecked by memory bandwidth. So output is roughly 10 to 30x more expensive to produce than input. That's why APIs charge 3 to 5x more for output.
+Jenny: And then there's the whole thinking token situation with reasoning models.
+Alex: Oh, this is the new cost dimension that changes everything. Models like Claude with extended thinking or OpenAI's o-series generate internal chain-of-thought tokens before giving you the answer. A request with 500 visible output tokens might burn 5,000 to 50,000 thinking tokens internally.
+Jenny: So your effective compute cost could be 10 to 100x higher than what the visible output suggests.
+Alex: Exactly. And those thinking tokens are typically billed at output rates, which creates huge economic pressure to optimize them — pruning redundant reasoning, caching common patterns, terminating early when confidence is high.
+Jenny: What about other optimizations? How much can quantization and architecture choices move the needle?
+Alex: Quantization is huge. Going from FP16 to FP8 on an H100 gives you 1.5 to 1.8x throughput for almost no quality loss. INT4 quantization pushes that to 2.5x but you start seeing 1 to 3% quality degradation. Prefix caching can slash input costs by 50 to 90% if you have shared system prompts. And MoE architectures — Mixture of Experts — can give you 2 to 4x throughput at comparable quality because you're only activating a fraction of the parameters.
+Jenny: And the pricing trend overall?
+Alex: Frontier model pricing has been dropping about 4x per year. GPT-4 launched at sixty dollars per million output tokens in 2023. By 2025, GPT-4.1 is at eight dollars. Better hardware, quantization, distillation, MoE — they all compound.
+Jenny: So the bottom line is — the cost formula connects directly to every infrastructure decision you make. Autoscaling maximizes utilization, admission control maximizes goodput, and scheduling optimizes the useful work per dollar.
+Alex: That's it. Every optimization ultimately flows through that one equation. Make the denominator bigger, keep the numerator honest, and your cost per token drops.

@@ -1,0 +1,31 @@
+Alex: So today we're talking about transformer layers and dimensions — the basic building blocks that determine how big a model is, how much memory it needs, and honestly, how smart it can be.
+Jenny: And this is one of those areas where the terminology is a mess, right? Like "hidden layer" means three different things depending on who you're talking to.
+Alex: Exactly. So let's just nail it down. A transformer layer — also called a transformer block — is one complete processing step. And it's not just one operation. It's actually two sub-layers stacked together.
+Jenny: Okay, what are the two?
+Alex: First is the attention sub-layer. This is where tokens look at each other. Every token gathers context from the rest of the sequence through that Q, K, V mechanism. So after attention, the word "bank" now knows whether it's near "river" or "deposit."
+Jenny: Right, that's the cross-token communication step.
+Alex: Exactly. Then comes the FFN — the feed-forward network. And this one's the opposite. There's no cross-token communication at all. Each token vector goes through independently. It hits two matrix multiplications with a non-linear activation function sandwiched between them.
+Jenny: Why do you need that activation function?
+Alex: Great question. Without it, stacking multiple matrix multiplies just collapses into a single one — you'd only learn linear relationships. The activation is what lets the model learn complex patterns. And here's the kicker — the FFN is where most of the model's actual knowledge lives. Factual recall, domain knowledge, learned patterns — it's all in those weight matrices.
+Jenny: Wait, so attention is about relationships between tokens, and the FFN is where the model stores what it knows?
+Alex: That's a great way to put it. And the FFN is huge — it accounts for about two-thirds of all parameters in a layer.
+Jenny: Two-thirds! Okay, so what keeps these layers from falling apart when you stack ninety-six of them like GPT-3 does?
+Alex: Two things. Residual connections and layer normalization. The residual connection is simple — you add the input of each sub-layer back to its output. So there's always this skip path where the original signal flows through untouched. Without that, gradients would vanish during training before they ever reached the early layers.
+Jenny: Like a highway lane that bypasses all the local exits.
+Alex: Perfect analogy. And layer norm just rescales the numbers at each step so they don't explode or shrink to zero as they flow through dozens of layers.
+Jenny: Okay, now let's talk dimensions. There's like five key numbers that define a model's shape, right?
+Alex: Right. The most important one is d_model — the hidden dimension. It's the width of every token vector as it flows through the network. GPT-3 uses 12,288. And here's why it matters so much — parameters scale with d_model squared. Double d_model, you quadruple your parameter count.
+Jenny: That's a steep curve.
+Alex: Very steep. Then there's d_ff, the inner FFN dimension. In the original transformer it was four times d_model. So for GPT-3, that's about 49,000. Modern models using SwiGLU activation actually use around 2.67 times d_model instead, because SwiGLU adds a third gate matrix that compensates.
+Jenny: So the expansion ratio changed but the total compute stayed roughly similar?
+Alex: Roughly, yes. Then you've got d_head — the per-head dimension, which is d_model divided by the number of heads. GPT-3 has 96 heads, so each head works with 128 dimensions. That number directly controls your KV cache size per token per layer.
+Jenny: Which is huge for inference memory.
+Alex: Massive. And then num_layers — 96 for GPT-3. More layers means more abstract reasoning capability but it multiplies your total parameters linearly.
+Jenny: So there's this idea that early layers learn syntax, middle layers learn semantics, and late layers learn reasoning. How real is that?
+Alex: It's a useful mental model but the research is messier than the narrative. One study found 57 percent of contextual phenomena actually peaked in late layers and 43 percent in early layers, with basically nothing peaking in the middle where you'd expect.
+Jenny: That's the opposite of the tidy story.
+Alex: Right. What does seem real is that about 87 percent of phenomena route through the same late-layer hub. Less modular specialization than people assume. And here's a counterintuitive implication for quantization — you might think early "syntax" layers are safe to compress more aggressively. But actually, the first and last few layers are the most sensitive. Early layers have high activation variance, late layers project onto the vocabulary. The middle layers are where you can be most aggressive with lower precision.
+Jenny: So the quantization frameworks aren't following the narrative either — they're using empirical sensitivity measurements.
+Alex: Exactly. Hessian-based sensitivity, not folklore. The numbers tell you where to compress.
+Jenny: This is one of those topics where getting the fundamentals right changes how you think about everything downstream — memory planning, quantization strategy, scaling decisions.
+Alex: That's exactly it. These five numbers — d_model, d_ff, d_head, num_layers, num_heads — they're the DNA of the model. Everything about serving and optimizing comes back to them.

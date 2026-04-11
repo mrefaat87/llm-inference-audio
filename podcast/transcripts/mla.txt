@@ -1,0 +1,28 @@
+Alex: So we've talked about KV cache and how it grows with context length. Today we need to talk about MLA — Multi-head Latent Attention — because it basically shatters the KV cache wall.
+Jenny: Okay, remind me how bad the KV cache problem actually gets.
+Alex: Right, so for a 70 billion parameter model using standard multi-head attention, you're storing about 4.7 megabytes of KV cache per token. Now stretch that to 100,000 tokens — you're at 470 gigabytes just for the cache. The model weights themselves are only 140 gigs in FP16.
+Jenny: Wait, the cache is bigger than the model? That's wild.
+Alex: Exactly. The cache becomes the dominant memory consumer, not the model. And that's the wall. You can't serve long contexts if the cache eats all your GPU memory.
+Jenny: So we had GQA and MQA to help with this, right? Sharing key-value heads across query heads?
+Alex: Yeah, GQA might give you an 8x reduction by going from 64 KV heads down to 8. That's meaningful but MLA does something fundamentally different. Instead of sharing heads, it compresses the actual information content of K and V.
+Jenny: How does that work?
+Alex: Here's the key insight. If you have 64 attention heads each with 128-dimensional K vectors, that's 8,192 numbers per token per layer. But those vectors aren't independent — they all came from the same token embedding through related projection matrices. There's massive redundancy.
+Jenny: Oh, so it's like storing 64 slightly different copies of similar information?
+Alex: Great analogy, yes. MLA learns to compress all that K and V information into a single small latent vector per token per layer. Think of it like a zip file. Instead of storing all 64 heads worth of K and V, you store one compressed representation.
+Jenny: And then you decompress at attention time?
+Alex: Exactly. When you need to compute attention, you project that latent vector back up to reconstruct the full K and V for all heads. Two matrix multiplications per layer.
+Jenny: That sounds expensive though — you're adding compute to every decode step.
+Alex: This is where it gets really clever. DeepSeek-V2 adds about 1.3 billion extra FLOPs per decode step across 80 layers. Sounds like a lot, but remember — decode is memory-bandwidth-bound, not compute-bound. The arithmetic units are sitting there underutilized anyway. You're using spare compute capacity that was going to waste.
+Jenny: Oh, so the extra math is essentially free because the bottleneck is loading data from memory, and you just massively reduced how much data needs loading.
+Alex: Exactly right. 93% less KV cache means 93% less HBM bandwidth spent loading cached values, which is the actual bottleneck. The extra compute rides for free.
+Jenny: 93% reduction — that's way more than GQA's 8x. How?
+Alex: Because GQA is still storing full-dimensional head vectors, just fewer of them. MLA compresses the dimensionality itself. The latent vector might be 512 dimensions instead of 8,192. You're going from O of num_heads times d_head times context_length down to O of d_latent times context_length, where d_latent is dramatically smaller.
+Jenny: So in real numbers, that 470 gigabytes at 100K tokens becomes...
+Alex: About 30 gigabytes. Suddenly long-context serving is economically viable.
+Jenny: Is there any scenario where MLA loses?
+Alex: Yes, actually. Very short sequences — think batch size of 1, under about 50 to 100 tokens. There the attention matmul is so tiny that the decompression overhead is noticeable. But production serving almost always exceeds those thresholds, so it's basically always a win in practice.
+Jenny: And this is why models like Kimi K2 adopted it?
+Alex: Right. Kimi K2 combines MLA with reduced attention heads and increased MoE expert sparsity. It's all part of the same co-design philosophy — shrink the parts that scale badly with context, like attention heads and KV cache, and grow the parts that scale well, like MoE experts. They're serving 128K-plus context at costs competitive with much shorter context models.
+Jenny: So MLA is to KV cache what FlashAttention was to attention memory?
+Alex: That's exactly how I'd frame it. FlashAttention changed how you compute attention to save memory. MLA changes what you store in the cache to save memory. Neither changes the fundamental attention algorithm — they're both about making the memory economics viable. And the industry is clearly converging on MLA-style compression for frontier long-context models.
+Jenny: Compressing redundancy that was hiding in plain sight. I love it.

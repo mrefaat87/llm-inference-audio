@@ -1,0 +1,45 @@
+Alex: So today we're comparing the four big inference engines — vLLM, TensorRT-LLM, SGLang, and Dynamo. And honestly, the easiest way to think about this is like choosing a vehicle for a job.
+
+Jenny: Okay, I like that. So what's the lineup?
+
+Alex: vLLM is your reliable pickup truck. It does everything well, huge community, broadest model support. It came out of UC Berkeley in 2023 and introduced PagedAttention, which was a game-changer for memory management. Think of it as the Linux of LLM inference — general purpose, community-driven, flexibility over raw peak performance.
+
+Jenny: And TensorRT-LLM?
+
+Alex: That's your Formula One car. NVIDIA built it for maximum performance on their hardware. It compiles your model ahead of time into these hyper-optimized TensorRT engines. You get ten to thirty percent more throughput than vLLM on the same GPU. But here's the catch — that compilation step takes thirty to sixty minutes, and it's NVIDIA-only.
+
+Jenny: Oh wow, so you're trading flexibility for speed.
+
+Alex: Exactly. And then there's SGLang, which is fascinating. Also from Berkeley — actually from Lianmin Zheng, who co-created vLLM. SGLang's superpower is structured generation. When you need JSON output or constrained formats, it's two to five times faster than the alternatives. It uses this thing called RadixAttention instead of PagedAttention.
+
+Jenny: Wait, what's the difference between those two?
+
+Alex: So PagedAttention manages memory like virtual memory pages — fixed blocks that get allocated and freed. RadixAttention is tree-based. Imagine a tree where each branch represents a different conversation that shares the same system prompt. Instead of storing that prompt separately for every request, RadixAttention shares it across the tree. For workloads with shared prefixes, you get thirty to eighty percent reduction in time to first token.
+
+Jenny: That's huge for multi-turn conversations where every message starts with the same system prompt and chat history.
+
+Alex: Exactly right. And then Dynamo is the newest one — NVIDIA open-sourced it in early 2025. But here's the thing, Dynamo isn't really an engine. It's an orchestration framework. Its whole philosophy is disaggregation-first. It separates prefill from decode across different GPU pools and manages that routing.
+
+Jenny: So it sits on top of the other engines?
+
+Alex: Yes! Think of it like Kubernetes for inference. It doesn't serve the model itself, it orchestrates engines that do. The control plane is written in Rust for performance. You'd use it at fifty-plus GPU scale where you need strict time-between-tokens SLOs and you have high-bandwidth interconnect between nodes.
+
+Jenny: Okay so let me make sure I have the performance picture right. For something like LLaMA 70B on H100s?
+
+Alex: vLLM gets you roughly two to four thousand output tokens per second. TRT-LLM pushes that to twenty-five hundred to five thousand. SGLang is right in between — two to forty-five hundred — but it destroys the competition on structured output. And Dynamo's performance depends entirely on which engine it's running underneath.
+
+Jenny: So how do you actually choose? Like if I'm starting a new project tomorrow?
+
+Alex: Start with vLLM. Always. It's the same principle as AWS — you don't start with a custom Spot placement strategy. You start with on-demand, prove your workload, then optimize. vLLM has the biggest community, fastest feature iteration, supports the most models and hardware.
+
+Jenny: And when would I switch?
+
+Alex: If you're running purely on NVIDIA hardware and you have an MLOps team that can handle the complexity, and you need every last drop of throughput — TRT-LLM. If structured generation is your primary use case, or you have heavy multi-turn workloads where prefix caching matters — SGLang. And if you're at massive scale and need to separate your prefill and decode infrastructure — Dynamo.
+
+Jenny: That's really clean. It's like, vLLM is your default, and you only graduate to the specialists when you have a specific bottleneck that justifies it.
+
+Alex: That's exactly it. And honestly, they're all converging. vLLM V1 is twenty to forty percent faster than V0. SGLang added most of vLLM's features. Even the attention mechanisms are becoming interchangeable. The real differentiator going forward is probably going to be ecosystem and community more than raw performance.
+
+Jenny: Which again favors vLLM as the safe default.
+
+Alex: Right. Start there, measure your bottlenecks, and let the data tell you when to switch.

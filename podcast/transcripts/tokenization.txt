@@ -1,0 +1,41 @@
+Alex: So today we're diving into tokenization, and I want to start by reframing how people think about it. Tokenization isn't just a preprocessing step — it's actually an infrastructure decision that affects your costs, your latency, and your capacity planning.
+
+Jenny: Okay, bold claim. Walk me through it. Let's start with the basics though — how does a tokenizer actually get built?
+
+Alex: Right, so the most common approach is BPE — Byte Pair Encoding. Think of it like a compression algorithm. You start with individual characters, so the word "lower" becomes five separate tokens: l, o, w, e, r. Then you scan your entire training corpus and count which pairs of adjacent characters appear most often.
+
+Jenny: So like, if "l" and "o" appear next to each other five hundred times...
+
+Alex: Exactly, you merge them into a single token "lo." Add that to your vocabulary, and repeat. You keep merging the most frequent pairs until you hit your target vocabulary size — could be 32K tokens, 64K, 128K. What you end up with is a merge table, basically an ordered list of rules that gets replayed every time you tokenize new text.
+
+Jenny: That's clever — it's like building a dictionary of common subwords from the ground up. But I've also heard of SentencePiece. How's that different?
+
+Alex: SentencePiece, which Google developed, works on raw bytes with no assumptions about whitespace or word boundaries. That's critical for languages like Chinese, Japanese, or Thai where you don't have spaces between words. It uses this little underscore marker to represent spaces, which makes the whole thing fully reversible.
+
+Jenny: Oh, so you can perfectly reconstruct the original text. That matters. Okay, so why does vocabulary size matter so much for inference specifically?
+
+Alex: This is where it gets really interesting from an infrastructure perspective. A larger vocabulary, say 128K tokens, means each piece of text gets compressed into fewer tokens. Fewer tokens means fewer decode steps, which means lower latency. It also means less KV cache per request because you're storing fewer token positions.
+
+Jenny: Wait, so it's basically free performance?
+
+Alex: Not quite. The trade-off is a larger embedding table — 128K entries times your model dimension, that can be around a billion parameters for a 70B model. And you've got a larger softmax at every single decode step. But here's the thing — for 70B-plus models, that embedding table is less than two percent of total parameters. It's negligible. Meanwhile you're getting a ten to twenty percent reduction in token count, which is a real inference speedup.
+
+Jenny: So that's why everyone's moving to bigger vocabularies. LLaMA-3 went to 128K, Gemini's at 256K...
+
+Alex: Exactly. And there's a huge hidden reason for that shift — multilingual efficiency. This is the part that blew my mind when I first dug into it. A tokenizer trained mostly on English produces roughly 1.3 tokens per word for English text. Seems fine. But for Chinese? You're looking at 2.5 tokens per word. Japanese, 3 tokens. Hindi or Bengali? Four to five tokens per word.
+
+Jenny: So you're telling me the same model serving the same request is two to four times more expensive depending on the language?
+
+Alex: That's exactly right. Two to four times the cost, two to four times the latency, and you're burning through the context window two to four times faster. If your model handles 100 requests per second in English, it might only handle 30 in Japanese. LLaMA-3's jump to 128K vocab was specifically motivated by closing that multilingual gap.
+
+Jenny: That's a capacity planning nightmare if you're serving globally. You can't just say "we support 100 req/s" without knowing the language distribution.
+
+Alex: Bingo. And it goes even deeper. Your KV cache budgeting depends on token count — tokenizer fertility is a first-order variable in your memory capacity model. Prefix caching hit rates are better when your tokenizer produces consistent tokenizations for common prefixes. And if you're doing token-based pricing, the tokenizer literally determines your revenue per request.
+
+Jenny: Oh wow, so if you change your tokenizer between model versions, you're effectively changing your pricing structure even if the price per token stays the same.
+
+Alex: Exactly. The same user prompt costs a different number of tokens. So tokenization touches latency, memory, throughput, caching efficiency, cost attribution, and global capacity planning. It's not preprocessing — it's foundational infrastructure.
+
+Jenny: That completely changes how I'd think about model selection for a production deployment. You'd need to profile your actual traffic by language before you could even begin capacity planning.
+
+Alex: That's the takeaway. Know your tokenizer, know your traffic, or your capacity model is fiction.

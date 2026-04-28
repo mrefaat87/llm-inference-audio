@@ -168,6 +168,12 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
 .audio-rate:hover { border-color: #3b82f6; }
 .audio-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #64748b; cursor: pointer; white-space: nowrap; }
 .audio-toggle input { accent-color: #3b82f6; }
+.audio-seek-wrap { flex: 1 1 100%; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.audio-seek { flex: 1; height: 4px; -webkit-appearance: none; appearance: none; background: #1e2a3a; border-radius: 2px; outline: none; cursor: pointer; }
+.audio-seek::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #3b82f6; cursor: pointer; border: none; }
+.audio-seek::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: #3b82f6; cursor: pointer; border: none; }
+.audio-seek:disabled { opacity: 0.4; cursor: not-allowed; }
+.audio-time { font-size: 11px; color: #64748b; font-variant-numeric: tabular-nums; min-width: 36px; text-align: center; }
 
 /* ── Audio Reader: Podcast Player ── */
 .podcast-bar { display: none; padding: 10px 14px; background: #0d1117; border-bottom: 1px solid #1e2a3a; }
@@ -269,7 +275,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <button class="ch-header" onclick="toggleChapter('ch1')">
       <span class="ch-arrow">&#9656;</span>
       <span class="ch-title">The Model</span>
-      <span class="ch-count" id="count-ch1">0/9</span>
+      <span class="ch-count" id="count-ch1">0/10</span>
     </button>
     <div class="ch-topics">
       <button class="nav-item active" data-sec="tokenization" onclick="show('tokenization')">Tokenization</button>
@@ -280,6 +286,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
       <button class="nav-item" data-sec="params" onclick="show('params')">Parameter Count</button>
       <button class="nav-item" data-sec="moe" onclick="show('moe')">Mixture of Experts</button>
       <button class="nav-item" data-sec="numformats" onclick="show('numformats')">Number Formats</button>
+      <button class="nav-item" data-sec="sampling" onclick="show('sampling')">Sampling & Decoding <span class="new-badge">new</span></button>
       <button class="nav-item" data-sec="quiz-ch1" onclick="show('quiz-ch1')">Chapter 1 Quiz</button>
     </div>
   </div>
@@ -287,12 +294,16 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <button class="ch-header" onclick="toggleChapter('ch2')">
       <span class="ch-arrow">&#9656;</span>
       <span class="ch-title">Architecture Frontier</span>
-      <span class="ch-count" id="count-ch2">0/4</span>
+      <span class="ch-count" id="count-ch2">0/8</span>
     </button>
     <div class="ch-topics">
       <button class="nav-item" data-sec="mla" onclick="show('mla')">MLA & Attention Variants</button>
+      <button class="nav-item" data-sec="attnvariants" onclick="show('attnvariants')">Attention-Variant Family <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="ssm" onclick="show('ssm')">Mamba & Hybrid Models <span class="new-badge">new</span></button>
       <button class="nav-item" data-sec="mtp" onclick="show('mtp')">Multi-token Prediction</button>
       <button class="nav-item" data-sec="codesign" onclick="show('codesign')">Model-Hardware Co-design</button>
+      <button class="nav-item" data-sec="distill" onclick="show('distill')">Distillation <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="lora" onclick="show('lora')">Fine-tuning & LoRA <span class="new-badge">new</span></button>
       <button class="nav-item" data-sec="quiz-ch2" onclick="show('quiz-ch2')">Chapter 2 Quiz</button>
     </div>
   </div>
@@ -317,6 +328,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <div class="ch-topics">
       <button class="nav-item" data-sec="batching" onclick="show('batching')">Continuous Batching</button>
       <button class="nav-item" data-sec="kvcache" onclick="show('kvcache')">KV Cache & PagedAttention</button>
+      <button class="nav-item" data-sec="prefixcache" onclick="show('prefixcache')">Prefix Caching <span class="new-badge">new</span></button>
       <button class="nav-item" data-sec="chunked" onclick="show('chunked')">Chunked Prefill</button>
       <button class="nav-item" data-sec="flashattn" onclick="show('flashattn')">FlashAttention</button>
       <button class="nav-item" data-sec="quant" onclick="show('quant')">Quantization Deep Dive</button>
@@ -339,7 +351,9 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
       <button class="nav-item" data-sec="reqseqbatch" onclick="show('reqseqbatch')">Request vs Sequence vs Batch</button>
       <button class="nav-item" data-sec="multiturn" onclick="show('multiturn')">Multi-turn Inference</button>
       <button class="nav-item" data-sec="agentic" onclick="show('agentic')">Agentic Inference</button>
+      <button class="nav-item" data-sec="toolcalling" onclick="show('toolcalling')">Tool Calling & Reasoning <span class="new-badge">new</span></button>
       <button class="nav-item" data-sec="disagg" onclick="show('disagg')">Disaggregation</button>
+      <button class="nav-item" data-sec="dynamo" onclick="show('dynamo')">NVIDIA Dynamo <span class="new-badge">new</span></button>
       <button class="nav-item" data-sec="quiz-ch5" onclick="show('quiz-ch5')">Chapter 5 Quiz</button>
     </div>
   </div>
@@ -352,9 +366,10 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <div class="ch-topics">
       <button class="nav-item" data-sec="traintoserve" onclick="show('traintoserve')">Training-to-Serving</button>
       <button class="nav-item" data-sec="engines" onclick="show('engines')">Engine Comparison</button>
+      <button class="nav-item" data-sec="sglang" onclick="show('sglang')">SGLang Deep Dive <span class="new-badge">new</span></button>
       <button class="nav-item" data-sec="benchmarking" onclick="show('benchmarking')">Benchmarking</button>
       <button class="nav-item" data-sec="costeconomics" onclick="show('costeconomics')">Cost Economics</button>
-      <button class="nav-item" data-sec="mfu" onclick="show('mfu')">MFU, SOL & Unhobblers</button>
+      <button class="nav-item" data-sec="mfu" onclick="show('mfu')">Roofline, MFU, SOL & Unhobblers</button>
     </div>
   </div>
 </div>
@@ -368,6 +383,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
 <!-- Listen mode: single-narrator audio (edge-tts) -->
 <div class="audio-bar" id="audioBar">
   <button class="audio-btn" onclick="audioNav(-1)" title="Previous section">&#9198;</button>
+  <button class="audio-btn" onclick="seekBy(-20)" title="Rewind 20 seconds">&#8634;20</button>
   <button class="audio-btn" id="listenPlayBtn" onclick="toggleAudio('listen')" title="Play / Pause">&#9654;</button>
   <button class="audio-btn" onclick="audioNav(1)" title="Next section">&#9197;</button>
   <div class="audio-info">
@@ -376,6 +392,11 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   </div>
   <div class="speed-control"><input type="range" class="speed-slider" id="listenSpeedSlider" min="0.5" max="3" step="0.05" value="1" oninput="setRate(this.value)" title="Playback speed"><span class="speed-label" id="listenSpeedLabel">1x</span></div>
   <label class="audio-toggle"><input type="checkbox" id="listenAutoAdvance" onchange="setAutoAdvance(this.checked)"> Auto</label>
+  <div class="audio-seek-wrap">
+    <span class="audio-time" id="listenCurTime">0:00</span>
+    <input type="range" class="audio-seek" id="listenSeek" min="0" max="0" step="0.1" value="0" disabled title="Seek">
+    <span class="audio-time" id="listenDurTime">0:00</span>
+  </div>
   <audio id="listenPlayer" preload="metadata" style="display:none;"></audio>
   <div class="audio-fallback" id="listenFallback" style="display:none;font-size:12px;color:#64748b;">Run <code>generate_podcast.py --narration</code></div>
 </div>
@@ -383,6 +404,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
 <div class="podcast-bar" id="podcastBar">
   <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
     <button class="audio-btn" onclick="audioNav(-1)" title="Previous section">&#9198;</button>
+    <button class="audio-btn" onclick="seekBy(-20)" title="Rewind 20 seconds">&#8634;20</button>
     <button class="audio-btn" id="podcastPlayBtn" onclick="toggleAudio('podcast')" title="Play / Pause">&#9654;</button>
     <button class="audio-btn" onclick="audioNav(1)" title="Next section">&#9197;</button>
     <div class="audio-info">
@@ -391,6 +413,11 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     </div>
     <div class="speed-control"><input type="range" class="speed-slider" id="podcastSpeedSlider" min="0.5" max="3" step="0.05" value="1" oninput="setRate(this.value)" title="Playback speed"><span class="speed-label" id="podcastSpeedLabel">1x</span></div>
     <label class="audio-toggle"><input type="checkbox" id="podcastAutoAdvance" onchange="setAutoAdvance(this.checked)"> Auto</label>
+  </div>
+  <div class="audio-seek-wrap" style="margin-top:8px;">
+    <span class="audio-time" id="podcastCurTime">0:00</span>
+    <input type="range" class="audio-seek" id="podcastSeek" min="0" max="0" step="0.1" value="0" disabled title="Seek">
+    <span class="audio-time" id="podcastDurTime">0:00</span>
   </div>
   <audio id="podcastPlayer" preload="metadata" style="display:none;"></audio>
   <div class="audio-fallback" id="podcastFallback" style="display:none;font-size:12px;color:#64748b;">Run <code>generate_podcast.py --podcast</code></div>
@@ -943,7 +970,72 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   </table>
 
   <div class="resource-bar">📖 <a href="https://arxiv.org/abs/2209.05433" target="_blank">FP8 Formats for Deep Learning (NVIDIA/ARM/Intel)</a><a href="https://arxiv.org/abs/2211.10438" target="_blank">SmoothQuant paper — solving activation outliers for INT8</a></div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('moe')">&#8592; Mixture of Experts</a><a class="pn-link pn-next" onclick="show('quiz-ch1')">Chapter 1 Quiz &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('moe')">&#8592; Mixture of Experts</a><a class="pn-link pn-next" onclick="show('sampling')">Sampling & Decoding &#8594;</a></div>
+</div>
+
+<div id="sec-sampling" class="hidden">
+<div class="breadcrumb">The Model &rsaquo; Sampling & Decoding</div>
+<h2>Sampling and decoding parameters <span class="new-badge">new</span></h2>
+  <p class="subtitle">Temperature, top-k, top-p, logit biasing, structured output — turning model probabilities into actual tokens</p>
+
+  <div class="sec-h">What sampling is, and where it sits in the forward pass</div>
+  <p>Every other section in this chapter explains how the model produces a vector of <strong>logits</strong> — one number per token in the vocabulary, representing how strongly the model "wants" to emit that token next. Sampling is the step that converts that vector into a single concrete token to actually output. It happens <em>after</em> the forward pass, on every decode step, every request.</p>
+  <p>The pipeline is fixed: logits → softmax → probability distribution over the vocabulary → sampling decision → one token ID. The forward pass produces the same logits regardless of sampling settings; the sampler just makes a different choice from the same distribution. That separation matters operationally — changing sampling parameters does not invalidate KV cache (cross-link to multi-turn for the subtlety on generated tokens).</p>
+
+  <div class="sec-h">Greedy / argmax — the deterministic baseline</div>
+  <p>The simplest sampler: pick the highest-logit token, every time. Fully deterministic — same prompt and same weights always produce identical output. Useful for evals, regression tests, and cases where you need bit-exact reproducibility. The cost is that the model can't escape early commitments: once it picks a slightly-wrong token, every subsequent token is forced to extend that wrong path.</p>
+
+  <div class="sec-h">Temperature — sharpening or flattening the distribution</div>
+  <p><strong>Temperature</strong> divides logits by a scalar T before softmax. The probability distribution changes shape but the ordering doesn't:</p>
+  <ul>
+    <li><strong>T = 0</strong> — equivalent to greedy. Highest-probability token is always picked.</li>
+    <li><strong>T &lt; 1</strong> (e.g., 0.3) — sharpens the distribution. Probable tokens get even more probable; the long tail collapses. Output stays mostly on the model's preferred phrasing but with a little variation.</li>
+    <li><strong>T = 1</strong> — softmax-as-is. The model's "natural" sampling distribution.</li>
+    <li><strong>T &gt; 1</strong> (e.g., 1.5) — flattens. Less likely tokens become more reachable. More creative, more random, and more prone to incoherence at high values.</li>
+    <li><strong>T → ∞</strong> — uniform over the vocabulary. Model output is noise.</li>
+  </ul>
+  <div class="highlight">Practical defaults: <strong>T = 0</strong> for code generation, structured extraction, evals. <strong>T = 0.7</strong> for chat. <strong>T = 1.0</strong> for creative writing. <strong>T &gt; 1.2</strong> rarely useful — past that, top-p truncation is doing the real work.</div>
+
+  <div class="sec-h">Top-k and top-p — truncating the tail</div>
+  <p>Even after temperature, the long tail of unlikely tokens can occasionally be sampled and produce nonsense. Truncation samplers cut the tail before drawing:</p>
+  <ul>
+    <li><strong>Top-k</strong> — keep only the k highest-probability tokens; renormalize over those, sample. Fixed-width window. Simple to reason about, but the "right" k depends on how peaked the distribution is — k = 50 wastes tokens on a peaked distribution and clips a flat one.</li>
+    <li><strong>Top-p</strong> (nucleus) — keep the smallest set of tokens whose probabilities sum to at least p, renormalize, sample. Adaptive width. p = 0.9 means "consider the most likely tokens that together cover 90% of the probability mass." Self-tunes between peaked and flat distributions.</li>
+  </ul>
+  <p>Production stacks usually combine: temperature first (re-shape the distribution), then top-p (truncate the tail), then sample. Top-k is sometimes layered on top as a hard cap. Modern model defaults: T ≈ 0.7, top-p ≈ 0.9, top-k either disabled or set very high (≥ 50).</p>
+  <div class="deep-dive">
+    <div class="deep-dive-label">Deep Dive — Min-p, typical sampling, and why top-p has known failure modes</div>
+    <p><strong>Top-p's failure mode:</strong> when the distribution is bimodal (two strong contenders and many weak ones), top-p can include the weak ones once it has both peaks. Min-p flips the rule: keep tokens whose probability is at least p × max_probability — so the threshold scales with the top token. This is the new default in many local serving stacks (llama.cpp, koboldcpp).</p>
+    <p><strong>Typical sampling</strong> picks tokens whose log-probability is closest to the entropy of the distribution, not the most likely tokens. Useful for creative writing where "expected surprise" matters more than "most plausible."</p>
+    <p><strong>Beam search</strong> is a different beast — instead of sampling one path, maintain B partial completions and expand the most promising. Standard in machine translation, almost never used in LLM serving because it interacts badly with continuous batching and produces low-diversity outputs that make chat interfaces feel robotic.</p>
+  </div>
+
+  <div class="sec-h">Logit biasing — pushing the model toward or away from specific tokens</div>
+  <p>Before softmax, you can add a scalar to specific token IDs' logits to make them more or less likely. Two production uses:</p>
+  <ul>
+    <li><strong>Forbidden tokens:</strong> set the bias to a large negative number (e.g., −100) for token IDs you never want. Used to suppress profanity, prevent the model from emitting a stop sequence prematurely, or block specific known-bad outputs.</li>
+    <li><strong>Forced tokens:</strong> set the bias to a large positive number to nearly guarantee a token. Used for forcing format prefixes (e.g., always start with <code>{</code> for JSON output).</li>
+  </ul>
+  <p>OpenAI's API exposes this as <code>logit_bias</code>; vLLM and SGLang have equivalent parameters. It's free at inference time — just one element-wise add to the logits vector before softmax.</p>
+
+  <div class="sec-h">Structured output — constraining sampling to a schema</div>
+  <p>The most powerful generalization of logit biasing: at every decode step, mask out (set to −∞) the logits for tokens that would violate a target schema, then sample over the remaining tokens. This forces the model to produce output that always parses — JSON that always validates against a schema, code that always tokenizes, regex matches, function-call syntax.</p>
+  <table>
+    <tr><th>Approach</th><th>How it works</th><th>Used by</th></tr>
+    <tr><td><strong>Regex / FSM-guided</strong></td><td>Compile the schema into a finite-state machine; at each step, mask logits to tokens that keep the FSM in a valid state</td><td>Outlines library, vLLM <code>guided_regex</code>, SGLang structured output, Anthropic's tool-use grammar</td></tr>
+    <tr><td><strong>JSON-schema-guided</strong></td><td>Same idea, applied to a JSON schema's allowed-token set per position</td><td>OpenAI structured outputs, vLLM <code>guided_json</code>, llama.cpp grammars</td></tr>
+    <tr><td><strong>Logits-processor plugins</strong></td><td>Generic interface for arbitrary mask functions over logits per step</td><td>Hugging Face transformers, vLLM <code>logits_processors</code></td></tr>
+  </table>
+  <p>Cost is small per token (one mask multiply) but the FSM compilation can be slow for complex schemas — usually cached by schema hash. The win is huge in agentic loops where every tool call is a structured JSON block: zero parsing failures eliminates a whole class of retry logic.</p>
+
+  <div class="sec-h">Stop sequences — telling decode when to halt</div>
+  <p>The sampler also checks each generated token against a list of <strong>stop sequences</strong>. When a match is found, decode halts immediately, regardless of whether the model would have produced more tokens. Common patterns: end-of-message tokens (<code>&lt;|im_end|&gt;</code>), tool-call closing tags (<code>&lt;/tool_call&gt;</code>), conversational turn boundaries (<code>"\nUser:"</code>). The agentic-inference section covers the partial-match buffering subtlety this introduces.</p>
+
+  <div class="sec-h">Determinism and the sampling seed</div>
+  <p>Even at <code>T = 0</code> (greedy), engines are not always bit-identical across runs. Causes: non-deterministic CUDA reductions in attention kernels, varying batch composition at decode time changing fused-kernel behavior, mixed-precision rounding differences. vLLM and SGLang both expose a <code>seed</code> parameter for stochastic sampling; for hard reproducibility you also need to pin the engine's deterministic-mode flag and avoid continuous batching collisions. Most production setups don't bother — they accept output drift and validate behavior with evals rather than diffs.</p>
+
+  <div class="resource-bar">📖 <a href="https://arxiv.org/abs/1904.09751" target="_blank">Holtzman et al. — top-p / nucleus sampling</a><a href="https://github.com/dottxt-ai/outlines" target="_blank">Outlines — structured generation library</a><a href="https://platform.openai.com/docs/guides/structured-outputs" target="_blank">OpenAI structured outputs guide</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('numformats')">&#8592; Number Formats</a><a class="pn-link pn-next" onclick="show('quiz-ch1')">Chapter 1 Quiz &#8594;</a></div>
 </div>
 
 <div id="sec-quiz-ch1" class="hidden">
@@ -977,7 +1069,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
       <div class="quiz-a">Dramatically faster. With a 32K English-centric tokenizer, Japanese requires ~3 tokens per word. With 128K vocab optimized for multilingual, this drops to ~1.5-2 tokens per word — roughly <strong>2× fewer tokens</strong>, meaning 2× fewer decode steps, 2× less KV cache, and 2× lower latency for the same content.</div>
     </details>
   </div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('numformats')">&#8592; Number Formats</a><a class="pn-link pn-next" onclick="show('mla')">MLA & Attention Variants &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('sampling')">&#8592; Sampling & Decoding</a><a class="pn-link pn-next" onclick="show('mla')">MLA & Attention Variants &#8594;</a></div>
 </div>
 
 <div id="sec-mla" class="hidden">
@@ -1012,7 +1104,99 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   <div class="highlight">MLA is to KV cache what FlashAttention was to attention memory — it doesn't change the attention algorithm itself, but it transforms the memory cost from O(num_heads × d_head × context_length) to O(d_latent × context_length), where d_latent is much smaller. The industry is converging on MLA-style KV compression for frontier long-context models.</div>
 
   <div class="resource-bar">📖 <a href="https://arxiv.org/abs/2405.04434" target="_blank">DeepSeek-V2 paper — introduces MLA</a></div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('numformats')">&#8592; Number Formats</a><a class="pn-link pn-next" onclick="show('mtp')">Multi-token Prediction &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('quiz-ch1')">&#8592; Chapter 1 Quiz</a><a class="pn-link pn-next" onclick="show('attnvariants')">Attention-Variant Family &#8594;</a></div>
+</div>
+
+<div id="sec-attnvariants" class="hidden">
+<div class="breadcrumb">Architecture Frontier &rsaquo; Attention-Variant Family</div>
+<h2>The attention-variant family <span class="new-badge">new</span></h2>
+  <p class="subtitle">Sliding window, sparse, gated, compressed, linear — the techniques sitting between vanilla MHA and full architectural alternatives</p>
+
+  <div class="sec-h">A family tree, not a list</div>
+  <p>"Attention" in modern LLMs is no longer one algorithm. It's a family of variants tuned for different memory/quality/speed tradeoffs. The MLA section covers one branch (latent-space compression of K/V). This section covers the rest. Knowing where each variant sits in the family tree makes architecture papers much faster to read:</p>
+  <table>
+    <tr><th>Branch</th><th>Variants</th><th>What it changes</th><th>Where you see it</th></tr>
+    <tr><td><strong>Dense / classical</strong></td><td>MHA, MQA, GQA</td><td>Number of K/V heads. MQA collapses to one shared K/V head; GQA uses a small group.</td><td>GPT-3 (MHA), PaLM (MQA), Llama 2/3 70B (GQA)</td></tr>
+    <tr><td><strong>Latent compression</strong></td><td>MLA</td><td>Compress K/V into a low-rank latent space; project back at attention time.</td><td>DeepSeek V2/V3</td></tr>
+    <tr><td><strong>Sparse / windowed</strong></td><td>Sliding-window, dilated, BigBird, Longformer</td><td>Each token attends to only a subset of others. Memory drops from O(N²) to O(N·W).</td><td>Mistral 7B (SWA), Gemma 2 (alternating SWA + full)</td></tr>
+    <tr><td><strong>Gated</strong></td><td>Gated attention, GLA, RetNet-like</td><td>Adds a learned gate that modulates how much of the past is "remembered" — a soft form of recurrence inside attention.</td><td>RWKV, RetNet, newer hybrid architectures</td></tr>
+    <tr><td><strong>Linear</strong></td><td>Linear attention, Performer, FAVOR+</td><td>Rewrites attention as a kernel feature map so cost is O(N·d²) instead of O(N²·d).</td><td>Linear-attention research models; building blocks for SSMs</td></tr>
+    <tr><td><strong>State-space (alternative)</strong></td><td>Mamba, Mamba-2</td><td>Replaces attention with a learned linear recurrence with a selective state. See dedicated section.</td><td>Mamba, Jamba, Nemotron Nano</td></tr>
+  </table>
+
+  <div class="sec-h">Sliding-window attention — the most-deployed sparse variant</div>
+  <p><strong>Sliding-window attention (SWA)</strong> caps each token's view to the most recent W tokens. KV cache memory becomes O(W × layers × heads × d_head) per sequence — independent of total context length. Mistral 7B uses W = 4096. Gemma 2 alternates SWA layers and full-attention layers (1:1) so the model still gets some long-range signal without paying the full O(N²) cost.</p>
+  <ul>
+    <li><strong>Win:</strong> Bounded KV cache regardless of context length. Long contexts become feasible on small GPUs.</li>
+    <li><strong>Loss:</strong> Cannot directly attend to anything beyond W tokens. Information must propagate through layers — degraded recall on very long-range dependencies.</li>
+    <li><strong>Workaround:</strong> Mix SWA with full-attention layers (alternating, every Nth, or "global tokens" that always see everything).</li>
+  </ul>
+
+  <div class="sec-h">Gated attention — soft recurrence inside the attention block</div>
+  <p>Gated variants insert a learned gating function — typically a sigmoid over a projection of the input — that scales the attention output before it's added back to the residual stream. The gate can suppress attention contributions that would conflict with the residual signal. RWKV and RetNet are the most-cited examples; newer hybrid architectures (like the gated DeltaNet block in some 2025–2026 papers) generalize this idea. The serving consequence is small — gates are cheap, but they're a signal that the architecture is moving toward recurrence-like dynamics.</p>
+
+  <div class="sec-h">Linear attention — O(N) cost in exchange for quality</div>
+  <p>Standard attention's O(N²) cost comes from materializing the score matrix. Linear-attention variants rewrite attention using <strong>kernel feature maps</strong> — a function φ such that <code>softmax(QK<sup>T</sup>) ≈ φ(Q)·φ(K)<sup>T</sup></code>. With this rewrite you can swap the order of operations, computing <code>φ(K)<sup>T</sup>·V</code> first (a small d×d matrix, regardless of N), then multiplying by φ(Q). Total cost: O(N · d²) instead of O(N² · d). Memory drops correspondingly.</p>
+  <p>Why it isn't everywhere yet: at typical transformer scales (d ≈ 4K–8K, N ≈ 4K–32K), the constants and the approximation quality favor real softmax attention, especially with FlashAttention. Linear attention shines at extreme context lengths (millions of tokens) and is the conceptual ancestor of state-space models — see the next section.</p>
+
+  <div class="sec-h">Compressed attention — the DeepSeek-style latent compression</div>
+  <p>Compressed attention (the most prominent example is MLA, covered in its own section) projects K and V down to a low-rank latent vector, stores only the latent, and decompresses at attention time. The KV cache shrinks dramatically (≈90% reduction for MLA on DeepSeek V2/V3) at the cost of a small extra projection per layer. Other "K/V compression" techniques include cross-layer KV sharing (later layers reuse earlier layers' KV), and KV pruning (drop low-importance tokens).</p>
+
+  <div class="sec-h">Hybrid layers — the production answer</div>
+  <p>Production frontier models rarely pick one variant. Instead, they alternate or stack:</p>
+  <ul>
+    <li><strong>Gemma 2 / Gemma 3:</strong> alternating sliding-window and full-attention layers.</li>
+    <li><strong>Llama 4 reasoning models</strong> (and similar 2025–2026 designs): mix MoE FFN with hybrid attention layers.</li>
+    <li><strong>Jamba / Nemotron Nano:</strong> mix Mamba blocks with attention blocks (covered in the next section).</li>
+    <li><strong>Cohere Command-R+ and Mistral Nemo:</strong> use sliding-window attention with global-attention sinks for "always visible" anchor tokens.</li>
+  </ul>
+  <p>Operationally, this matters because <strong>your serving engine has to support each variant in its attention kernel</strong>. FlashAttention 3 covers MHA/GQA/MLA and SWA; specialized kernels exist for gated and linear variants. Adding a new attention variant to a production engine is non-trivial — it's why model launches now ship with engine-side support patches (vLLM PRs, TRT-LLM plugins) on day zero.</p>
+
+  <div class="resource-bar">📖 <a href="https://arxiv.org/abs/2004.05150" target="_blank">Longformer — sliding-window + global attention</a><a href="https://arxiv.org/abs/2009.14794" target="_blank">Performer — kernel-feature linear attention</a><a href="https://arxiv.org/abs/2310.01889" target="_blank">RetNet — gated recurrent attention</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('mla')">&#8592; MLA & Attention Variants</a><a class="pn-link pn-next" onclick="show('ssm')">Mamba & Hybrid Models &#8594;</a></div>
+</div>
+
+<div id="sec-ssm" class="hidden">
+<div class="breadcrumb">Architecture Frontier &rsaquo; Mamba & Hybrid Models</div>
+<h2>State-space models, Mamba, and hybrid architectures <span class="new-badge">new</span></h2>
+  <p class="subtitle">Recurrence with selective state — and why your KV cache might be replaced by a fixed-size hidden state</p>
+
+  <div class="sec-h">The recurrent return</div>
+  <p>Before transformers won in 2017, RNNs ruled NLP. They had one virtue that attention gave up: a <strong>fixed-size recurrent state</strong>. An RNN processes tokens one at a time, updating a single hidden vector and discarding the rest. Memory is constant in context length — there's no KV cache that grows with N. RNNs lost because their training was hard to parallelize and long-range dependencies blurred through repeated multiplications.</p>
+  <p><strong>State-space models (SSMs)</strong> are the modern answer: a learned linear recurrence with carefully designed state dynamics that train as efficiently as transformers but inference like RNNs. The basic recurrence is</p>
+  <div class="highlight"><code>h_t = A · h_{t-1} + B · x_t</code><br><code>y_t = C · h_t</code></div>
+  <p>where <code>A</code>, <code>B</code>, <code>C</code> are learned matrices. The state <code>h_t</code> is a fixed-size vector regardless of how many tokens have been processed. A naive RNN already does this — the SSM contribution is a particular structure on <code>A</code> (diagonal-plus-low-rank, parameterized via continuous-time analogy) that lets training be parallelized as a long convolution while inference stays recurrent.</p>
+
+  <div class="sec-h">Mamba and the selective scan</div>
+  <p>Plain SSMs share <code>A</code>, <code>B</code>, <code>C</code> across all input positions — they can't selectively remember or forget based on content. <strong>Mamba</strong> (Gu &amp; Dao, 2023) makes <code>A</code>, <code>B</code>, <code>C</code> input-dependent. The model can now look at a token and decide "this matters, push it into state" or "this is filler, leave state alone." That's the property attention had and classical RNNs lacked.</p>
+  <p>The implementation is a custom CUDA kernel called the <strong>selective scan</strong> — a parallel-prefix-sum operation that handles the input-dependent recurrence efficiently on GPUs. Mamba-2 (2024) further unified the SSM kernel with a structured matrix view that maps cleanly onto Tensor Cores, closing most of the gap with FlashAttention's hardware utilization.</p>
+
+  <div class="sec-h">What changes for serving</div>
+  <table>
+    <tr><th>Aspect</th><th>Transformer (attention)</th><th>SSM (Mamba)</th></tr>
+    <tr><td>Memory per token in context</td><td>O(num_layers × num_kv_heads × d_head) growing with N</td><td>Fixed-size hidden state per layer — O(1) in context length</td></tr>
+    <tr><td>Decode-step cost</td><td>O(N × d) — must read full KV cache</td><td>O(d²) — read state, update state, write output</td></tr>
+    <tr><td>Long-context ceiling</td><td>HBM capacity (~32K–1M tokens)</td><td>No memory ceiling; quality ceiling instead</td></tr>
+    <tr><td>Prefill</td><td>O(N²·d) compute, parallelizable</td><td>O(N·d²) compute via parallel scan</td></tr>
+    <tr><td>KV cache</td><td>Required, dominates memory</td><td>None — replaced by recurrent state</td></tr>
+  </table>
+  <p>Operationally, an SSM is a serving engineer's dream: <strong>no KV cache</strong>. The 4-tier KV hierarchy disappears. PagedAttention disappears. Prefix caching becomes "snapshot the recurrent state at this prefix and restore it later" — kilobytes per session instead of gigabytes. Memory-bound decode becomes much less memory-bound.</p>
+
+  <div class="sec-h">The catch — retrieval and in-context recall</div>
+  <p>Pure SSMs systematically underperform transformers on tasks that require <strong>exact in-context retrieval</strong>: needle-in-haystack, copying long passages verbatim, perfect citation of a 50-token snippet from a 100K-token context. The fixed-size state forces lossy compression of the past; attention's KV cache stores everything verbatim and can look up exact matches. SSMs also tend to lag on tasks heavy on in-context learning (few-shot prompts).</p>
+  <p>This is the unsolved-but-managed weakness of pure SSMs and why the production answer is hybrid.</p>
+
+  <div class="sec-h">Hybrid models — Mamba blocks plus a few attention blocks</div>
+  <p>Rather than choose, frontier 2025–2026 models combine SSM and attention layers in one architecture. A small fraction of attention layers (typically 10–25% of total depth) handles the retrieval-heavy work; SSM layers carry the bulk of the compute with bounded memory.</p>
+  <ul>
+    <li><strong>NVIDIA Nemotron Nano</strong> (and the Nemotron-3 series) — Mamba-2 with periodic attention layers; ships with TRT-LLM kernel support.</li>
+    <li><strong>Jamba</strong> (AI21) — Mixture-of-experts FFN combined with Mamba+attention block alternation.</li>
+    <li><strong>Zamba / Falcon-Mamba</strong> — additional research-line hybrids exploring different SSM-to-attention ratios.</li>
+  </ul>
+  <p>The serving result is a model with most of the memory benefits of SSMs (small KV cache, long-context-friendly) and most of the recall quality of transformers. Engines treat them as a special case: vLLM's hybrid-mamba support and TRT-LLM's Nemotron support both exist as 2025-era extensions to the standard transformer fast paths.</p>
+
+  <div class="resource-bar">📖 <a href="https://arxiv.org/abs/2312.00752" target="_blank">Mamba: Linear-Time Sequence Modeling with Selective State Spaces</a><a href="https://arxiv.org/abs/2405.21060" target="_blank">Mamba-2 paper</a><a href="https://arxiv.org/abs/2403.19887" target="_blank">Jamba — Mamba-attention hybrid</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('attnvariants')">&#8592; Attention-Variant Family</a><a class="pn-link pn-next" onclick="show('mtp')">Multi-token Prediction &#8594;</a></div>
 </div>
 
 <div id="sec-mtp" class="hidden">
@@ -1041,7 +1225,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   <div class="highlight">Multi-token prediction is one of the techniques the Dynamo podcast flagged as a potential unhobbler for decode throughput. Currently decode is capped at one token per step — MTP with speculative decoding is an architectural approach to breaking that ceiling without a separate draft model. Whether it eventually fully removes this constraint or just improves it by a useful constant is still being determined as the technique matures across more model architectures and training regimes.</div>
 
   <div class="resource-bar">📖 <a href="https://arxiv.org/abs/2404.19737" target="_blank">Better and Faster LLMs via Multi-token Prediction (Meta, 2024)</a><a href="https://arxiv.org/abs/2501.12948" target="_blank">DeepSeek-V3 paper — MTP implementation and results</a></div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('mla')">&#8592; MLA & Attention Variants</a><a class="pn-link pn-next" onclick="show('codesign')">Model-Hardware Co-design &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('ssm')">&#8592; Mamba & Hybrid Models</a><a class="pn-link pn-next" onclick="show('codesign')">Model-Hardware Co-design &#8594;</a></div>
 </div>
 
 <div id="sec-codesign" class="hidden">
@@ -1074,7 +1258,103 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   <div class="highlight">The key mental shift: "how many attention heads should this model have?" is no longer purely a research quality question. It is an infrastructure economics question, answered by analyzing serving cost at the target context length distribution, multiplied by the expected request volume. This is what makes modern AI infrastructure engineering genuinely different from classical systems work.</div>
 
   <div class="resource-bar">📖 <a href="https://arxiv.org/abs/2205.01068" target="_blank">Chinchilla scaling laws — the original co-design framework for training</a></div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('mtp')">&#8592; Multi-token Prediction</a><a class="pn-link pn-next" onclick="show('quiz-ch2')">Chapter 2 Quiz &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('mtp')">&#8592; Multi-token Prediction</a><a class="pn-link pn-next" onclick="show('distill')">Distillation &#8594;</a></div>
+</div>
+
+<div id="sec-distill" class="hidden">
+<div class="breadcrumb">Architecture Frontier &rsaquo; Distillation</div>
+<h2>Distillation <span class="new-badge">new</span></h2>
+  <p class="subtitle">Teacher-student training, synthetic-data fine-tunes, and how DeepSeek-R1's reasoning ended up running on Llama 3</p>
+
+  <div class="sec-h">Two distinct things both called "distillation"</div>
+  <p>The word covers two related but mechanically different procedures. Production papers and engine docs use the same word for both, which causes endless confusion:</p>
+  <table>
+    <tr><th></th><th>Logit distillation (classical, Hinton 2015)</th><th>Synthetic-data distillation (production, 2024-on)</th></tr>
+    <tr><td><strong>Signal from teacher</strong></td><td>Full probability distribution over the vocabulary at every position</td><td>Just the generated tokens (a corpus the teacher wrote)</td></tr>
+    <tr><td><strong>Loss</strong></td><td>KL divergence between student's and teacher's distributions</td><td>Standard next-token cross-entropy on the synthetic corpus</td></tr>
+    <tr><td><strong>Teacher access at training</strong></td><td>Live model, full forward pass for every batch</td><td>None — the teacher is consumed once to produce the dataset, then discarded</td></tr>
+    <tr><td><strong>What's preserved</strong></td><td>Detailed token-level confidence — student approximates teacher's probability shape</td><td>Surface-level behavior — student reproduces what the teacher said, not how it weighted alternatives</td></tr>
+    <tr><td><strong>Where you see it</strong></td><td>Smaller "distilled" variants of an open model (DistilBERT, MiniLM)</td><td>"Reasoning distill" releases (DeepSeek-R1-Distill-Llama-70B), capability transfer, refusal training</td></tr>
+  </table>
+
+  <div class="sec-h">DeepSeek-R1-Distill — the canonical recent example</div>
+  <p>DeepSeek-R1 is a 671B-parameter reasoning model. Most operators can't serve it. So the DeepSeek team did this:</p>
+  <ol>
+    <li>Used R1 to generate millions of step-by-step reasoning traces over math and code problems.</li>
+    <li>Filtered traces for correctness against ground-truth answers.</li>
+    <li>Supervised-fine-tuned a much smaller open base model (Llama 3 8B/70B, Qwen 2.5 1.5B/7B/14B/32B) on the filtered traces.</li>
+    <li>Released the resulting checkpoints as <strong>DeepSeek-R1-Distill-Llama-70B</strong>, <strong>DeepSeek-R1-Distill-Qwen-32B</strong>, etc.</li>
+  </ol>
+  <p>The distilled models inherit Llama-3-70B or Qwen-2.5-32B's <em>architecture</em> — same layer count, same hidden size, same attention pattern. Only the weights changed. Operationally that's the magic: <strong>the same vLLM/SGLang/TRT-LLM engine that serves Llama 3 70B serves DeepSeek-R1-Distill-Llama-70B with no changes</strong>. Architecture-defined kernels, KV cache layout, parallelism plan — all unchanged. The serving stack just sees a Llama 3 70B with different weights and reasoning-shaped behavior.</p>
+
+  <div class="sec-h">Why distill instead of train from scratch</div>
+  <ul>
+    <li><strong>Cost.</strong> A small SFT pass on 100K–10M synthetic examples is hours-to-days of compute, often two orders of magnitude cheaper than even a small pretraining run.</li>
+    <li><strong>Capability transfer is targeted.</strong> You can distill specifically reasoning, refusal, code generation, or domain expertise without touching anything else.</li>
+    <li><strong>Architectural compatibility.</strong> Distilled models keep the base architecture, so engine support is automatic.</li>
+    <li><strong>Safety / alignment lineage.</strong> Inherits the base's safety training; you only have to validate the new behavior, not the whole model.</li>
+  </ul>
+
+  <div class="sec-h">Distillation, fine-tuning, and RL — what's different</div>
+  <p>All three are post-training adjustments to a base model. The differences are about <em>what supervision signal</em> the model learns from:</p>
+  <table>
+    <tr><th>Method</th><th>Signal</th><th>Best for</th></tr>
+    <tr><td><strong>Supervised fine-tuning (SFT)</strong></td><td>Human-curated input-output pairs</td><td>Task adaptation, instruction following, format compliance</td></tr>
+    <tr><td><strong>Distillation (synthetic-data)</strong></td><td>Larger model's outputs (often filtered for quality)</td><td>Capability transfer, cheap reasoning models</td></tr>
+    <tr><td><strong>Distillation (logit)</strong></td><td>Teacher's full probability distribution</td><td>Compressing a model while preserving its calibration</td></tr>
+    <tr><td><strong>RLHF / RLAIF / DPO</strong></td><td>Preferences (A vs B), reward model, or rule-based rewards</td><td>Alignment with human/policy preferences, refining behaviors that don't have a clean ground truth</td></tr>
+  </table>
+  <p>In practice frontier model post-training is a sequence: pretrain → SFT (often partly distilled from a stronger model) → RL. Each stage uses a different supervision signal and serves a different purpose.</p>
+
+  <div class="sec-h">Inference implications</div>
+  <p>For the inference engineer, the operational view of a distilled model is simple:</p>
+  <ul>
+    <li><strong>It's the base architecture, period.</strong> Engine support, parallelism plan, quantization recipes, KV cache settings — all transfer from the base.</li>
+    <li><strong>Behavior changes — evals must be redone.</strong> Reasoning depth, refusal patterns, output length distribution can shift dramatically. Re-tune <code>max_tokens</code>, sampling parameters, output-length predictors.</li>
+    <li><strong>Output length tends to grow.</strong> Reasoning-distilled models emit thinking traces. Capacity planning that was right for the base is often wrong for the distill — KV cache footprint and decode time scale with output length.</li>
+    <li><strong>License inheritance.</strong> A distill of a Llama base inherits Llama's license. A distill of a closed teacher (often disallowed by the teacher's terms) is a legal hazard, not just a technical one.</li>
+  </ul>
+
+  <div class="resource-bar">📖 <a href="https://arxiv.org/abs/1503.02531" target="_blank">Distilling the Knowledge in a Neural Network — Hinton et al. (2015)</a><a href="https://arxiv.org/abs/2501.12948" target="_blank">DeepSeek-R1 paper — distillation methodology</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('codesign')">&#8592; Model-Hardware Co-design</a><a class="pn-link pn-next" onclick="show('lora')">Fine-tuning & LoRA &#8594;</a></div>
+</div>
+
+<div id="sec-lora" class="hidden">
+<div class="breadcrumb">Architecture Frontier &rsaquo; Fine-tuning & LoRA</div>
+<h2>Fine-tuning and LoRA <span class="new-badge">new</span></h2>
+  <p class="subtitle">Low-rank adapters, multi-tenant serving, and why your scheduler needs to know which adapter a request wants</p>
+
+  <div class="sec-h">Full fine-tuning vs LoRA</div>
+  <p><strong>Full fine-tuning</strong> updates every parameter of a base model on a new dataset. For a 70B model in BF16 that's ~140 GB of weights to read, write, and store the optimizer state for. Cost is comparable to a substantial fraction of pretraining, and you end up with a 140 GB checkpoint per fine-tune. For a multi-tenant SaaS where every customer wants a fine-tune, this is operationally unworkable.</p>
+  <p><strong>LoRA — Low-Rank Adaptation</strong> (Hu et al., 2021) freezes the base model's weights and trains only a small additive update <code>ΔW = α · A · B</code>, where <code>A</code> is a tall-skinny matrix (<code>d × r</code>) and <code>B</code> is short-fat (<code>r × k</code>). The rank <code>r</code> is typically 8–64. The trained adapter is roughly <code>0.1–1%</code> of the base model's parameter count: tens of MBs instead of hundreds of GBs. Training takes hours instead of weeks.</p>
+  <p>The forward pass becomes:</p>
+  <div class="highlight"><code>y = W · x + α · A · B · x</code></div>
+  <p>Mathematically equivalent to a single matrix multiply with <code>(W + α·A·B)</code>; you can either <em>merge</em> the adapter into <code>W</code> ahead of time (one matmul, no overhead, but you've baked in this specific adapter), or keep the LoRA branch separate (extra small matmuls per layer, but the base stays neutral and you can swap adapters per request).</p>
+
+  <div class="sec-h">Why LoRA works</div>
+  <p>The empirical observation behind LoRA: when fine-tuning a pretrained model, the change in weights <code>ΔW</code> tends to have low <em>intrinsic rank</em>. Most fine-tuning tasks just nudge the model along a low-dimensional subspace of behaviors it can already exhibit; you don't need to update every direction independently. A rank-16 adapter captures most of the useful change for typical task adaptation. For more disruptive behavior changes (a new language, a fundamentally different style), you bump the rank or move to full fine-tuning.</p>
+
+  <div class="sec-h">QLoRA — the 4-bit cousin</div>
+  <p>QLoRA (Dettmers et al., 2023) adds one operational twist: keep the base model in 4-bit quantized form (NF4) during training and inference, train the LoRA adapter in BF16 on top. This drops the GPU-memory cost of training a 70B fine-tune from "8×H100" to "single H100" — a step-change for accessibility. At inference, the merged or unmerged adapter sits on top of the quantized base; quality is essentially indistinguishable from training on the unquantized base. Most modern open-source fine-tuning toolchains (Unsloth, axolotl, PEFT) default to QLoRA.</p>
+
+  <div class="sec-h">Multi-LoRA serving — many tenants on one base model</div>
+  <p>This is the operational payoff. A single deployed 70B base model can serve dozens to hundreds of fine-tuned variants concurrently:</p>
+  <ul>
+    <li><strong>One base model</strong> in HBM (140 GB BF16, or 35 GB at INT4).</li>
+    <li><strong>N adapters</strong> at ~50–500 MB each, kept warm in HBM/host RAM.</li>
+    <li><strong>Per-request adapter selection</strong> — every request specifies which adapter it wants; the engine applies that adapter's LoRA branch during the forward pass.</li>
+  </ul>
+  <p>vLLM (with multi-LoRA enabled), SGLang, and TRT-LLM all support this. The cost of swapping adapters in/out of HBM is small relative to a model load — but not free. Cold adapters (only on object store) take ~100 ms to fault in over the network, which can break SLOs if it happens on the request's critical path.</p>
+
+  <div class="sec-h">LoRA-aware routing — connecting back to scheduling</div>
+  <p>If a tenant's adapter is <em>warm</em> on replica A and <em>cold</em> on replica B, sending a request to B costs you a 100 ms+ adapter fetch on the critical path. The scheduling chapter covers this as <strong>LoRA-aware routing</strong>: hash on adapter ID, prefer the replica with the adapter already loaded, spill to other replicas only when the preferred one is over a utilization threshold. Without it, multi-LoRA serving devolves into pathological adapter thrash where every request loads its adapter from scratch and per-tenant P99 explodes.</p>
+  <p>The tight coupling: a multi-tenant LoRA deployment is not just a model decision. It's a coordinated decision across the model (LoRA-trained adapters), the engine (multi-LoRA support), the scheduler (LoRA-aware routing), and the storage tier (where adapters live and how fast you can fetch them). Pick any one in isolation and the others will not save you.</p>
+
+  <div class="sec-h">Adapter merging — when to bake LoRA in</div>
+  <p>If you only ever serve <em>one</em> adapter, merge it into the base ahead of time. The forward pass then runs at full base-model speed with zero LoRA overhead — typical 1–3% throughput regression goes to zero. Multi-tenant serving can't merge (you'd lose the per-request adapter switching), so they pay the small unmerged-LoRA tax. The decision is: how many adapters per replica? If exactly one, merge. If many, keep them separate.</p>
+
+  <div class="resource-bar">📖 <a href="https://arxiv.org/abs/2106.09685" target="_blank">LoRA paper — Hu et al. 2021</a><a href="https://arxiv.org/abs/2305.14314" target="_blank">QLoRA paper — Dettmers et al. 2023</a><a href="https://docs.vllm.ai/en/latest/models/lora.html" target="_blank">vLLM multi-LoRA docs</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('distill')">&#8592; Distillation</a><a class="pn-link pn-next" onclick="show('quiz-ch2')">Chapter 2 Quiz &#8594;</a></div>
 </div>
 
 <div id="sec-quiz-ch2" class="hidden">
@@ -1096,7 +1376,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
       <div class="quiz-a">The auxiliary heads predict tokens N+2, N+3, N+4, but acceptance rate drops with distance — the model is less certain about N+4 than N+2. With ~70% acceptance on the first draft and declining on subsequent ones, the expected accepted tokens per step is ~1.8, not 4. This is the same acceptance-rate dynamic as external speculative decoding, just with better alignment because the draft heads were trained jointly.</div>
     </details>
   </div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('codesign')">&#8592; Model-Hardware Co-design</a><a class="pn-link pn-next" onclick="show('nvlink')">GPU Memory & Interconnects &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('lora')">&#8592; Fine-tuning & LoRA</a><a class="pn-link pn-next" onclick="show('nvlink')">GPU Memory & Interconnects &#8594;</a></div>
 </div>
 
 <div id="sec-nvlink" class="hidden">
@@ -1438,6 +1718,17 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <tr><td>TP + EP (MoE)</td><td>TP for attention layers; EP for FFN expert layers</td><td>Natural fit for MoE — each component uses the parallelism strategy suited to its structure.</td></tr>
   </table>
 
+  <div class="sec-h">Choosing parallelism by model architecture — the dense-vs-MoE topology rule</div>
+  <p>For a given model the parallelism plan is largely dictated by architecture. Two canonical recipes cover most production deployments:</p>
+  <table>
+    <tr><th>Architecture</th><th>Single-node fit?</th><th>Recommended topology</th><th>Notation</th><th>Reasoning</th></tr>
+    <tr><td><strong>Dense, fits in one node</strong> (Llama 3 70B FP8 on 8×H100)</td><td>Yes</td><td>TP across all 8 GPUs in the node, DP across nodes for throughput</td><td>TP8 × DP_N</td><td>NVLink handles per-layer all-reduce; latency-optimal.</td></tr>
+    <tr><td><strong>Dense, multi-node</strong> (Llama 3 405B FP16 on 16 GPUs)</td><td>No</td><td>TP within each node (NVLink) + PP across nodes (InfiniBand)</td><td>TP8 × PP2</td><td>Keep frequent all-reduces on NVLink; pay PP bubbles only at the inter-node boundary, not per layer.</td></tr>
+    <tr><td><strong>Sparse MoE</strong> (DeepSeek V3, Qwen3-235B-A22B)</td><td>Usually no</td><td>EP across many GPUs for the FFN/expert layers; TP for the dense attention layers</td><td>EP16 (or EP32+) with TP for attention</td><td>Each token activates only 2–8 experts, so EP communication volume is much lower than TP would be on the same parameters. Attention is dense and stays under TP.</td></tr>
+  </table>
+  <p>Key principle: <strong>match the parallelism strategy to the layer's structure</strong>. Dense layers (attention, dense FFN) want TP because every token touches every weight — splitting weights and synchronizing per layer is the natural fit. Sparse MoE FFN layers want EP because each token only touches a handful of experts, so it's cheaper to ship the token to the GPU holding its expert than to fragment the expert across GPUs. Modern MoE engines (vLLM, SGLang, TRT-LLM, Dynamo) implement <strong>mixed TP+EP</strong> automatically — the same forward pass uses TP collectives in attention layers and EP all-to-all in expert layers, with no manual splitting required.</p>
+  <p>Memory floor in any topology: <code>min_GPUs ≈ ceil(precision_bytes × params / (HBM_per_GPU − KV_headroom))</code>, where you reserve at least 50% of HBM for KV cache and activations. That's the lower bound; latency SLAs and batch-size targets usually push the actual count higher.</p>
+
   <div class="resource-bar">📖 <a href="https://arxiv.org/abs/1909.08053" target="_blank">Megatron-LM — tensor + pipeline parallelism</a><a href="https://arxiv.org/abs/2310.01889" target="_blank">Ring Attention paper</a><a href="https://huggingface.co/docs/transformers/en/perf_train_gpu_many" target="_blank">HuggingFace parallelism guide</a></div>
 <div class="prev-next"><a class="pn-link pn-prev" onclick="show('nvlink')">&#8592; GPU Memory & Interconnects</a><a class="pn-link pn-next" onclick="show('quiz-ch3')">Chapter 3 Quiz &#8594;</a></div>
 </div>
@@ -1486,6 +1777,15 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   <p><strong>Prefill</strong> processes the entire input prompt in one shot. All tokens are available upfront, so they can all be processed in parallel in a single forward pass. Prefill is fast per token but uses the GPU heavily for a burst of time.</p>
   <p><strong>Decode</strong> generates output one token at a time. You cannot generate token N+1 until you know token N. Each decode step processes just one new token (plus the full KV cache of all previous tokens). Decode is inherently sequential, slow per token, and memory-bandwidth-bound — you're mostly loading weights, not doing arithmetic.</p>
   <p>Different requests take wildly different amounts of time. A classification request might need 5 output tokens. A detailed explanation might need 800. With a fixed batch, everyone in the batch must wait for the slowest request to finish before the GPU can do anything else.</p>
+
+  <div class="sec-h">The three batching modes</div>
+  <table>
+    <tr><th>Mode</th><th>Batch composition</th><th>How slots are freed</th><th>Where you see it</th></tr>
+    <tr><td><strong>Static batching</strong></td><td>Fixed at batch start; the same N sequences run together until every one of them finishes.</td><td>All slots free at once when the slowest sequence completes.</td><td>Classical CV/NLP serving (Triton, ONNX Runtime), embedding inference. Pre-Orca LLM serving.</td></tr>
+    <tr><td><strong>Dynamic batching</strong></td><td>Server waits a small window (e.g., 10 ms) to accumulate arriving requests, then forms a static batch.</td><td>Same as static — all-or-nothing at the end of the batch.</td><td>Triton dynamic-batching mode, embedding/reranker services where requests are uniform-cost.</td></tr>
+    <tr><td><strong>Continuous (in-flight) batching</strong></td><td>The batch is reformed at every decode step (~5–50 ms). Finished sequences leave; queued requests join.</td><td>Per-sequence, immediately on EOS — slot refilled the same step.</td><td>vLLM, SGLang, TRT-LLM, NVIDIA Dynamo — the LLM serving default.</td></tr>
+  </table>
+  <p>Static and dynamic both batch at <em>request</em> granularity: pick which requests run together, then commit until they finish. Continuous batches at <em>token</em> granularity: every decode step is a fresh batching decision. That shift — from request-granularity to token-granularity scheduling — is why LLM throughput improved so dramatically in 2023. The rest of this section is the deep dive on why request-granularity batching is so wasteful for LLM workloads.</p>
 
   <div class="sec-h">Naive batching — the broken approach</div>
   <p>Collect N requests, process them all together as a batch, wait until every request has generated its final token, release the whole batch, collect the next N. Simple to implement. Terrible for GPU utilization.</p>
@@ -1664,8 +1964,29 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <p><strong>SGLang:</strong> Uses a radix tree (RadixAttention) with token-level granularity at the tree node level, storing segments of arbitrary length as nodes. This matches at finer granularity than vLLM's 16-token blocks — better for workloads with variable-length shared prefixes (few-shot examples that differ in length). Both systems default to LRU eviction for cache management.</p>
   </div>
 
-  <div class="resource-bar">📖 <a href="https://arxiv.org/abs/2309.06180" target="_blank">PagedAttention / vLLM paper</a><a href="https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching" target="_blank">Anthropic prompt caching docs</a></div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('batching')">&#8592; Continuous Batching</a><a class="pn-link pn-next" onclick="show('chunked')">Chunked Prefill &#8594;</a></div>
+  <div class="sec-h">Where KV cache lives — the 4-tier storage hierarchy</div>
+  <p>Everything above assumes KV cache lives in GPU HBM. In production at scale, KV cache spills across a four-tier hierarchy that trades bandwidth for capacity. Naming the tiers makes serving discussions much sharper:</p>
+  <table>
+    <tr><th>Tier</th><th>Where</th><th>Bandwidth</th><th>Capacity per node</th><th>What lives here</th></tr>
+    <tr><td><strong>G1</strong></td><td>GPU HBM</td><td>1–8 TB/s</td><td>10s–100s of GB</td><td>Active sequences, hot prefixes</td></tr>
+    <tr><td><strong>G2</strong></td><td>Host CPU RAM</td><td>10s–100s of GB/s (PCIe / NVLink-C2C)</td><td>100s of GB to multi-TB</td><td>Idle conversations, evicted hot caches, swap targets</td></tr>
+    <tr><td><strong>G3</strong></td><td>Local NVMe SSD</td><td>5–10 GB/s</td><td>TBs</td><td>Per-node cold cache, large RAG document KVs</td></tr>
+    <tr><td><strong>G4</strong></td><td>Networked SSD / object store</td><td>~GB/s</td><td>10s of TB</td><td>Cluster-wide shared KV — any GPU can resume any session</td></tr>
+  </table>
+  <p>Each tier is roughly an order of magnitude slower and larger than the one above. Engines decide where to demote a KV block based on access frequency, conversation idle time, and remaining HBM budget. Restoration cost on cache miss is the dominant tradeoff: a G1 hit is free, a G2 fetch costs PCIe latency, G3 costs SSD I/O, and G4 costs network I/O — but at G4 capacities you can keep KV alive for hours of conversation history without evicting all the way to "re-prefill from text."</p>
+
+  <div class="sec-h">Beyond strict prefix matching — LMCache and CacheBlend</div>
+  <p>vLLM's hash cache and SGLang's radix tree both require an <em>exact prefix match</em> to reuse KV. Real RAG and chat workloads frequently have non-prefix overlap: the same document chunk appears at different positions in different prompts. Two recent systems extend reuse beyond strict prefix:</p>
+  <ul>
+    <li><strong>LMCache</strong> — a multi-tier KV store (G2/G3/G4) that detaches KV cache from a specific engine instance. Caches survive restarts, can be shared across vLLM/SGLang replicas, and ship across the cluster on demand. Effectively makes KV cache portable.</li>
+    <li><strong>CacheBlend</strong> — reuses KV vectors for repeated content even when it appears at <em>different positional offsets</em>, by selectively recomputing only the small set of tokens whose attention statistics actually change. Trades a small recompute cost for much higher cache hit rate on RAG workloads where the same passages appear in different prompt positions.</li>
+  </ul>
+
+  <div class="sec-h">The KV cache as a managed resource — Dynamo KVBM and the "global KV cache"</div>
+  <p>NVIDIA Dynamo's <strong>KV Block Manager (KVBM)</strong> is the productized form of this hierarchy: a single manager owns G1/G2/G3/G4 placement across a cluster, exposes "global KV cache" semantics (any worker can resume any session), and pipelines block transfers with NIXL-based RDMA. The conceptual shift is treating KV cache as a first-class <em>storage tier</em> — like an object store for token state — rather than ephemeral per-replica memory. This is the architectural endpoint of the trajectory that started with PagedAttention: from "no caching" → "per-request KV" → "per-replica prefix cache" → "cluster-wide global KV cache" with explicit storage management.</p>
+
+  <div class="resource-bar">📖 <a href="https://arxiv.org/abs/2309.06180" target="_blank">PagedAttention / vLLM paper</a><a href="https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching" target="_blank">Anthropic prompt caching docs</a><a href="https://github.com/LMCache/LMCache" target="_blank">LMCache</a><a href="https://arxiv.org/abs/2405.16444" target="_blank">CacheBlend paper</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('batching')">&#8592; Continuous Batching</a><a class="pn-link pn-next" onclick="show('prefixcache')">Prefix Caching &#8594;</a></div>
 </div>
 
 <div id="sec-chunked" class="hidden">
@@ -1752,7 +2073,61 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   </ul>
 
   <div class="resource-bar">📖 <a href="https://arxiv.org/abs/2401.08671" target="_blank">Sarathi-Serve — the canonical chunked prefill paper</a></div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('kvcache')">&#8592; KV Cache & PagedAttention</a><a class="pn-link pn-next" onclick="show('flashattn')">FlashAttention &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('prefixcache')">&#8592; Prefix Caching</a><a class="pn-link pn-next" onclick="show('flashattn')">FlashAttention &#8594;</a></div>
+</div>
+
+<div id="sec-prefixcache" class="hidden">
+<div class="breadcrumb">Optimization &rsaquo; Prefix Caching</div>
+<h2>Prefix caching <span class="new-badge">new</span></h2>
+  <p class="subtitle">Skip the prefill you've already done — reuse the KV cache across any request that shares a leading token sequence.</p>
+
+  <div class="sec-h">Why prefill is the work you most want to skip</div>
+  <p>Prefill is dominated by self-attention, which is O(N²) in sequence length. A 10,000-token system prompt that is identical across every request to your service is, in the naive setup, 100 million attention ops the GPU recomputes from scratch on every request. Decode is cheap by comparison — one new K/V per step. So the highest-leverage cache in any LLM serving stack is not "the answer cache." It is <strong>the KV cache of the prompt prefix</strong>: if request 2 starts with the same tokens as request 1, you should not be running attention over those tokens again.</p>
+  <p>This is what prefix caching does. It indexes the KV blocks produced during prefill and, when a new request arrives, walks its tokens against the index to find the longest matching prefix. Whatever it finds, the engine skips — only the suffix tokens need attention computed against the cached K and V. The savings are entirely on TTFT and prefill throughput; decode cost is unchanged.</p>
+  <div class="info">The win is enormous on three real workloads: long shared system prompts (think "the 4,000-token policy preamble every request inherits"), multi-turn chat (each turn extends a stable prefix), and agent loops where tool outputs append to a growing scratchpad. In all three the cached prefix can be 80%+ of the prompt, and TTFT drops accordingly.</div>
+
+  <div class="sec-h">Two implementations: hash-chained blocks vs radix tree</div>
+  <p><strong>vLLM and TensorRT-LLM use a hash-chained block cache.</strong> The KV cache is already paged into fixed-size blocks (vLLM default 16 tokens, TRT-LLM default 128). Each block gets an identity <code>hash(parent_hash, block_tokens, extras)</code>, where <em>extras</em> include the LoRA ID, multimodal hash, and an optional per-tenant <code>cache_salt</code>. A child block's hash chains its parent's, so prefix matching is just a chain of O(1) hash lookups — fast and simple. The catch: only <strong>full blocks</strong> are reusable. A request whose prompt is 1,025 tokens long with a 16-token block size shares 64 blocks; the trailing 1 token is wasted because partial blocks don't get a stable hash.</p>
+  <p><strong>SGLang uses RadixAttention.</strong> All active KV cache entries live in a radix tree whose edges are token spans and whose leaves point to paged KV. Insert, match, and evict are tree operations. The win shows up when generations <em>branch</em>: parallel sampling, beam search, tree-of-thought, agent fan-out — every divergence is automatically a tree split, and every convergent ancestor is shared in GPU memory exactly once. A flat hash table either misses these or duplicates them.</p>
+  <table>
+    <tr><th>Property</th><th>Hash-chained (vLLM, TRT-LLM)</th><th>Radix tree (SGLang)</th></tr>
+    <tr><td>Lookup</td><td>O(1) per block</td><td>O(prefix length)</td></tr>
+    <tr><td>Granularity</td><td>Block-aligned only</td><td>Token-level</td></tr>
+    <tr><td>Branching workloads</td><td>Treats branches as independent prompts</td><td>Native subtree sharing</td></tr>
+    <tr><td>Bookkeeping cost</td><td>Hash table + free queue</td><td>Tree maintenance + pointer chasing</td></tr>
+    <tr><td>Best for</td><td>High-QPS chat with stable system prompts</td><td>Agent / RAG / ToT / structured-output traffic</td></tr>
+  </table>
+
+  <div class="sec-h">Eviction: refcount plus LRU, sharing one paged pool</div>
+  <p>Both families combine <strong>reference counting</strong> with <strong>LRU</strong>. A block in use by an active request cannot be evicted, full stop. Among free blocks, the least-recently-used goes first. vLLM keeps a doubly-linked free queue and evicts from the head; when a request finishes, its blocks are queued in reverse order so the deepest (most-reusable) prefix blocks survive longest. SGLang recursively evicts leaf nodes of the radix tree under the same LRU rule.</p>
+  <p>Operationally the prefix cache and the live decode KV pool <strong>share the same paged memory</strong>. There is no separate "cache RAM." A hot prefix cache shrinks the maximum batch you can decode concurrently — the throughput-vs-TTFT knob the operator turns is "how aggressively are we willing to keep cold prefixes around at the cost of fewer concurrent decodes."</p>
+
+  <div class="sec-h">What drives hit rate — and what destroys it</div>
+  <p>Hit rate climbs with workload structure: a long stable system prompt across all tenants, multi-turn chats where each user keeps extending the same prefix, few-shot templates, agent loops with a stable scratchpad, RAG when the same retrieved context is reused across follow-ups. It collapses when prompts are unique per request, or when the system prompt is regenerated per call, or when traffic is sharded such that consecutive requests for the same prefix land on different replicas.</p>
+  <p>That last one — sharding — is why <strong>cache-aware routing</strong> matters as much as the cache itself. A round-robin load balancer trashes the hit rate by design: it sends each request to whichever replica is "next" rather than to the one that already holds its prefix. Cache-aware routers (SGLang's scheduler, vLLM's Production Stack, NVIDIA Dynamo's Smart Router, AIBrix) hash the prompt prefix and consistent-hash replicas. Same prefix, same replica, near-zero TTFT. Random routing, and you might as well have no prefix cache.</p>
+
+  <div class="sec-h">Failure modes</div>
+  <ul>
+    <li><strong>Exact-prefix only.</strong> A single different token at position 0 invalidates the whole chain. Whitespace differences, BOS handling, chat-template version drift, and tokenizer changes all silently kill reuse.</li>
+    <li><strong>Tokenizer determinism.</strong> Two replicas running slightly different tokenizer versions (or NFC vs NFKC normalization) will produce different IDs and zero hits across them.</li>
+    <li><strong>LoRA and multimodal.</strong> The hash must include the LoRA ID and image hash or two completely different requests collide on the same block.</li>
+    <li><strong>Timing window.</strong> TRT-LLM only reuses a block "if the second request launches after the first request completed." Bursty traffic with all-new prefixes evicts before reuse can land.</li>
+    <li><strong>Cross-tenant collisions.</strong> Hash-based caches can in principle collide. Use sha256 and a per-tenant <code>cache_salt</code> so only requests with the same salt can reuse cached KV.</li>
+  </ul>
+
+  <div class="sec-h">Numbers worth remembering</div>
+  <ul>
+    <li>SGLang's RadixAttention paper reports <strong>up to 6.4× higher throughput</strong> across nine workloads vs prior SOTA, and the LMSYS launch blog cites <strong>up to 5×</strong> vs vLLM and Guidance on agent / ToT / JSON / RAG traffic.</li>
+    <li>In agent loops, public benchmarks routinely show <strong>60–90% TTFT reduction on the shared-prefix portion</strong> of the prompt.</li>
+    <li>Block size is the granularity floor for partial-prompt reuse: 16 tokens (vLLM) is finer-grained than 128 (TRT-LLM default) but means more bookkeeping per cached prompt.</li>
+  </ul>
+
+  <div class="resource-bar">
+    📖 <a href="https://docs.vllm.ai/en/latest/design/prefix_caching.html" target="_blank">vLLM prefix caching design doc</a>
+    <a href="https://lmsys.org/blog/2024-01-17-sglang/" target="_blank">SGLang RadixAttention announcement</a>
+    <a href="https://nvidia.github.io/TensorRT-LLM/advanced/kv-cache-reuse.html" target="_blank">TensorRT-LLM KV cache reuse</a>
+  </div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('kvcache')">&#8592; KV Cache & PagedAttention</a><a class="pn-link pn-next" onclick="show('chunked')">Chunked Prefill &#8594;</a></div>
 </div>
 
 <div id="sec-flashattn" class="hidden">
@@ -1843,6 +2218,31 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   <p><strong>Weight-only quantization (AWQ, GPTQ, GGUF):</strong> Only the stored weights are low-precision. Before the actual matrix multiplication — called a <strong>GEMM</strong> (General Matrix Multiply, pronounced "gem" — the single most important operation in neural network inference; every attention projection and every FFN layer is a GEMM) — weights are dequantized back to FP16. The arithmetic happens at FP16 precision. You save on memory and on HBM bandwidth (loading 4× less data per decode step), but you get no compute speedup — the GEMM itself runs at FP16.</p>
   <p><strong>Weight + activation quantization (FP8, INT8/SmoothQuant):</strong> Both weights AND the intermediate activation values flowing between layers are quantized. The matrix multiplication itself runs at low precision end-to-end. You get memory savings AND compute speedup — FP8 GEMMs are natively ~2× faster than FP16 GEMMs on H100's Tensor Cores. The challenge: activation distributions have outliers that destroy naive quantization quality (see Number Formats section for why).</p>
 
+  <div class="sec-h">Granularity — where the scale factor lives</div>
+  <p>A quantized tensor is stored as low-precision values plus a higher-precision <strong>scale factor</strong> that maps them back to real numbers (e.g., <code>real = int_value × scale</code>). The granularity question is: how many values share one scale?</p>
+  <table>
+    <tr><th>Granularity</th><th>How many values per scale</th><th>Cost</th><th>Quality</th><th>Where used</th></tr>
+    <tr><td><strong>Per-tensor</strong></td><td>One scale for the whole weight matrix (millions of values)</td><td>Cheapest — one extra number per tensor</td><td>Worst — a single outlier forces the scale to stretch and crushes everything else</td><td>Naive INT8, early FP16→INT8 attempts</td></tr>
+    <tr><td><strong>Per-channel</strong></td><td>One scale per output channel (one per row or column)</td><td>Small — a vector of scales per tensor</td><td>Much better — outliers in one channel don't pollute others. Standard for INT8 weights.</td><td>SmoothQuant, classical INT8 weight quant</td></tr>
+    <tr><td><strong>Per-block (microscaling)</strong></td><td>One scale per fixed block of values (e.g., every 32 elements)</td><td>~3% storage overhead</td><td>Best — outliers are isolated to a single block; quality approaches FP16</td><td>MXFP8/MXFP4, NVFP4, GGUF "K-quants"</td></tr>
+  </table>
+  <p>Finer granularity = better quality but more scale-factor overhead. The industry trajectory is steadily down: per-tensor → per-channel → per-block, and block sizes have dropped from 128 to 32 to 16. Two block formats matter for current hardware:</p>
+  <ul>
+    <li><strong>MXFP8 / MXFP4</strong> (Open Compute "Microscaling" standard) — block of 32 elements, one shared FP8 scale. Native on Blackwell. MXFP4 doubles compute throughput vs FP8 and roughly halves weight memory.</li>
+    <li><strong>NVFP4</strong> (NVIDIA, Blackwell) — block of 16 elements with a per-block FP8 scale, plus a global FP32 scale per tensor. The smaller block size and two-level scaling preserve quality on attention layers where MXFP4 alone struggles.</li>
+  </ul>
+
+  <div class="sec-h">QAT vs PTQ — and the new wave of quantization-native models</div>
+  <p>All the methods above (AWQ, GPTQ, SmoothQuant, FP8 PTQ) are <strong>post-training quantization (PTQ)</strong> — start from an FP16 checkpoint, calibrate on a small dataset, ship the quantized weights. Cheap, fast, no retraining. Quality loss is small but nonzero.</p>
+  <p><strong>Quantization-aware training (QAT)</strong> bakes the quantization noise into training itself: the forward pass simulates low-precision arithmetic, gradients still flow at FP32, and the model learns weights that are <em>robust</em> to the quantization grid. Far more expensive (full training run), but the resulting model has effectively no quality gap vs the FP16 reference.</p>
+  <p>Frontier models are increasingly shipped with quantization built in:</p>
+  <ul>
+    <li><strong>OpenAI GPT-OSS</strong> — released natively in MXFP4. The published weights are the quantized weights; there is no FP16 reference checkpoint to fall back to.</li>
+    <li><strong>Kimi K2 Thinking</strong> (Moonshot) — INT4 with QAT.</li>
+    <li><strong>DeepSeek V3 / R1</strong> — trained with FP8 mixed precision end-to-end; the FP8 weights <em>are</em> the model.</li>
+  </ul>
+  <p>Operationally this changes a serving question from "how aggressively can I quantize this model?" to "what's the lowest-precision format the model already supports natively?" — your engine and hardware just need to match.</p>
+
   <div class="sec-h">GPTQ — layer-wise weight quantization with Hessian correction</div>
   <p>GPTQ quantizes weights to INT4 or INT3 one layer at a time. For each layer, it solves a least-squares optimization: find the quantized weights that minimize the change in that layer's output on a <strong>calibration dataset</strong> (a small, representative sample of real data — typically 128-512 text passages — that the quantization algorithm runs through the model to observe how each weight affects outputs; the model is not being trained on this data, just measured). GPTQ uses second-order gradient information (the <strong>Hessian matrix</strong> — a mathematical structure that captures how sensitive the model's output is to changes in each individual weight; weights with large Hessian values are "important" and should be quantized more carefully, while weights with small values can be rounded aggressively with minimal quality loss) to identify which weights are most sensitive and compensate them first. This produces better quality than naively rounding to the nearest integer, especially at aggressive bit-widths like INT3.</p>
   <p>Requirements: a calibration dataset (typically a few hundred samples from the training distribution), an offline quantization process that takes hours for large models, and a specialized fast GEMM kernel (like Marlin) to actually realize the inference speedup.</p>
@@ -1870,6 +2270,26 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <tr><td>GGUF</td><td>Q2_K–Q8_0 mixed</td><td>Weights only</td><td>CPU SIMD-optimized</td><td>Varies; Q4_K_M is sweet spot</td><td>Local CPU inference (laptops, edge devices)</td></tr>
     <tr><td>BnB NF4</td><td>INT4 (NF4 format)</td><td>Weights only</td><td>Memory only</td><td>Good for distribution-aware use cases</td><td>QLoRA fine-tuning; not optimized for fast inference</td></tr>
   </table>
+  <div class="sec-h">The sensitivity ladder — what to quantize aggressively, what to keep precise</div>
+  <p>Not all parts of a model tolerate quantization equally. The empirical sensitivity ladder, from <em>easiest to quantize</em> down to <em>most fragile</em>:</p>
+  <table>
+    <tr><th>Component</th><th>Aggressive precision tolerated</th><th>Why</th></tr>
+    <tr><td><strong>Weights</strong> (FFN, MLP)</td><td>INT4 / MXFP4 with negligible quality loss</td><td>Distributions are smooth and well-behaved; AWQ/GPTQ exploit per-channel structure.</td></tr>
+    <tr><td><strong>Activations</strong></td><td>FP8 generally fine; INT8 needs SmoothQuant; INT4 rarely viable</td><td>Outlier channels create extreme dynamic range. FP8's exponent absorbs them; integer formats need rescaling tricks.</td></tr>
+    <tr><td><strong>KV cache</strong></td><td>FP8 or INT8 widely deployed; INT4 emerging</td><td>Quantizing the cache halves its memory footprint, doubling effective batch size or context length. Sensitive in long contexts because errors compound across decode steps.</td></tr>
+    <tr><td><strong>Attention internals</strong> (softmax, scores)</td><td>Keep FP16/BF16</td><td>Softmax is exquisitely sensitive to small score differences — small quantization noise cascades into wrong token choices. Universally exempted from low-precision arithmetic.</td></tr>
+  </table>
+  <p>Consequence: a "FP8 model" in production usually means FP8 weights, FP8 activations, FP8 (or higher) KV cache, and BF16 attention math. NVIDIA's TensorRT Model Optimizer and similar tools automate the layer-by-layer sensitivity analysis to decide the per-tensor precision automatically.</p>
+
+  <div class="sec-h">Tooling — where production quantization is converging</div>
+  <ul>
+    <li><strong>NVIDIA TensorRT Model Optimizer (ModelOpt)</strong> — unified toolkit for PTQ, QAT, sparsity, and pruning, output targets TRT-LLM and vLLM. Handles MXFP4/NVFP4 calibration on Blackwell.</li>
+    <li><strong>Neural Magic <code>llm-compressor</code></strong> — vLLM-native quantization pipeline (FP8, INT8, INT4 with GPTQ/AWQ).</li>
+    <li><strong>AutoAWQ / AutoGPTQ</strong> — open-source reference implementations of AWQ and GPTQ; output formats consumed directly by vLLM/SGLang.</li>
+    <li><strong>Unsloth dynamic quantization</strong> — heterogeneous bit-widths within one model (e.g., 1.58-bit for some layers, 4-bit for others), tuned per-layer for quality. Popular for fitting frontier models on consumer hardware.</li>
+    <li><strong>llama.cpp / GGUF</strong> — CPU and edge inference with mixed-precision K-quants.</li>
+  </ul>
+
   <div class="deep-dive">
     <div class="deep-dive-label">Deep Dive — Calibration data sensitivity for AWQ/GPTQ</div>
     <p><strong>How sensitive?</strong> Moderately. The calibration set shapes the quantization error distribution — a mismatch between calibration and serving distribution causes higher perplexity on out-of-distribution inputs. If calibrated on English (WikiText-2, C4) but serving multilingual traffic, quality degrades <strong>2-5 perplexity points</strong> on low-resource languages, with morphologically complex languages (Arabic, Korean, Finnish) most affected. Fix: mix ~10-20% of target-language samples into calibration data to substantially recover quality without hurting English.</p>
@@ -1957,6 +2377,23 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <li><strong>Same model, fewer layers (Medusa, hydra heads):</strong> Use the first N layers of the verifier as the draft, or add extra prediction heads to the main model. Guaranteed distribution alignment — higher acceptance rates because draft and verifier share weights.</li>
     <li><strong>MTP heads (built-in draft):</strong> If the model was trained with multi-token prediction, the auxiliary heads are already built-in draft heads with no memory overhead. See MTP section.</li>
     <li><strong>n-gram lookup:</strong> An <strong>n-gram</strong> is a sequence of n consecutive tokens (bigram = 2, trigram = 3, etc.). For text with lots of repetition (RAG documents, code with repeated patterns), simple n-gram matching against the already-generated context can propose tokens with zero model overhead and surprisingly high acceptance rates for specific domains.</li>
+  </ul>
+
+  <div class="sec-h">Algorithm taxonomy — five named approaches</div>
+  <p>The "draft + verify" idea has crystallized into five distinct algorithms, each making a different choice about <em>where the draft tokens come from</em>:</p>
+  <table>
+    <tr><th>Algorithm</th><th>Draft source</th><th>Extra params / memory</th><th>Acceptance rate</th><th>Best for</th></tr>
+    <tr><td><strong>Draft-Target</strong> (classical)</td><td>A separately trained smaller model from the same family (e.g., Llama 3 8B drafting for Llama 3 70B). Rule of thumb: draft ~10× smaller than target.</td><td>Full second model in memory</td><td>60–80%</td><td>Strong, predictable workloads with abundant GPU memory</td></tr>
+    <tr><td><strong>Medusa</strong></td><td>N extra decoder heads grafted onto the target model. Each head predicts one future token in parallel; no separate model.</td><td>~1–5% extra params (the heads)</td><td>50–70%</td><td>When you cannot fit a second model, but can fine-tune the target</td></tr>
+    <tr><td><strong>EAGLE</strong> / EAGLE-2 / EAGLE-3</td><td>A small purpose-built draft module conditioned on the target's <em>hidden states</em> (not its tokens). Drafts up to ~8 tokens per step in a tree.</td><td>Small auxiliary network (~0.3B for a 70B target)</td><td>70–90% — currently the strongest in production</td><td>Default high-performance choice in vLLM, SGLang, TRT-LLM</td></tr>
+    <tr><td><strong>N-gram speculation</strong></td><td>A simple dictionary built from the prefill tokens themselves: when the model emits a sequence, look up what tokens followed it last time and propose them.</td><td>Zero — no model</td><td>Highly variable: very high on code/RAG, low on novel prose</td><td>Code completion, document Q&A, repetitive structured output</td></tr>
+    <tr><td><strong>Lookahead Decoding</strong></td><td>Generates n-grams on the fly during decode using a Jacobi-iteration scheme; refines guesses each step. No external draft model or training.</td><td>Zero — no model, no training</td><td>30–60%</td><td>Drop-in speedup when you can't train or ship a second model</td></tr>
+  </table>
+  <p>Two trends are visible in the table. First, <strong>EAGLE has displaced classical draft-target</strong> as the production default because it gets higher acceptance with a fraction of the memory cost — its hidden-state conditioning makes the draft genuinely close to the target's distribution. Second, <strong>training-free methods (n-gram, Lookahead)</strong> are popular operationally because they require no model surgery, no fine-tuning, and no calibration — useful when you're serving a vendor model you cannot retrain.</p>
+  <p>Two cross-cutting controls apply to all of these:</p>
+  <ul>
+    <li><strong>Draft length</strong> — proposing more tokens per step amplifies wins on high-acceptance workloads but wastes work when acceptance is low. EAGLE caps at ~8 tokens; classical draft-target typically uses 4–6.</li>
+    <li><strong>Temperature interaction</strong> — higher sampling temperature spreads the verifier's distribution and lowers acceptance. Speculative decoding gives the strongest gains at temperature 0–0.7 and is often disabled at high batch size (where decode is no longer memory-bound and the spare arithmetic capacity has evaporated).</li>
   </ul>
 
   <div class="sec-h">Quality guarantee — the most important property</div>
@@ -2116,6 +2553,34 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <tr><td>TRT-LLM</td><td>Capacity-based with static scheduling</td><td>Compiled engines know exact memory requirements — more precise admission</td></tr>
     <tr><td>Dynamo</td><td>Two-level (global planner + local engine)</td><td>KV-cache-aware routing; assigns to prefill or decode workers</td></tr>
   </table>
+
+  <div class="sec-h">Queue disciplines underneath the priority tiers</div>
+  <p>WFQ (above) decides which <em>class</em> a request belongs to. Within a class, you still need a queue discipline. Two primitives cover most production deployments:</p>
+  <ul>
+    <li><strong>FIFO</strong> — first in, first out per class. Default in vLLM. Simple, fair, head-of-line blocking is the failure mode: a 50K-token prompt at the head of the queue stalls everything behind it for seconds.</li>
+    <li><strong>Priority queue</strong> — sorted by a per-request key (predicted output length for SJF, deadline for EDF, business priority for WFQ tie-breaks). Adds aging to prevent starvation.</li>
+  </ul>
+  <p>Production systems usually run a stack: WFQ across classes → priority queue within each class → token-budget admission gate before entering the engine batch. The earlier sections of this chapter explain each layer.</p>
+
+  <div class="sec-h">Routing — KV-aware <em>and</em> LoRA-aware</div>
+  <p>Beyond scheduling within a single replica, the cluster-level routing decision can be cache-aware in two distinct ways. Both are forms of session affinity dressed up as load balancing:</p>
+  <table>
+    <tr><th>Routing flavor</th><th>What's "sticky"</th><th>Hash key</th><th>Failure mode if naive</th></tr>
+    <tr><td><strong>KV-cache-aware routing</strong></td><td>Which replica has the prefix's KV cache warm in HBM</td><td>Hash of the request prefix tokens (or radix-tree match score)</td><td>Hot prefixes saturate one replica while others sit idle</td></tr>
+    <tr><td><strong>LoRA-aware routing</strong></td><td>Which replica has the requested adapter weights loaded</td><td>Adapter ID (e.g., <code>tenant-42-customer-support-v3</code>)</td><td>Many tenants → adapter thrash: every request loads weights from CPU/SSD, killing throughput</td></tr>
+  </table>
+  <p>Both routings need the same overflow/spill mechanism — pin to the cache-warm replica until utilization crosses a threshold, then fan out. Production routers (SGLang's <code>sgl-router</code>, NVIDIA Dynamo, vLLM's production stack) implement both as a single decision: pick the replica that maximizes the joint cache-hit score across prefix and adapter. Multi-tenant LoRA serving is meaningless without LoRA-aware routing — tenants would see hour-long P99s as their adapter gets swapped in and out.</p>
+
+  <div class="sec-h">Cold starts — why admission control has to know about replica state</div>
+  <p>Admission control isn't only about "is the engine full?" — it's also "is the replica even <em>ready</em>?" When autoscaling spins up a new replica, the time from "scheduler decided to add capacity" to "replica accepts requests" breaks down into four stages:</p>
+  <table>
+    <tr><th>Stage</th><th>Typical duration</th><th>Mitigation</th></tr>
+    <tr><td><strong>1. GPU procurement</strong> (cloud-provider provisioning, scheduler placement)</td><td>10s of seconds to several minutes</td><td>Reserved capacity, warm pools, multi-cloud bin packing</td></tr>
+    <tr><td><strong>2. Container image pull</strong> (CUDA/cuDNN/engine binaries)</td><td>10s of seconds (image can be 10+ GB)</td><td>Smaller images; in-region registry mirrors; pre-baked AMIs</td></tr>
+    <tr><td><strong>3. Model weight load</strong> (HBM hydration from object store)</td><td>10s of seconds for 70B+; minutes for 405B</td><td>In-datacenter weight cache; tensor streaming via mmap'd safetensors; high-bandwidth object store (S3 Express, Mountpoint)</td></tr>
+    <tr><td><strong>4. Engine startup / compile</strong> (CUDA graph capture, kernel autotune, first prefill)</td><td>Seconds to minutes (TRT-LLM compile is slowest)</td><td>Cached compiled engines; PyTorch <code>torch.compile</code> artifact reuse; warmup batch on a representative prompt</td></tr>
+  </table>
+  <p>Aggregate cold start is therefore commonly 1–5 minutes. Two consequences for admission control: (1) the autoscaler must trigger <em>before</em> queue depth crosses SLO so a new replica is ready by the time it's needed; (2) during scale-up, new replicas should be drained from the routing pool until they pass a synthetic warmup probe — otherwise their first user-facing request pays compile latency and trips the SLO. Production-grade serving stacks treat replica state as a routing dimension on par with cache locality.</p>
 <div class="prev-next"><a class="pn-link pn-prev" onclick="show('reqlen')">&#8592; Request Length Strategies</a><a class="pn-link pn-next" onclick="show('outputpred')">Output Length Prediction &#8594;</a></div>
 </div>
 
@@ -2271,6 +2736,18 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   <div class="sec-h">Connection to prompt caching</div>
   <p>Anthropic's prompt caching feature is a specific slice of this — it caches KV vectors for stable, static prefixes (system prompts, long context documents) across requests. Multi-turn conversation caching is the natural dynamic extension: instead of caching a static prefix, you cache the growing conversation prefix across turns. The engineering challenges are identical in kind, but harder in practice because the cache key is dynamic (growing with each turn) rather than static.</p>
 
+  <div class="sec-h">Context engineering — write prompts to maximize cache hits</div>
+  <p>Prefix caches only fire on shared <em>prefix</em> bytes. The composition of your prompt directly controls how much of each turn hits cache and how much has to be re-prefilled. The single biggest practical lever:</p>
+  <div class="highlight"><strong>Keep stable content early. Keep novel content late.</strong> The earlier the divergence point in your prompt, the smaller the cached prefix and the more compute you waste re-prefilling material that hasn't actually changed.</div>
+  <p>Concrete consequences for prompt structure:</p>
+  <ul>
+    <li><strong>Order: instructions → tools → retrieved docs → conversation history → user's new message.</strong> System prompt and tool definitions almost never change across turns; put them first. Retrieved RAG chunks change per request but are stable within a session; put them next. The only truly novel content per turn is the new user message — push it to the end.</li>
+    <li><strong>Avoid early dynamic content.</strong> Injecting "current time: 2026-04-26 14:32:11" or a per-request UUID into the system prompt invalidates every turn's cache hit because the divergence point moves to byte 0. If you need timestamps or request IDs, put them in the last user message, not the system block.</li>
+    <li><strong>Stable formatting.</strong> Don't rewrite the same instruction with slightly different whitespace or wording across turns — the hash diverges and you re-prefill from that point. Pick a canonical form and stick to it.</li>
+    <li><strong>Tool definitions are part of the prefix.</strong> Adding or reordering a tool mid-conversation invalidates everything from the tool block onward. Define the full tool set up front; add tools by appending, not by editing earlier entries.</li>
+  </ul>
+  <p>This is the inference-side mirror of normal-form database design: factor out the stable prefix, isolate the dynamic suffix. It's free throughput — same model, same engine, just a prompt layout that lets the cache do its job.</p>
+
   <div class="deep-dive">
     <div class="deep-dive-label">Deep Dive — KV cache validity across model versions and sampling changes</div>
     <p><strong>Model version update:</strong> KV cache vectors are outputs of specific W_K, W_V weights. If the model is updated — even a minor checkpoint update, adapter swap, or quantization change — all cached KV tensors are numerically incorrect for the new model's attention and must be discarded. There is no mechanism to "migrate" KV cache across model versions because the latent space geometry changes. Production systems handle this via <strong>versioned cache namespacing</strong>: each model version gets an isolated cache pool, and on rollout the old version's cache drains naturally via LRU. Common pattern: blue-green deployment where new replicas spin up, traffic shifts gradually, and old replicas serve existing warm sessions until they complete.</p>
@@ -2400,7 +2877,79 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <li><strong>API-served agents:</strong> Stateless serving with aggressive prefix caching. Send full context each turn. Let the serving system handle KV reuse transparently. Simpler, more robust, works well with existing infrastructure. This is how Claude Code and ChatGPT with tools work today.</li>
     <li><strong>Latency-critical / long-context agents:</strong> Session-aware serving with KV persistence or disaggregated KV stores. More complex but necessary when re-prefill cost becomes prohibitive (&gt;100K token contexts).</li>
   </ul>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('multiturn')">&#8592; Multi-turn Inference</a><a class="pn-link pn-next" onclick="show('disagg')">Disaggregation &#8594;</a></div>
+
+  <div class="sec-h">An agent is a system, not a model — independent component scaling</div>
+  <p>The earlier sections of this chapter treat "the LLM" as the unit of serving. An agent loop touches several other backing services on every turn, and each is its own scaling unit with its own load profile:</p>
+  <table>
+    <tr><th>Component</th><th>Load profile</th><th>Scales with</th><th>Scaling pattern</th></tr>
+    <tr><td><strong>LLM serving</strong></td><td>GPU-bound; KV cache memory dominates at scale</td><td>Tokens/sec, concurrent sessions</td><td>GPU replicas, KV-aware routing</td></tr>
+    <tr><td><strong>Retriever / vector DB</strong></td><td>CPU + memory; embedding lookup latency-sensitive</td><td>Queries/sec; index size</td><td>Sharded by index; cache popular queries</td></tr>
+    <tr><td><strong>Reranker</strong></td><td>Small GPU; small batches; predictable latency</td><td>Top-K candidates per request</td><td>Independent GPU pool — usually shared across many agent flows</td></tr>
+    <tr><td><strong>Code execution sandbox</strong></td><td>CPU + container churn; startup cost dominates</td><td>Tool-call rate</td><td>Pre-warmed sandbox pool; per-tenant isolation</td></tr>
+    <tr><td><strong>External tool servers</strong> (search, file I/O, MCP)</td><td>I/O-bound; rate-limited by upstream</td><td>Tool-call rate per tool</td><td>Independent worker pools; circuit breakers around flaky tools</td></tr>
+  </table>
+  <p>Each of these scales on its own metric and fails for its own reasons. Treat them as separate fleets with independent autoscaling — sizing them all proportional to "agent sessions" wastes money on whichever component happens to be under-utilized for your workload.</p>
+
+  <div class="sec-h">Same-cluster placement — the ~40ms rule</div>
+  <p>Inter-component latency adds up fast in agent loops. A typical turn does retrieval → rerank → LLM prefill → tool call → LLM decode, with several hops between services. Cross-cluster network round-trips cost ~30–50ms each (varies with cloud region, VPC peering, mesh overlay). At ten hops per turn that's <strong>up to half a second of pure network latency</strong> in a turn that the user expects to feel instant.</p>
+  <div class="highlight"><strong>Co-locate the agent's components in the same cluster (ideally the same availability zone) whenever possible.</strong> The ~40ms cross-cluster cost compounds across hops and is the single most common source of "but each component is fast?" performance bugs in agent systems.</div>
+  <p>Practical placement rules: keep retriever, reranker, sandbox pool, and LLM in the same VPC and same AZ. Tool servers that hit external APIs (web search, third-party SaaS) are inherently cross-region — budget for that explicitly and cache aggressively at the agent boundary. If you must span regions, do it once per session, not once per turn.</p>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('multiturn')">&#8592; Multi-turn Inference</a><a class="pn-link pn-next" onclick="show('toolcalling')">Tool Calling & Reasoning &#8594;</a></div>
+</div>
+
+<div id="sec-toolcalling" class="hidden">
+<div class="breadcrumb">Serving at Scale &rsaquo; Tool Calling & Reasoning</div>
+<h2>Tool calling and reasoning models in the engine <span class="new-badge">new</span></h2>
+  <p class="subtitle">What the inference engine actually does when an agentic loop or a thinking model runs through it.</p>
+
+  <p>The agentic patterns chapter covered the architecture; this section is one level deeper. When a request comes in with <code>tools=[…]</code>, what code paths fire inside the engine? When the model emits a reasoning trace, where does it go? The serving layer treats tool calls and reasoning tokens as first-class concepts, with dedicated parsers, finish reasons, and accounting paths.</p>
+
+  <div class="sec-h">The mechanics of a tool call</div>
+  <p>The model has been fine-tuned to emit a model-family-specific token sequence when it wants to invoke a function. A few examples:</p>
+  <ul>
+    <li>Hermes/Qwen: <code>&lt;tool_call&gt;{"name": "...", "arguments": {...}}&lt;/tool_call&gt;</code></li>
+    <li>Llama 3.1: a JSON envelope wrapped in special tokens</li>
+    <li>Mistral: <code>[TOOL_CALLS]</code> followed by JSON</li>
+    <li>DeepSeek-V3: <code>&lt;｜tool▁calls▁begin｜&gt;…&lt;｜tool▁calls▁end｜&gt;</code></li>
+    <li>Llama 4: pythonic syntax, e.g. <code>[get_weather(city="NYC")]</code></li>
+  </ul>
+  <p>The engine watches the decode stream for these markers as tokens are produced, parses out the JSON or Python args, sets <code>finish_reason="tool_calls"</code> (OpenAI-shape) or <code>stop_reason="tool_use"</code> (Anthropic-shape), and returns control to the orchestrator. The orchestrator runs the tool, appends the result to the conversation, and submits a new request. Anthropic documents this loop explicitly: assistant returns <code>tool_use</code> blocks, the client executes, the next user turn carries a matching <code>tool_result</code>.</p>
+
+  <div class="sec-h">Tool-call parsers</div>
+  <p>Because every model family encodes tool calls differently, vLLM exposes a <code>--tool-call-parser</code> flag with a per-family registry: <code>hermes</code>, <code>mistral</code>, <code>llama3_json</code>, <code>llama4_pythonic</code>, <code>pythonic</code>, <code>granite</code>/<code>granite4</code>, <code>internlm</code>, <code>jamba</code>, <code>deepseek_v3</code>/<code>deepseek_v31</code>, <code>kimi_k2</code>, <code>glm45</code>, plus an <code>auto</code> mode. Each parser implements both <code>extract_tool_calls()</code> for non-streaming responses and <code>extract_tool_calls_streaming()</code> so partial JSON can be surfaced as it decodes. SGLang has the same pattern (Llama, Qwen, Mistral, DeepSeek, Pythonic detectors).</p>
+  <div class="warn">Pick the wrong parser and tool calls show up as plain text content to the client. The model is producing valid tool-call tokens, but without the family-matched parser the engine has no way to know what to do with them.</div>
+
+  <div class="sec-h">Multi-turn KV reuse — why prefix caching is load-bearing</div>
+  <p>An agent loop is <code>[system → user → assistant(tool_call) → tool_result → assistant(tool_call) → tool_result → … → final answer]</code>. The conversation prefix grows monotonically: every previous turn is part of every subsequent turn's prompt. Without prefix caching, every turn re-prefills the entire history, which is O(N²) total work over N turns. With prefix caching, it is O(N).</p>
+  <p>This is why <strong>session affinity</strong> at the gateway matters more for agent traffic than for any other workload. Routing turn 8 of a 10-turn agent loop to a different replica than turns 1–7 is the difference between a 50ms TTFT and a 2-second TTFT — every turn pays a full re-prefill of the conversation history, on hardware that is otherwise idle. Cache-aware routing (consistent hashing on prompt prefix) is the operational answer.</p>
+
+  <div class="sec-h">Reasoning models — the parser and the budget</div>
+  <p>Reasoning models (DeepSeek-R1, QwQ-32B, Qwen3, Granite 3.2, Claude extended-thinking, the o1/o3 family) emit a <em>reasoning</em> segment before the final answer, usually delimited — for R1 it's <code>&lt;think&gt;…&lt;/think&gt;</code>. vLLM exposes <code>--reasoning-parser</code> with values like <code>deepseek_r1</code>, <code>qwen3</code>, <code>granite</code>, <code>glm45</code>, <code>ernie45</code>, <code>hunyuan_a13b</code>, <code>minimax_m2_append_think</code>. The parser splits the stream into <code>reasoning_content</code> vs <code>content</code> and streams them as <code>delta.reasoning</code> vs <code>delta.content</code>. A <code>thinking_token_budget</code> can force-close reasoning by injecting the end-of-thinking token.</p>
+  <p>Operationally this matters in three ways:</p>
+  <ul>
+    <li><strong>Reasoning tokens are billed and consume KV.</strong> Even when the product UI hides them from the user, they are real decode steps with real cost. A request that returns 200 visible tokens after 8,000 reasoning tokens costs you 8,200 tokens of compute.</li>
+    <li><strong>Reasoning is firmly decode-bound.</strong> R1 routinely emits 2,000–10,000 thinking tokens per request. Throughput on these workloads is gated by memory bandwidth and KV size, not FLOPs. MLA and MTP are direct architectural responses to this.</li>
+    <li><strong>Reasoning leakage is a real bug.</strong> A misconfigured parser lets <code>&lt;think&gt;</code> content through to <code>content</code>, breaking downstream JSON parsers and leaking chain-of-thought to end users.</li>
+  </ul>
+
+  <div class="sec-h">Constrained decoding — when tool calls must be valid JSON</div>
+  <p>If <code>tool_choice="auto"</code>, the model is free to emit prose or a tool call, and the parser disambiguates. If <code>tool_choice="required"</code> or a specific tool is named, engines switch on <strong>constrained decoding</strong>: xgrammar (vLLM default), Outlines, lm-format-enforcer, or SGLang's compressed FSM. The schema is compiled to a token-level finite-state machine; at each decode step, logits for tokens that would violate the grammar are masked to <code>-inf</code>. The output is provably valid by construction — no parse-retry loop. Cost: a one-time FSM compile (cached per schema) plus a per-token mask op.</p>
+  <p>SGLang's compressed FSM goes further: when the grammar forces a deterministic span (e.g. the literal <code>"name":</code> in a JSON schema), it collapses the chain of singular FSM transitions and emits multiple tokens in a single step instead of running the model. LMSYS reports up to 2× lower latency and 2.5× higher throughput on JSON character generation versus Outlines + vLLM and Guidance + llama.cpp.</p>
+
+  <div class="sec-h">Operator failure modes</div>
+  <ul>
+    <li><strong>Parser drift.</strong> A model minor version bumps its tool-call template; the named parser silently returns <code>content</code> instead of <code>tool_calls</code>. vLLM's docs flag this for small Llama variants, Mistral 7B (no parallel calls), and InternLM2 ("not stable").</li>
+    <li><strong>Partial JSON on stream cutoff.</strong> Client disconnect or hitting <code>max_tokens</code> mid-call yields an unclosed brace. The streaming extractor must surface a clean error rather than silently truncating.</li>
+    <li><strong>KV blow-up on long agent histories.</strong> A 50-turn coding agent with a 10,000-token system prompt can exceed per-session KV budgets. Without eviction-aware routing, the prefix cache thrashes and you lose the win you were trying to capture.</li>
+    <li><strong>Schema vs parser disagreement.</strong> Constrained decoding validates <code>content</code>; tool-call JSON is validated by the parser path. The two can disagree at edge cases (escapes, unicode), producing tool calls that are valid by the parser but rejected by downstream schema validation.</li>
+  </ul>
+
+  <div class="resource-bar">
+    📖 <a href="https://docs.vllm.ai/en/latest/features/tool_calling.html" target="_blank">vLLM tool calling</a>
+    <a href="https://docs.vllm.ai/en/latest/features/reasoning_outputs.html" target="_blank">vLLM reasoning outputs</a>
+    <a href="https://docs.anthropic.com/en/docs/build-with-claude/tool-use" target="_blank">Anthropic tool use</a>
+  </div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('agentic')">&#8592; Agentic Inference</a><a class="pn-link pn-next" onclick="show('disagg')">Disaggregation &#8594;</a></div>
 </div>
 
 <div id="sec-disagg" class="hidden">
@@ -2476,7 +3025,90 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <tr><td>Long contexts (&gt;32K) where prefill takes seconds</td><td>Simplicity is a priority — one fleet, one scaling policy</td></tr>
   </table>
   <div class="warn">Berkeley's retrospective finding: chunked prefill closes 60-80% of disaggregation's latency benefit at much lower complexity. The real win of disaggregation is independent scaling, not per-request latency.</div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('agentic')">&#8592; Agentic Inference</a><a class="pn-link pn-next" onclick="show('quiz-ch5')">Chapter 5 Quiz &#8594;</a></div>
+
+  <div class="sec-h">Quantitative thresholds — when does disagg actually pay off?</div>
+  <p>The qualitative table above gets you direction; the Baseten/Dynamo deployment data gives concrete thresholds where disaggregation stops being theoretical and starts winning in practice:</p>
+  <ul>
+    <li><strong>Volume:</strong> ≥100M–1B tokens/day. Below that, the complexity tax (extra fleets, KV transfer plumbing, two scaling policies) outweighs the latency win.</li>
+    <li><strong>Model size:</strong> ≥100B parameters. Smaller models prefill quickly enough that chunked prefill on a single fleet handles the interference fine.</li>
+    <li><strong>Workload shape:</strong> prefill-heavy with long inputs (RAG over big docs, code editing, agent loops with growing context). For short-input/long-output chat, disagg gains very little.</li>
+  </ul>
+
+  <div class="sec-h">xPyD notation — naming the fleet ratio</div>
+  <p>Production deployments name disaggregated topologies as <code>xPyD</code> — <em>x</em> prefill workers and <em>y</em> decode workers. <code>5P3D</code> is five prefill replicas paired with three decode replicas, a typical ratio for prefill-heavy traffic. The notation is shorthand for the autoscaling policy: prefill and decode fleets are sized independently to match their respective bottlenecks.</p>
+  <p>Common ratios:</p>
+  <ul>
+    <li><strong>1P1D</strong> — equal split. Default starting point for mixed workloads.</li>
+    <li><strong>2P1D / 3P1D</strong> — prefill-heavy. Long-input RAG, document Q&A, code-aware agents.</li>
+    <li><strong>1P2D / 1P3D</strong> — decode-heavy. Short prompts that produce long outputs (creative writing, reasoning chains).</li>
+  </ul>
+
+  <div class="sec-h">Conditional disaggregation — don't pay the transfer cost when you don't need to</div>
+  <p>Naive disagg routes every request prefill→decode, paying KV transfer latency every time. <strong>Conditional disaggregation</strong> introduces a fast path: requests that are short or fully prefix-cached are handled by the decode worker locally — no transfer, no second fleet hop. Only requests with substantial uncached prefill cross the fleet boundary.</p>
+  <p>The decision typically lives in the router: estimate "how much new prefill compute is needed?" using prefix-cache hit rate plus prompt length; if below a threshold (e.g., <2K tokens of net prefill), keep the request on the decode worker. This avoids paying ~100ms of KV transfer for trivial completions where prefill itself takes <50ms.</p>
+
+  <div class="sec-h">Two failure modes — what alerts you should be running</div>
+  <table>
+    <tr><th>Failure mode</th><th>Signal</th><th>Cause</th><th>Response</th></tr>
+    <tr><td><strong>Prefill queue saturation</strong></td><td>TTFT spikes; prefill-fleet queue depth grows; decode workers idle waiting for KV cache deliveries</td><td>Long-input traffic exceeds prefill fleet's compute. Decode is over-provisioned relative to prefill.</td><td>Scale prefill fleet up (raise <em>x</em> in <code>xPyD</code>); shed long-input traffic via admission control until capacity arrives.</td></tr>
+    <tr><td><strong>Decode-side KV cache exhaustion</strong></td><td>Decode workers preempt or reject; KV cache utilization at 100%; TBT degrades; new requests stall after prefill completes</td><td>Long output traffic / large concurrent sessions exceed decode HBM capacity. Prefill is over-provisioned relative to decode.</td><td>Scale decode fleet up (raise <em>y</em>); enable KV quantization or G2/G3 KV demotion; reduce <code>max_num_seqs</code>.</td></tr>
+  </table>
+  <p>The two fleets fail in different ways for different reasons, which is exactly the point of disaggregating in the first place — but it doubles the alerting and capacity-planning surface area. Run independent dashboards and SLO burn-rate alerts for each fleet.</p>
+
+  <div class="sec-h">Differing TP between fleets — and the transpose-kernel detail</div>
+  <p>Prefill is compute-heavy and benefits from low TP (each replica owns more parameters but uses fewer GPUs, freeing capacity for more replicas). Decode is bandwidth-heavy and benefits from higher TP (more aggregate HBM bandwidth per token). Production deployments commonly run, say, <strong>TP4 prefill paired with TP8 decode</strong>.</p>
+  <p>The complication: the KV cache produced by TP4 prefill is sharded differently than what TP8 decode expects. NVIDIA Dynamo solves this by including a <strong>transpose kernel</strong> in the KV transfer path — the cache is reshaped on the fly between fleets so each side keeps its native sharding. The reshape is overlapped with the NIXL-based RDMA transfer so it doesn't add measurable latency. Without the transpose, prefill and decode would have to share a TP value, eliminating one of disaggregation's biggest wins.</p>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('toolcalling')">&#8592; Tool Calling & Reasoning</a><a class="pn-link pn-next" onclick="show('dynamo')">NVIDIA Dynamo &#8594;</a></div>
+</div>
+
+<div id="sec-dynamo" class="hidden">
+<div class="breadcrumb">Serving at Scale &rsaquo; NVIDIA Dynamo</div>
+<h2>NVIDIA Dynamo <span class="new-badge">new</span></h2>
+  <p class="subtitle">A datacenter-scale inference orchestrator that wraps engines like vLLM, TensorRT-LLM, and SGLang.</p>
+
+  <div class="sec-h">The mental model: Kubernetes for inference engines</div>
+  <p>Dynamo is <strong>not a model engine</strong>. It does not own kernels, it does not implement attention, and it does not replace vLLM, TensorRT-LLM, or SGLang. It sits one layer above them — the orchestration plane that routes requests, scales worker pools, shuttles KV cache between nodes, and enforces SLOs across an entire fleet. The mental model: Dynamo is to inference engines what Kubernetes is to containers.</p>
+  <p>Announced at GTC 2025 and shipped to 1.0 the same year, it is the open-source successor to Triton's distributed-serving role, written ~55% in Rust (the data plane) and ~30% Python (extensibility). It is purpose-built for multi-node deployments — frontier MoEs, reasoning models with long thinking traces, agent fleets — where one engine instance is fundamentally not enough.</p>
+
+  <div class="sec-h">The five components that matter</div>
+  <p><strong>Frontend</strong> — OpenAI-compatible API gateway, with service discovery via etcd + NATS or Kubernetes-native via CRDs and EndpointSlices. The boring part. Important because every other component depends on a fast, low-latency control plane.</p>
+  <p><strong>Smart Router (KV-aware)</strong> — Tracks every cached KV block across the worker fleet using a radix tree (the "Flash Indexer," ~170M ops/s). Routes incoming requests to the worker with the highest prefix-cache overlap, not round-robin. NVIDIA reports <strong>2× faster TTFT on Qwen3-Coder 480B</strong> from this single change. The whole point of prefix caching is wasted if the router doesn't know who has what.</p>
+  <p><strong>Disaggregated prefill/decode</strong> — Splits the two phases onto separate worker pools because they have opposite resource shapes. Prefill is compute-bound, short-lived, large matmuls. Decode is memory-bandwidth-bound, long-lived, KV reads. Each pool can run a different parallelism strategy (e.g., prefill TP2, decode TP4) and scale independently. NVIDIA's reference burst ratio is <strong>2 prefill workers (TP2) per 1 decode worker (TP4)</strong>.</p>
+  <p><strong>KVBM — KV Block Manager</strong> — Tiered KV-cache memory: HBM → CPU DDR → local SSD → remote/object storage. Hot blocks stay on GPU; cold blocks spill out and are pulled back on hit, avoiding re-prefill of long contexts. This is what lets you hold many concurrent long-context sessions without dedicating 80GB of HBM per session. Exactly the EBS-vs-instance-store-vs-S3 tiering pattern, applied to KV.</p>
+  <p><strong>Planner</strong> — SLA-driven autoscaler that <em>understands prefill vs decode separately</em>. Watches TTFT and inter-token-latency (ITL); decides whether to add prefill workers, decode workers, or fall back to aggregated mode. Alibaba's APSARA 2025 result: <strong>80% fewer SLA breaches at 5% lower TCO</strong> from running Planner over a static replica set.</p>
+  <p><strong>NIXL (NVIDIA Inference Xfer Library)</strong> — Hardware-agnostic transport for moving KV blocks between workers and tiers. Backends include UCX (RDMA over InfiniBand or NVLink), GPUDirect Storage, and S3. This is the bus that makes disaggregation cheap enough to be worth doing — without RDMA, the prefill→decode KV handoff becomes the bottleneck and the whole architecture loses.</p>
+
+  <div class="sec-h">Where it fits in the stack</div>
+  <div class="highlight">
+    <strong>A typical Dynamo deployment shape:</strong><br>
+    [Frontend] → [Smart Router] → N decode workers (vLLM / TRT-LLM / SGLang)<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ M prefill workers (M &lt; N typically)<br>
+    KVBM tier (HBM / DDR / SSD / RDMA) shared via NIXL<br>
+    Planner watches SLOs and resizes M, N
+  </div>
+
+  <div class="sec-h">Numbers worth remembering</div>
+  <ul>
+    <li><strong>Up to 30× request throughput</strong> on DeepSeek-R1 671B, GB200 NVL72.</li>
+    <li><strong>7× throughput per GPU</strong> on DeepSeek-R1, GB200 NVL72 vs B200 baseline.</li>
+    <li><strong>&gt;2× throughput</strong> on Llama 70B on Hopper.</li>
+    <li><strong>2× faster TTFT</strong> with KV-aware routing on Qwen3-Coder 480B.</li>
+    <li><strong>80% fewer SLA breaches at 5% lower TCO</strong> — Alibaba APSARA Planner result.</li>
+    <li><strong>7× faster cold-start</strong> via ModelExpress (GPU-to-GPU weight streaming) on DeepSeek-V3 / H200.</li>
+  </ul>
+
+  <div class="sec-h">Hardware coupling and operational reality</div>
+  <p>Dynamo is designed around NVIDIA's reference platforms — Hopper (H100/H200), Blackwell (B200, GB200 NVL72, GB300 NVL72). NIXL leans on <strong>NVLink for intra-node and InfiniBand/RDMA for inter-node</strong> KV transfer. You <em>can</em> run disaggregation without RDMA, but the prefill→decode handoff becomes the slowest hop in your stack and the architectural premise breaks.</p>
+  <p>Operational complexity is real. You are running etcd + NATS (or Kubernetes + the Grove operator), an RDMA fabric, KVBM storage tiers, and a Planner whose autoscaling decisions you must trust in production. Dynamo conceptually competes with Ray Serve, KServe, Triton's older ensemble mode, and whatever bespoke router/orchestrator stack a frontier lab has built in-house. Its differentiator is <strong>KV-cache-awareness end to end</strong> — router + KVBM + NIXL — which generic orchestrators don't have.</p>
+
+  <div class="warn"><strong>When Dynamo is the wrong choice.</strong> If your workload is short, uncached, uniform-shape requests with no shared system prompts and no long contexts, a single well-tuned vLLM replica behind a plain load balancer is hard to beat. The maximum value comes from workloads with long shared prefixes (system prompts, agents, RAG) and long contexts (reasoning models, code agents).</div>
+
+  <div class="resource-bar">
+    📖 <a href="https://github.com/ai-dynamo/dynamo" target="_blank">ai-dynamo/dynamo on GitHub</a>
+    <a href="https://developer.nvidia.com/blog/introducing-nvidia-dynamo-a-low-latency-distributed-inference-framework-for-scaling-reasoning-ai-models/" target="_blank">Introducing NVIDIA Dynamo (developer blog)</a>
+    <a href="https://docs.dynamo.nvidia.com/dynamo/user-guides/disaggregated-serving" target="_blank">Disaggregated serving guide</a>
+  </div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('disagg')">&#8592; Disaggregation</a><a class="pn-link pn-next" onclick="show('quiz-ch5')">Chapter 5 Quiz &#8594;</a></div>
 </div>
 
 <div id="sec-quiz-ch5" class="hidden">
@@ -2506,7 +3138,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
       <div class="quiz-a"><strong>Yes, very useful.</strong> Even a noisy predictor that correctly identifies the shortest 25% and longest 25% enables SJF-like scheduling with 2-3× reduction in average latency for short requests. You don't need exact token counts — you need relative ordering. Add aging (priority boost with wait time) to prevent long-request starvation: <code>effective_priority = shortness_score + aging_factor × wait_time</code>.</div>
     </details>
   </div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('disagg')">&#8592; Disaggregation</a><a class="pn-link pn-next" onclick="show('traintoserve')">Training-to-Serving &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('dynamo')">&#8592; NVIDIA Dynamo</a><a class="pn-link pn-next" onclick="show('traintoserve')">Training-to-Serving &#8594;</a></div>
 </div>
 
 <div id="sec-traintoserve" class="hidden">
@@ -2605,7 +3237,70 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   <div class="sec-h">When to choose each</div>
   <div class="highlight"><strong>vLLM:</strong> Default choice. Broadest model support, largest community, fastest feature iteration, multi-hardware. Start here.<br><br><strong>TRT-LLM:</strong> Maximum NVIDIA throughput justifies operational complexity. NVIDIA NIM. Dedicated MLOps team available.<br><br><strong>SGLang:</strong> Structured generation is primary use case. Multi-turn workloads where prefix caching is critical. Easiest path to high performance.<br><br><strong>Dynamo:</strong> Need disaggregation at 50+ GPU scale. Strict TBT SLOs. High-bandwidth interconnect available.</div>
   <p><strong>Pragmatic default:</strong> Start with vLLM. Once you've identified specific bottlenecks, switch to the specialized engine. Same principle as AWS: don't start with a custom Spot placement strategy. Start with on-demand, prove the workload, then optimize.</p>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('traintoserve')">&#8592; Training-to-Serving</a><a class="pn-link pn-next" onclick="show('benchmarking')">Benchmarking &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('traintoserve')">&#8592; Training-to-Serving</a><a class="pn-link pn-next" onclick="show('sglang')">SGLang Deep Dive &#8594;</a></div>
+</div>
+
+<div id="sec-sglang" class="hidden">
+<div class="breadcrumb">Operations &rsaquo; SGLang Deep Dive</div>
+<h2>SGLang <span class="new-badge">new</span></h2>
+  <p class="subtitle">A serving runtime built around RadixAttention and structured-output decoding — the inference engine of choice for prefix-heavy and agentic workloads.</p>
+
+  <div class="sec-h">Two things in one repo</div>
+  <p>SGLang (originated at LMSYS, UC Berkeley) is two related projects shipped together, and the distinction matters when picking what to deploy:</p>
+  <ul>
+    <li>A <strong>serving runtime</strong>: a high-performance inference engine in the same category as vLLM and TensorRT-LLM. OpenAI-API compatible. Supports Llama, Qwen, DeepSeek, Kimi, GLM, Gemma, Mistral, plus embedding/reward/diffusion models. This is what most people deploy.</li>
+    <li>A <strong>frontend DSL</strong>: a Python-embedded language with primitives like <code>gen</code>, <code>select</code>, and <code>fork</code> for expressing multi-call LLM programs (agents, tree-of-thought, self-consistency, RAG pipelines). <code>gen</code> is non-blocking, <code>fork</code> clones a prompt into parallel branches, <code>select</code> constrains generation to a fixed set of choices.</li>
+  </ul>
+  <p>The runtime works standalone with the OpenAI API. The DSL is what unlocks the most dramatic wins because it tells the runtime <em>which</em> calls share prefixes, so the cache can do its job. According to SGLang's own docs, the project now powers &gt;400,000 GPUs and trillions of tokens per day.</p>
+
+  <div class="sec-h">RadixAttention — the headline trick</div>
+  <p>Standard prefix caches use a flat hash on (model, prompt). RadixAttention stores <strong>all active KV cache entries</strong> in a radix tree keyed by token sequence. Shared prefixes become shared subtrees, so a system prompt + few-shot exemplars + branching completions are physically shared in GPU memory exactly once. Operations are O(prefix length) for search/insert; eviction is LRU with reference-counting so an in-flight request can't evict its own cache.</p>
+  <p>This is strictly stronger than a hash table when generations <em>branch</em> — parallel sampling (<code>n &gt; 1</code>), beam-like agent fan-out, tree-of-thought, self-consistency — because the divergence point is automatically a tree split. A flat hash would either miss those siblings or duplicate them. The 9-workload paper benchmark (MMLU, HellaSwag, ReAct, ToT, JSON, multi-turn chat, DSPy RAG, LLaVA) reports <strong>up to 5× throughput vs vLLM and Guidance</strong> on Llama-7B (A10G) and Mixtral-8×7B with TP, and the abstract claims <strong>up to 6.4×</strong> vs prior SOTA across the suite.</p>
+
+  <div class="sec-h">Compressed FSM and jump-forward decoding</div>
+  <p>For structured output (JSON Schema, regex, EBNF), SGLang doesn't just mask logits per token. When the grammar forces a deterministic span — e.g. the literal <code>"name":</code> in a JSON schema — it <strong>collapses the chain of singular FSM transitions and emits multiple tokens in one step</strong>, skipping the model entirely for the forced span. Re-tokenization handles the boundary conflicts where the forced text doesn't align with model token boundaries.</p>
+  <p>Reported gains: up to 2× lower latency and 2.5× higher throughput vs Outlines+vLLM and Guidance+llama.cpp on JSON character generation and document-extraction (LLaVA). The xgrammar backend is now the default for general CFG / JSON-Schema / regex constraints, and it composes with RadixAttention so the constrained portion of the prefix is still cache-shared across requests.</p>
+  <div class="info">Net effect for function-calling and structured-output workloads — the bread and butter of agent infra — is that you get <em>both</em> the prefix-cache win <em>and</em> the FSM-skip win in the same request.</div>
+
+  <div class="sec-h">What it shares with vLLM</div>
+  <p>Continuous batching, paged attention, chunked prefill, speculative decoding (EAGLE / MTP heads), prefill-decode disaggregation, tensor / pipeline / expert / data parallelism, multi-LoRA batching, FP8 / FP4 / INT4 / AWQ / GPTQ quantization, a zero-overhead CPU scheduler. MoE handling is well-tuned for DeepSeek-V3/R1 (DeepSeek themselves recommend SGLang for production); MLA, EP, and recently "Elastic EP" for partial-failure tolerance in large MoE deployments are all upstream.</p>
+
+  <div class="sec-h">When SGLang wins, when it doesn't</div>
+  <table>
+    <tr><th>Scenario</th><th>Best engine</th><th>Why</th></tr>
+    <tr><td>Plain high-QPS chat, single prompt, no shared prefix</td><td>vLLM (parity), TRT-LLM</td><td>SGLang's tree pays bookkeeping overhead it can't amortize without prefix sharing.</td></tr>
+    <tr><td>Agent loops with shared system prompts, multi-turn, RAG</td><td><strong>SGLang</strong></td><td>RadixAttention + cache-aware scheduler dominate when prefixes are long and reused.</td></tr>
+    <tr><td>JSON / function-calling / structured output throughput</td><td><strong>SGLang</strong></td><td>Compressed FSM + xgrammar; tokens for forced spans cost zero model time.</td></tr>
+    <tr><td>Tree-of-thought, parallel sampling, self-consistency</td><td><strong>SGLang</strong></td><td>Branching becomes tree splits; siblings share ancestors in cache automatically.</td></tr>
+    <tr><td>Peak single-stream latency on NVIDIA-only deployment</td><td>TRT-LLM</td><td>Hand-tuned CUDA kernels, FP8 attention kernels, in-flight batching with TRT plugins are most mature there.</td></tr>
+    <tr><td>Mature productionization story on NVIDIA Triton</td><td>TRT-LLM</td><td>Tightest integration with the existing NVIDIA inference stack.</td></tr>
+  </table>
+
+  <div class="sec-h">Recent capabilities</div>
+  <ul>
+    <li><strong>Prefill–decode disaggregation</strong> in production (separate pools for compute-bound prefill vs memory-bound decode).</li>
+    <li><strong>Multi-node serving</strong> for frontier MoEs (DeepSeek-V3 / R1, Kimi).</li>
+    <li><strong>Multimodal</strong> pipelines (LLaVA, Qwen-VL) with structured extraction.</li>
+    <li><strong>Function-calling parsers</strong> for Llama, Qwen, Mistral, DeepSeek tool-use formats.</li>
+    <li>Hardware breadth: NVIDIA GB200 / B300 / H100 / A100, AMD MI300 / MI355, Intel Xeon CPUs, Google TPU, Ascend NPU.</li>
+    <li>Day-0 support for new models (e.g., Nemotron 3 Super) and Elastic EP for MoE failure tolerance.</li>
+  </ul>
+
+  <div class="sec-h">Numbers worth remembering</div>
+  <ul>
+    <li><strong>Up to 6.4× throughput</strong> vs prior SOTA across the paper's nine-workload benchmark.</li>
+    <li><strong>Up to 5× throughput</strong> vs vLLM and Guidance on agent / ToT / JSON / RAG workloads.</li>
+    <li><strong>2× lower latency, 2.5× higher throughput</strong> on JSON-constrained decoding via compressed FSM.</li>
+    <li>Operational scale per the docs: <strong>&gt;400,000 GPUs, trillions of tokens per day</strong>.</li>
+  </ul>
+
+  <div class="resource-bar">
+    📖 <a href="https://github.com/sgl-project/sglang" target="_blank">sgl-project/sglang on GitHub</a>
+    <a href="https://arxiv.org/abs/2312.07104" target="_blank">SGLang paper (RadixAttention)</a>
+    <a href="https://lmsys.org/blog/2024-01-17-sglang/" target="_blank">SGLang launch blog</a>
+    <a href="https://lmsys.org/blog/2024-02-05-compressed-fsm/" target="_blank">Compressed FSM</a>
+  </div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('engines')">&#8592; Engine Comparison</a><a class="pn-link pn-next" onclick="show('benchmarking')">Benchmarking &#8594;</a></div>
 </div>
 
 <div id="sec-benchmarking" class="hidden">
@@ -2624,6 +3319,16 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <tr><td>Goodput</td><td>SLO-compliant throughput (the metric that matters most)</td><td>requests meeting SLO / total</td></tr>
   </table>
   <p><strong>Always report the full distribution, not just averages.</strong> A system with 50ms average but 5s P99 is much worse than one with 80ms average and 120ms P99.</p>
+
+  <div class="sec-h">Why percentiles, not averages — latency is right-skewed</div>
+  <p>LLM serving latency distributions are <strong>heavily right-skewed</strong>: a long tail of slow requests pulls the mean upward, but most requests are clustered near the median. Reporting the mean (or a P50) hides the worst behavior; reporting only P99 hides typical behavior. The standard reporting set:</p>
+  <ul>
+    <li><strong>P50 (median)</strong> — what a typical user experiences. Should be near your "fast" target.</li>
+    <li><strong>P90 / P95</strong> — the experience of a busy power user who sends many requests. If P95 is 5× P50 you have a queueing or batching problem.</li>
+    <li><strong>P99</strong> — the worst your largest customers' tenth-of-a-percent of traffic ever sees. Drives the SLO that determines whether you're paged.</li>
+    <li><strong>P99.9</strong> — only meaningful at very high QPS; otherwise it's noise from a handful of requests.</li>
+  </ul>
+  <p>SLOs almost always live at P95/P99, not the mean. A system whose P99 is 10× its P50 will burn pager budget even if its mean looks great. Run all comparison tables (engines, hardware, configs) at the same percentile <em>and</em> the same load level — comparing P99 of system A at 10 RPS to P99 of system B at 50 RPS is meaningless.</p>
 
   <div class="sec-h">Open-loop vs closed-loop — the critical distinction</div>
   <p><strong>Closed-loop:</strong> Send request, wait for completion, send next. With N clients, always exactly N in-flight. When the system slows down, request rate drops automatically. <strong>This hides the real overload behavior.</strong></p>
@@ -2680,13 +3385,39 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <li><strong>Network contamination:</strong> Benchmarking a remote API includes network RTT in TTFT. Benchmark locally for engine perf, remotely for user-perceived latency.</li>
   </ul>
 
+  <div class="sec-h">Shadow traffic — the only way to test something that isn't in production yet</div>
+  <p>Synthetic loads (ShareGPT, fixed lengths, uniform Poisson) tell you something about the engine but very little about <em>your workload</em>. The most reliable benchmark is shadowing: replay real production traffic against a candidate config and compare against the live system. To produce results that actually transfer to production, the shadow workload has to match production on five dimensions:</p>
+  <table>
+    <tr><th>Dimension</th><th>Why it matters</th><th>How to match it</th></tr>
+    <tr><td><strong>ISL/OSL distribution</strong> (input/output sequence length)</td><td>Average lengths hide the workload — a 50/50 mix of 100-token and 50K-token prompts behaves nothing like a uniform 25K-token prompt at the same mean.</td><td>Sample real prompts; preserve the histogram, not just the mean.</td></tr>
+    <tr><td><strong>Traffic volume + jitter</strong></td><td>Steady-state throughput is the easy case. Real traffic has bursts (login storms, viral content, cron jobs) that exercise queueing and admission paths.</td><td>Replay timestamps, not Poisson. Or layer Poisson onto a daily traffic curve.</td></tr>
+    <tr><td><strong>Request contents</strong></td><td>Different content distributions hit different cache hit rates, route differently, and trigger different speculative-decode acceptance rates.</td><td>Use real (or scrubbed) production prompts, not generated ones.</td></tr>
+    <tr><td><strong>Input parameters</strong></td><td>Temperature, top-p, max_tokens, stop sequences, tool definitions all change scheduler behavior — fixed values mask whole classes of bugs.</td><td>Replay the parameter mix as users actually send it.</td></tr>
+    <tr><td><strong>Tenant / model mix</strong></td><td>Multi-tenant systems with LoRA adapters, multiple base models, or per-customer system prompts behave very differently from a single-model benchmark.</td><td>Preserve the tenant distribution; route requests as production routes them.</td></tr>
+  </table>
+  <p>Operationally, run shadow traffic as <em>mirrored</em> requests (the candidate sees real prompts, the response is discarded; the live system handles the user). This catches regressions that a synthetic benchmark would miss and lets you compare candidate vs production on the exact same input distribution.</p>
+
+  <div class="sec-h">Evals vs benchmarks — different questions, different tools</div>
+  <p>Two words that are routinely conflated and shouldn't be:</p>
+  <table>
+    <tr><th></th><th>Benchmark</th><th>Eval</th></tr>
+    <tr><td><strong>Question answered</strong></td><td>"How fast / cheap / efficient is this serving stack on this hardware?"</td><td>"How good are the model's outputs on this task?"</td></tr>
+    <tr><td><strong>What you change</strong></td><td>Engine, hardware, batching, quantization config, parallelism plan</td><td>Model, prompt, sampling, fine-tune</td></tr>
+    <tr><td><strong>Output</strong></td><td>Latency / throughput / cost numbers</td><td>Accuracy / pass rate / win rate</td></tr>
+    <tr><td><strong>Examples</strong></td><td>vLLM benchmark_serving, GenAI-Perf, MLPerf Inference</td><td>MMLU, GSM8K, HumanEval, SWE-bench, internal task suites, A/B preference</td></tr>
+  </table>
+  <p>Both are necessary and they answer orthogonal questions. A typical mistake is reporting "Engine X is faster" without checking that quality is held constant — quantization or speculative decoding regressions can show up only on the eval side. Always pair a benchmarking change with at least a smoke eval on a representative task.</p>
+  <div class="warn"><strong>Goodhart's Law:</strong> "When a measure becomes a target, it ceases to be a good measure." Optimizing single-metric benchmarks (e.g., raw tokens/sec) can degrade the things you actually care about — cache hit rate, P99 latency, output quality. Goodput (SLO-compliant throughput) is one well-known antidote because it bakes the SLO into the metric. The deeper antidote: track a small portfolio of metrics together (latency percentiles, throughput, quality, cost) and refuse to ship a change that improves one at the expense of another without explicit justification.</p></div>
+
   <div class="sec-h">Standard tools</div>
   <ul>
     <li><strong>vLLM benchmark_serving.py:</strong> De facto community standard. Open-loop Poisson mode. ShareGPT dataset. Reports TTFT, TPOT, E2E, throughput.</li>
     <li><strong>GenAI-Perf (NVIDIA):</strong> Purpose-built for LLM benchmarking. Generates latency-throughput curves automatically. TRT-LLM / Triton native.</li>
+    <li><strong>SGLang Genai-bench:</strong> SGLang's first-party benchmarking harness — covers prefix-caching scenarios and disaggregated topologies natively.</li>
     <li><strong>MLPerf Inference (MLCommons):</strong> Industry standard. LLM scenarios added in v4.0 (2024). Server scenario uses open-loop + SLO compliance — addresses coordinated omission by design.</li>
+    <li><strong>Locust / k6:</strong> general-purpose HTTP load generators useful when you want to mix LLM traffic with other backend calls in an end-to-end test.</li>
   </ul>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('engines')">&#8592; Engine Comparison</a><a class="pn-link pn-next" onclick="show('costeconomics')">Cost Economics &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('sglang')">&#8592; SGLang Deep Dive</a><a class="pn-link pn-next" onclick="show('costeconomics')">Cost Economics &#8594;</a></div>
 </div>
 
 <div id="sec-costeconomics" class="hidden">
@@ -2750,13 +3481,35 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   <p>Reasoning models (o1/o3, Claude extended thinking, DeepSeek-R1) generate internal chain-of-thought tokens — sometimes 10-100× the visible output length — before producing the final answer. A request generating 500 visible tokens might consume 5,000-50,000 thinking tokens internally, making effective compute cost 10-100× higher than non-reasoning inference. Providers typically bill thinking tokens at output token rates, creating strong economic pressure for thinking token optimization (pruning redundant reasoning, caching common reasoning patterns, early termination on high confidence).</p>
 
   <div class="info">The cost formula connects directly to your Phase 3-4 work: autoscaling maximizes utilization (denominator), admission control maximizes goodput (numerator). Both directly reduce effective $/Mtok. Phase 7's scheduling work will optimize at the micro level — given fixed GPUs, maximize the useful work per dollar.</div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('benchmarking')">&#8592; Benchmarking</a><a class="pn-link pn-next" onclick="show('mfu')">MFU, SOL & Unhobblers &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('benchmarking')">&#8592; Benchmarking</a><a class="pn-link pn-next" onclick="show('mfu')">Roofline, MFU, SOL & Unhobblers &#8594;</a></div>
 </div>
 
 <div id="sec-mfu" class="hidden">
-<div class="breadcrumb">Operations &rsaquo; MFU, SOL & Unhobblers</div>
-<h2>MFU, SOL, and unhobblers <span class="new-badge">new</span></h2>
-  <p class="subtitle">How to measure GPU utilization, what limits it, and the concept of breakthroughs that remove ceilings rather than improve constants</p>
+<div class="breadcrumb">Operations &rsaquo; Roofline, MFU, SOL & Unhobblers</div>
+<h2>Roofline, MFU, SOL, and unhobblers <span class="new-badge">new</span></h2>
+  <p class="subtitle">The conceptual framework for reasoning about GPU utilization: arithmetic intensity, the roofline model, what limits efficiency, and the breakthroughs that remove ceilings rather than improve constants</p>
+
+  <div class="sec-h">The roofline model — every operation is either compute-bound or bandwidth-bound</div>
+  <p>Before measuring utilization you have to know what kind of work the GPU is doing. The <strong>roofline model</strong> classifies any operation by a single number — its <strong>arithmetic intensity</strong> — and tells you which physical limit (compute or memory bandwidth) it hits first.</p>
+  <div class="highlight"><strong>Arithmetic intensity</strong> = FLOPs performed ÷ bytes moved between HBM and the chip. Units: <code>ops/byte</code>. Low intensity = lots of memory traffic per math op (memory-bound). High intensity = lots of math per byte loaded (compute-bound).</div>
+  <p>Each GPU has a corresponding <strong>ops:byte ratio</strong> — its peak FLOP/s divided by its peak HBM bandwidth. For an H100 SXM in FP16: 989 TFLOPS / 3.35 TB/s ≈ <strong>295 ops/byte</strong>. That's the breakeven point. An operation whose arithmetic intensity is below 295 will hit the bandwidth ceiling and waste FLOPs. An operation above 295 will hit the compute ceiling and waste bandwidth.</p>
+  <table>
+    <tr><th>GPU</th><th>FP16 TFLOPS</th><th>HBM BW</th><th>ops:byte (FP16)</th></tr>
+    <tr><td>H100 SXM</td><td>989</td><td>3.35 TB/s</td><td>~295</td></tr>
+    <tr><td>H200</td><td>989</td><td>4.8 TB/s</td><td>~206 — same compute, more bandwidth → easier to feed</td></tr>
+    <tr><td>B200 (FP8)</td><td>4500</td><td>8 TB/s</td><td>~563 — Blackwell raises the breakeven, demanding higher intensity</td></tr>
+  </table>
+  <p>The "roofline" is a graph: arithmetic intensity on the x-axis, achievable performance on the y-axis. There are two ceilings — a slanted bandwidth ceiling on the left and a flat compute ceiling on the right. Where they meet is the chip's ops:byte ratio. Every operation lives somewhere on that plot.</p>
+
+  <div class="sec-h">Worked example — why decode is memory-bound</div>
+  <p>Standard multi-head attention during decode: each new token loads the entire KV cache, multiplies it by the new query, applies softmax, multiplies by V, and writes back the result. The arithmetic-vs-bandwidth math (Llama-style 70B model, FP16, single decode step):</p>
+  <ul>
+    <li><strong>FLOPs per token:</strong> the dominant cost is the QK<sup>T</sup> and softmax×V multiplies — roughly <code>4 × num_heads × d_head × context_length</code> FLOPs.</li>
+    <li><strong>Bytes loaded per token:</strong> the full KV cache for this sequence — roughly <code>2 × num_kv_heads × d_head × context_length × 2 bytes</code>.</li>
+    <li><strong>Arithmetic intensity:</strong> works out to <strong>~62 ops/byte</strong> for naive multi-head attention on a typical configuration.</li>
+  </ul>
+  <p>62 is far below the H100's 295 breakeven. <strong>Decode attention is squarely on the bandwidth ceiling</strong> — the GPU's arithmetic units finish their math and wait for the next chunk of KV cache to arrive. No amount of additional FLOPs helps; you need either more bandwidth (H200), less data movement per FLOP (FlashAttention's tiling, GQA/MLA's smaller KV cache), or higher arithmetic intensity per pass (larger batch sizes amortize the same KV load across more queries). Every optimization in the chapter is, mechanically, an attempt to push some operation's intensity above the chip's ops:byte ratio.</p>
+  <p>Prefill is different: the full prompt is processed in one matmul-heavy forward pass with high arithmetic intensity (often &gt;500 ops/byte for long prompts) — solidly compute-bound. This compute-bound vs bandwidth-bound asymmetry between prefill and decode is the first-principles reason chunked prefill, disaggregation, and continuous batching all exist.</p>
 
   <div class="sec-h">MFU — Model FLOP Utilization</div>
   <p>MFU (Model FLOP Utilization) is the ratio of useful model computation actually being performed to the maximum theoretical computation the hardware could perform. It answers: "Of all the arithmetic operations my GPU is capable of per second, what fraction is actually going toward useful model computation?"</p>
@@ -2808,7 +3561,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
 /* ══════════════════════════════════════════════════════════
    SECTION ORDER + NAMES
    ══════════════════════════════════════════════════════════ */
-const order = ['tokenization','embeddings','qkv','multihead','layers','params','moe','numformats','quiz-ch1','mla','mtp','codesign','quiz-ch2','nvlink','parallelism','quiz-ch3','batching','kvcache','chunked','flashattn','quant','marlin','specdecode','optlist','quiz-ch4','reqlen','scheduling','outputpred','reqseqbatch','multiturn','agentic','disagg','quiz-ch5','traintoserve','engines','benchmarking','costeconomics','mfu'];
+const order = ['tokenization','embeddings','qkv','multihead','layers','params','moe','numformats','sampling','quiz-ch1','mla','attnvariants','ssm','mtp','codesign','distill','lora','quiz-ch2','nvlink','parallelism','quiz-ch3','batching','kvcache','chunked','flashattn','quant','marlin','specdecode','optlist','quiz-ch4','reqlen','scheduling','outputpred','reqseqbatch','multiturn','agentic','disagg','quiz-ch5','traintoserve','engines','benchmarking','costeconomics','mfu'];
 
 const sectionNames = {};
 document.querySelectorAll('.nav-item').forEach(btn => {
@@ -2921,6 +3674,19 @@ const fallbacks = {
   listen:  document.getElementById('listenFallback'),
   podcast: document.getElementById('podcastFallback')
 };
+const seekSliders = {
+  listen:  document.getElementById('listenSeek'),
+  podcast: document.getElementById('podcastSeek')
+};
+const curTimeEls = {
+  listen:  document.getElementById('listenCurTime'),
+  podcast: document.getElementById('podcastCurTime')
+};
+const durTimeEls = {
+  listen:  document.getElementById('listenDurTime'),
+  podcast: document.getElementById('podcastDurTime')
+};
+let isSeeking = false; // True while user drags a seek slider
 const dirs = {
   listen:  'narration',
   podcast: 'podcast'
@@ -2945,6 +3711,16 @@ function loadAudio(mode, sectionId) {
   player.playbackRate = currentRate;
   player.style.display = '';
   fallback.style.display = 'none';
+
+  // Reset seek slider for the new audio
+  const slider = seekSliders[mode];
+  if (slider) {
+    slider.value = 0;
+    slider.max = 0;
+    slider.disabled = true;
+  }
+  if (curTimeEls[mode]) curTimeEls[mode].textContent = '0:00';
+  if (durTimeEls[mode]) durTimeEls[mode].textContent = '0:00';
 
   player.onerror = function() {
     fallback.style.display = 'block';
@@ -3082,13 +3858,58 @@ Object.keys(players).forEach(mode => {
   // Update time display + highlight as audio plays
   player.addEventListener('timeupdate', () => {
     updateInfoUI(mode);
+    // Sync seek slider unless the user is actively dragging it
+    const slider = seekSliders[mode];
+    if (slider && !isSeeking && isFinite(player.duration)) {
+      slider.value = player.currentTime;
+    }
+    if (curTimeEls[mode]) curTimeEls[mode].textContent = formatTime(player.currentTime);
     // Highlight current paragraph (listen mode with timing data)
     if (mode === 'listen' && currentTiming.length > 0) {
       const paraIdx = findActiveParagraph(player.currentTime);
       highlightParagraph(paraIdx);
     }
   });
+  // Once metadata loads, enable seek slider with the real duration
+  player.addEventListener('loadedmetadata', () => {
+    const slider = seekSliders[mode];
+    if (slider && isFinite(player.duration)) {
+      slider.max = player.duration;
+      slider.disabled = false;
+    }
+    if (durTimeEls[mode] && isFinite(player.duration)) {
+      durTimeEls[mode].textContent = formatTime(player.duration);
+    }
+  });
 });
+
+// Seek slider wiring (one per mode)
+Object.keys(seekSliders).forEach(mode => {
+  const slider = seekSliders[mode];
+  if (!slider) return;
+  slider.addEventListener('input', () => {
+    isSeeking = true;
+    if (curTimeEls[mode]) curTimeEls[mode].textContent = formatTime(parseFloat(slider.value));
+  });
+  slider.addEventListener('change', () => {
+    const player = players[mode];
+    if (player && isFinite(player.duration)) {
+      player.currentTime = parseFloat(slider.value);
+    }
+    isSeeking = false;
+  });
+});
+
+// Skip the active player by `delta` seconds (negative = rewind)
+function seekBy(delta) {
+  const player = players[currentMode];
+  if (!player || !isFinite(player.duration)) return;
+  const target = Math.max(0, Math.min(player.duration, player.currentTime + delta));
+  player.currentTime = target;
+  const slider = seekSliders[currentMode];
+  if (slider) slider.value = target;
+  if (curTimeEls[currentMode]) curTimeEls[currentMode].textContent = formatTime(target);
+}
 
 // Update the info display (title, progress, time)
 function updateInfoUI(mode) {

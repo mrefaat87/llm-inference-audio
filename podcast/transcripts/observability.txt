@@ -1,0 +1,109 @@
+Alex: Okay, so we've spent the last few episodes talking about how to *build* an inference stack — engines, batching, caching, autoscaling. Today I want to talk about the boring-but-critical part: how do you actually run this thing in production without lighting your on-call team on fire?
+
+Jenny: Observability and deployment. The stuff that doesn't show up in the architecture diagram but determines whether you keep your job.
+
+Alex: Exactly. And I want to start with a question. When you ran services at AWS, what was the first dashboard you'd open during an incident?
+
+Jenny: Honestly? Latency percentiles and error rate. P99 latency, 5xx rate, request count. That's the holy trinity for any HTTP service.
+
+Alex: Right. And that instinct is correct — but for LLM serving, it's necessary and not sufficient. Because LLM inference has this layered structure where the failure can hide at any of five layers, and the symptom at the top looks the same regardless of which layer is actually broken.
+
+Jenny: Five layers? Walk me through that.
+
+Alex: Top is your API gateway — QPS, status codes, request and response sizes, TTFB. That's your Datadog or Cloudflare layer. Below that is the engine itself — vLLM, TensorRT-LLM, whatever — and that's where you get the metrics that are actually unique to LLMs: P50/P90/P99 TTFT, time-between-tokens, queue depth, batch size, KV cache utilization, prefix-cache hit rate.
+
+Jenny: So TTFT is time-to-first-token, TBT is time-between-tokens. Those replace your normal request latency.
+
+Alex: They augment it. Because a request isn't atomic anymore — it's a stream. A user might get their first token in 200 ms and then wait three seconds between tokens because the batch got crowded. Average latency tells you nothing.
+
+Jenny: Got it. What's below the engine?
+
+Alex: GPU layer. SM activity, HBM bandwidth utilization, NVLink and PCIe traffic, GPU memory, temperature. That's DCGM exporter feeding Prometheus. Then host metrics — CPU, memory, network, disk — your usual node_exporter stuff. And finally cluster — replica count, autoscaling events, pod restarts, image pull failures. Kube-state-metrics.
+
+Jenny: Okay so it's basically the standard observability stack with two LLM-specific layers grafted in: the engine metrics and the GPU metrics.
+
+Alex: Exactly. And if you don't have all five, you will spend three hours on an incident chasing the wrong layer. I've seen teams page on P99 latency, blame the engine, restart pods — and the actual problem was a noisy neighbor saturating PCIe.
+
+Jenny: Okay let me push on something. You mentioned P50, P90, P99 a bunch. Why do we keep hammering on percentiles instead of just averaging?
+
+Alex: Because LLM latency distributions are violently right-skewed. You'll have an average TTFT of 200 milliseconds and a P99 of eight seconds. The mean is a lie. It hides the long tail where your actual users are suffering.
+
+Jenny: Eight seconds versus two hundred milliseconds. That's a 40x gap.
+
+Alex: And that 1% is not random — it's correlated with high-value users, long prompts, prefix-cache misses. The exact users you cannot afford to lose. So the rule is: always P50, P90, P95, P99 — never just mean. Per-endpoint and per-model. SLOs live at P95 or P99. That's where alerts fire.
+
+Jenny: Okay, so that's what to dashboard. Now what about what to *alert* on. Because you don't page someone at 3 AM for a P99 wobble.
+
+Alex: Right, and this is where I want to introduce the most important concept in this whole episode. Queue depth.
+
+Jenny: Queue depth, like pending requests waiting to enter a batch?
+
+Alex: Pending requests, or pending tokens — depending on the engine. And here's the thing: latency is a lagging metric. By the time your P99 spikes, you're already shedding requests, users are already angry, and your autoscaler is reacting to a fire that already happened.
+
+Jenny: Hmm. So queue depth is the leading indicator.
+
+Alex: Queue depth grows before latency does. It's the smoke alarm. Latency is the actual fire. If you autoscale on latency, you're scaling on the symptom — and given that GPU cold starts take one to five minutes, you're already underwater.
+
+Jenny: Wait, why are cold starts that slow? On EC2 we measure cold starts in tens of seconds.
+
+Alex: Because an LLM cold start isn't just "boot a VM." It's GPU procurement — which, depending on instance type, can be the slow part — then image pull for a multi-gigabyte container, then loading 70 to 400 gigabytes of weights into HBM, then engine warmup which compiles CUDA graphs and primes caches. End to end, one to five minutes is normal.
+
+Jenny: Oh. So if I'm autoscaling on P99 latency and my cold start is three minutes, I'm guaranteed to violate SLO during every scale-up event.
+
+Alex: Every single one. That's why queue depth matters. You set a warning alert on queue depth so autoscaling has lead time, and you set the page-someone alert on the actual SLO violation. Two thresholds, two purposes.
+
+Jenny: Okay that makes total sense. So what does the alerting hierarchy actually look like in practice?
+
+Alex: Four buckets. SLO burn rate on TTFT P99, TBT P99, and error rate — and you want multi-window multi-burn-rate alerting from the Google SRE book. That catches both fast-burning incidents and slow-burning regressions. Then queue saturation — pending tokens above a threshold for more than a minute. Then replica health — pod restarts, failed warmups, GPU thermal throttling. And then the silent killer.
+
+Jenny: Which is?
+
+Alex: Quality regressions from automated evals.
+
+Jenny: Oh, interesting. So you're saying the model itself can degrade and your latency dashboards will all be green.
+
+Alex: Green across the board. Latency fine, error rate fine, GPU temperature fine — and your model is hallucinating 30% more than it was yesterday because someone shipped a quantization change. Eval failures need to wire into the same on-call surface as latency. They are equally a production incident.
+
+Jenny: That's a really different framing from a normal service. We never had to alert on "is the service still smart."
+
+Alex: Welcome to LLM serving. Which brings us perfectly to deployment patterns — because if quality can silently regress, how you ship changes matters enormously.
+
+Jenny: Right. So at AWS we'd use blue-green for most stateless services. Stand up green, flip the load balancer, done.
+
+Alex: Blue-green is the wrong default for LLM serving. Want to guess why?
+
+Jenny: ...because you'd be doubling your GPU footprint during the swap, and GPUs are expensive.
+
+Alex: Exactly. You can't just casually spin up a parallel fleet of H100s for an hour. So the default for LLM serving is canary. Four-step: 1%, 10%, 50%, 100%. You watch SLO at each step. Cheaper than blue-green, and crucially — quality regressions show up in evals against the canary traffic before you hit full rollout.
+
+Jenny: But canary alone doesn't catch the silent quality issue if the eval is offline, right?
+
+Alex: Correct. Which is why for model upgrades specifically, the safe pattern is shadow plus canary. Shadow first — mirror real production requests to the new version, discard the responses, compare quality and latency at full production load. Then canary for the actual cutover.
+
+Jenny: So shadow validates, canary deploys.
+
+Alex: Right. Anthropic, OpenAI, all the major hosted-API providers use variants of this. Shadow lets you A/B the new model against the old one on real traffic without any user impact. Then canary handles the capacity cutover safely.
+
+Jenny: That's elegant. Shadow is the quality gate, canary is the capacity gate, and they compose.
+
+Alex: Exactly. And blue-green still has its place — small stateless services, control plane stuff — but for the actual model serving path, shadow-plus-canary is the standard.
+
+Jenny: Okay, this has been really clarifying. Where do we go from here?
+
+Alex: Next episode, we're going to zoom into one specific deployment hazard that we've kind of skirted around — multi-tenancy. Because once you're serving multiple customers off the same GPU fleet, you've got a whole new class of problems: per-tenant cache scoping, authoritative adapter selection, tool execution sandboxing.
+
+Jenny: Things that don't exist in single-tenant land.
+
+Alex: And things that, if you get them wrong, leak data across customers. SOC 2, HIPAA, data residency — all the compliance stuff your enterprise customers will absolutely ask about — it all lives downstream of getting tenant isolation right.
+
+Jenny: So observability tells you *what's* happening, deployment patterns control *how change rolls out*, and multi-tenancy is *who's allowed to see what*.
+
+Alex: That's the trilogy. And once you've got those three nailed, you're actually ready to talk about scale — the Llama 3 paper number that haunts me, which is roughly one GPU failure per fifty thousand GPU-hours. On a thousand-GPU fleet, that's three or four incidents a week. Active-active isn't a nice-to-have, it's mandatory.
+
+Jenny: Three failures a week on a thousand GPUs. That's a different operational reality.
+
+Alex: That's the reality. And we'll get into how the big providers actually structure their fleets to absorb that — multi-cloud bin packing, neocloud arbitrage, reserved capacity layering. But that's next time.
+
+Jenny: Looking forward to it. Thanks Alex.
+
+Alex: Thanks Jenny.

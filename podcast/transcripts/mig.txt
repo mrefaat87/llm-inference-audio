@@ -1,0 +1,125 @@
+Alex: So Jenny, imagine you've got a brand new H100 sitting in your data center. 132 streaming multiprocessors, 80 gigs of HBM, the whole beast. And someone walks up and says, "Hey, I want to run a quantized 7B model on it."
+
+Jenny: Okay, and a quantized 7B is what, like 4 gigs of weights?
+
+Alex: About that. Maybe uses a tenth of the SMs at peak. So you're sitting there with this Ferrari, and someone wants to drive it to the grocery store.
+
+Jenny: Right, so the obvious answer is — put more workloads on it. That's just bin packing. We do this on EC2 every day.
+
+Alex: That's exactly the instinct. And that's where it gets interesting. Because your first thought is, "I'll just run seven processes on the GPU. CUDA supports it. Done."
+
+Jenny: Yeah, why not? What breaks?
+
+Alex: Everything that makes performance predictable breaks. Those seven processes are all sharing the L2 cache — that's a single 50 megabyte pool on the chip. They're all hammering the same HBM controllers. They're all going through the same hardware scheduler that decides which warp runs on which SM next.
+
+Jenny: Oh. So it's the noisy neighbor problem, but at the silicon level.
+
+Alex: At the silicon level, exactly. And worse than the EC2 version, because on EC2 at least the hypervisor gives you some scheduling fairness. On a raw GPU with multiple processes, if tenant A suddenly does a big matmul, tenant B's latency spikes. Their tokens-per-second just falls off a cliff. There's no QoS.
+
+Jenny: And for inference that's a killer because you're selling p99 latency, not average throughput.
+
+Alex: That's the whole game. So NVIDIA looked at this and said, okay, what if we partitioned the GPU itself. Hardware-enforced. Not a software abstraction on top, but actual silicon-level isolation. That's MIG. Multi-Instance GPU.
+
+Jenny: Hardware-enforced. So this is more like... carving the chip into separate chips?
+
+Alex: That's the right mental model. On an H100 you can split it into up to seven instances. Each instance gets its own dedicated slice of SMs, its own dedicated slice of L2 cache, its own dedicated HBM channels and capacity. They cannot interfere with each other. Period.
+
+Jenny: Wait, dedicated L2 slice? I thought L2 was a unified pool.
+
+Alex: It is physically one structure, but the chip has the ability to partition it — way-partitioning, basically. Each MIG instance only sees its slice. Same with the memory controllers. Each instance gets a fixed fraction of HBM bandwidth.
+
+Jenny: So this is closer to EC2 dedicated hosts than to containers.
+
+Alex: That's the cleanest analogy I've heard. It's not cgroups for GPUs — cgroups would be soft limits. This is more like, you bought a 96-core box and you're carving it into seven dedicated-host slices, and each slice gets guaranteed cores and guaranteed memory bandwidth.
+
+Jenny: Okay so what are the actual slice sizes? Are they arbitrary?
+
+Alex: No, and this is one of the limitations. They come in fixed profiles. On H100 you've got 1g.10gb — that's roughly 14 SMs and 10 gigs of HBM. Then 2g.20gb, 3g.40gb, and 7g.80gb which is just the whole GPU.
+
+Jenny: So they double, basically.
+
+Alex: Roughly. And the reason they're fixed is because of how the partitioning hardware works. The GPU has discrete partition boundaries — you can't say "give me 17 SMs." You pick from a menu.
+
+Jenny: That feels like a constraint that's going to bite somebody.
+
+Alex: It does. We'll come back to that. But for the workloads MIG is designed for, the menu is fine. So 1g.10gb — that's your embedding model, your small classifier, your tiny BERT thing. 2g.20gb is the sweet spot for a quantized 7B. 3g.40gb gets you into mid-size models, like a 13B in FP16.
+
+Jenny: And how do you actually configure this? Is this a runtime thing?
+
+Alex: No, that's another important detail. You configure MIG at the driver level with `nvidia-smi mig`. It's a static partitioning. You decide at provisioning time: this H100 is going to be seven 1g.10gb slices, or it's three 2g.20gb plus a 1g.10gb, whatever combination fits.
+
+Jenny: Static. Okay. So this is not elastic.
+
+Alex: Not elastic. Once you've sliced it, you've sliced it. To reconfigure, you tear down all the workloads, rerun the MIG config, and bring things back up.
+
+Jenny: That's a big deal for capacity planning. You're committing to a shape.
+
+Alex: You are. But here's where it gets nice — once you've partitioned, each instance shows up to the operating system as its own CUDA device. From the application's perspective, it's just talking to a GPU. Doesn't know it's a slice.
+
+Jenny: Oh that's clean. And Kubernetes?
+
+Alex: NVIDIA's device plugin and the GPU Operator know about MIG. They advertise each instance as a schedulable resource. So your pod spec says "I need one 2g.20gb instance," and the scheduler treats it like any other resource. To the orchestration layer it just looks like you suddenly have seven GPUs instead of one.
+
+Jenny: That's the EC2-flavored-instance-types pattern. You expose a discrete catalog of shapes and let the scheduler bin-pack.
+
+Alex: Exactly that. So when does this actually win? The killer use case is multi-tenant small-model serving. You've got seven different customers, each running a quantized 7B. Without MIG, you either give each one their own H100 — wildly wasteful — or you co-locate them and accept noisy-neighbor latency variance.
+
+Jenny: Or you run them on smaller GPUs, but then you're managing a fleet of A10s and L4s and whatever.
+
+Alex: Right, and the inventory problem gets ugly fast. With MIG, every customer gets a real, isolated GPU's worth of compute and memory, hardware-enforced. p99 stays predictable. One H100 serves seven tenants.
+
+Jenny: What about ASR? Speech recognition?
+
+Alex: Great fit. Whisper-large fits comfortably in 2g.20gb, and ASR has very predictable per-stream load — you know roughly how much audio you're processing per second. So you can size the slice exactly to the workload.
+
+Jenny: Dev environments too, I'd guess.
+
+Alex: Huge for dev and CI. Instead of every engineer fighting over a pool of full GPUs, you give each one a 1g.10gb slice. They get isolation, they can't crash each other's jobs, and you get way more developers per dollar.
+
+Jenny: Okay, so where does this fall apart? Where's the bite?
+
+Alex: Two big places. First — frontier LLMs. Anything over 30B parameters wants the whole GPU and probably wants more than one. MIG just reduces your available resources, it doesn't help you. If you're serving a 70B model, MIG is a tool from the wrong toolbox.
+
+Jenny: And the second?
+
+Alex: Tensor parallelism. This is the one that surprises people. MIG instances cannot talk to each other over NVLink.
+
+Jenny: Wait — they're on the same physical chip and they can't use NVLink between themselves?
+
+Alex: Correct. NVLink is for cross-GPU communication. Within a single GPU, the partitions are isolated by design — that's the whole point. So if you have a model that needs to be sharded across two MIG slices and do all-reduces between them, you can't. The isolation that makes MIG safe also makes TP across slices impossible.
+
+Jenny: So MIG and tensor parallelism are mutually exclusive.
+
+Alex: On the same GPU, yes. If you need TP, you need the whole device, not slices of it.
+
+Jenny: And the third thing — bursty load.
+
+Alex: Bursty load is the real Achilles heel. Because the slices are statically sized, if tenant A is idle and tenant B is getting hammered, B can't borrow A's capacity. The hardware just refuses. So if your workload has spikes, you're either over-provisioning every slice for peak, or you're dropping requests.
+
+Jenny: For bursty workloads, you'd rather have continuous batching across the whole GPU.
+
+Alex: Exactly. Continuous batching on the full chip lets the scheduler pack requests dynamically — peak demand from one user uses the headroom from another. MIG gives you isolation; continuous batching gives you statistical multiplexing. They're philosophically opposite.
+
+Jenny: That's a really nice framing. Isolation versus multiplexing. You pick one.
+
+Alex: You pick one per GPU. Some shops actually run mixed fleets — MIG-partitioned H100s for the multi-tenant small-model tier, and full unpartitioned H100s for the frontier serving tier. Different tools for different traffic patterns.
+
+Jenny: Okay so where does this lead us? What's next?
+
+Alex: Well, MIG lives at the silicon level, but everything we just talked about — isolation, partitioning, slot shapes — those concepts also exist at the rack level. NVIDIA's roadmap is pushing toward NVL72 and NVL144, where 72 or 144 GPUs are all wired up as one giant NVLink domain. And that flips the question on its head.
+
+Jenny: How so?
+
+Alex: Instead of asking "how do I carve one GPU into seven?", you're asking "how do I treat 72 GPUs as one giant logical accelerator?" Same question of partitioning, but at a totally different scale.
+
+Jenny: From sub-chip to super-chip.
+
+Alex: Exactly. And then the next layer up is the on-package CPU story — Grace, Vera — where NVLink-C2C connects the CPU to the GPU at 900 gigs a second, and suddenly host RAM becomes a real tier in the memory hierarchy. KV cache spillover, tiered storage, the whole thing.
+
+Jenny: So we go from "slice the chip" to "fuse the rack" to "include the host."
+
+Alex: That's the arc. The hardware roadmap is basically a series of decisions about what counts as one machine.
+
+Jenny: I love that. Alright, let's pick up there next time.
+
+Alex: See you then.

@@ -1,0 +1,101 @@
+Alex: So Jenny, I want to start with a number that always blows people's minds. On a modern GPU, reading a value from HBM takes roughly the same time as doing a hundred floating point operations. Maybe more.
+
+Jenny: Wait, a hundred? So the memory access is the expensive part, not the math?
+
+Alex: Exactly. And once you internalize that, the entire field of inference optimization kind of clicks into focus. Because most of what an LLM does between matrix multiplies — layer norm, RoPE, residual adds — those are arithmetically trivial. A handful of multiplies and adds per element.
+
+Jenny: Right, those should be basically free.
+
+Alex: They should be. But here's the thing. Every CUDA kernel you launch has a fixed lifecycle. It reads its inputs from HBM into registers, it does the compute, it writes the output back to HBM. Then the next kernel comes along and reads what you just wrote. So if you've got four trivial ops in a row, you're doing four full HBM round trips for what should be milliseconds of arithmetic.
+
+Jenny: Oh. Oh, that's brutal. So the data is just bouncing back and forth between HBM and the SMs even though it could've stayed on chip the whole time?
+
+Alex: That's exactly it. Picture a residual block. The math is y equals x plus LayerNorm of MLP of x. Conceptually simple. But naively, that's at least four kernels — MLP up-projection, MLP down-projection, LayerNorm, and the add. Four round trips for the residual stream alone.
+
+Jenny: Okay, this is going to sound like a weird analogy, but it reminds me of when we have a microservice chain where each hop serializes JSON, sends it over the network, the next service deserializes it, does almost nothing, then re-serializes and sends it on. The actual work is tiny. The transport is what kills you.
+
+Alex: That's actually a perfect analogy. And the fix in both worlds is the same — you collapse the chain. Instead of four separate services, you make one binary that does the whole thing in-process. In GPU land, that's kernel fusion. You write one kernel that does the MLP, the LayerNorm, and the add, and the intermediate values just stay in registers or shared memory. The residual stream touches HBM exactly once.
+
+Jenny: One round trip instead of four. And these intermediates — they live in SRAM on the chip itself?
+
+Alex: Registers first, then shared memory if they don't fit in registers. Both are orders of magnitude faster than HBM. We're talking single-digit cycle latency versus hundreds of cycles. So when you fuse, you're not just saving bandwidth, you're collapsing the entire latency stack.
+
+Jenny: Okay so fusion is obviously the right answer. Why isn't every kernel just fused with everything else?
+
+Alex: Because writing fused kernels by hand is brutal engineering work. And there are actually three different flavors of fusion, each with its own tradeoffs. Want me to walk through them?
+
+Jenny: Yeah, do it.
+
+Alex: First flavor — hand-written fused kernels. This is custom CUDA, written by experts who know exactly what op pattern they're targeting. FlashAttention is the famous one. Marlin for quantized matmuls. Fused RoPE plus attention. These are works of art, basically.
+
+Jenny: And the win there is what — the absolute fastest possible code for that specific pattern?
+
+Alex: Right. You can't beat hand-tuned for the op you're targeting. But you've spent weeks of senior engineering time on one kernel. It doesn't generalize. Every new op pattern needs another six weeks of someone's life.
+
+Jenny: That doesn't scale across a whole model with hundreds of distinct op chains.
+
+Alex: It really doesn't. Which is why the second flavor exists — compiler fusion. This is what torch.compile does, what Triton enables. You trace the model, the compiler identifies fusible patterns, and it emits a single generated kernel automatically.
+
+Jenny: So now you don't need a human writing CUDA. The compiler figures out which ops can collapse.
+
+Alex: Exactly. The win is breadth — you get fusion across your entire model for free. The cost is that the compiler is conservative. It captures the easy wins — element-wise ops, simple reductions — but it can't beat a hand-tuned FlashAttention for the gnarly stuff.
+
+Jenny: So in practice you'd want both? Hand-tuned kernels for the hot spots, compiler fusion for everything else?
+
+Alex: That's exactly what production engines do. vLLM, SGLang, both of them use FlashAttention or FlashInfer for the attention kernel itself, and torch.compile for the surrounding glue — the LayerNorms, the RoPE rotations, the residuals. And that combination gets you a 10 to 25 percent decode speedup on top of an already-optimized engine, with basically no manual work.
+
+Jenny: That's a huge win for a free optimization. What's the third flavor?
+
+Alex: CUDA Graphs. And I'll be honest, this one isn't strictly fusion — it's more of a sibling. The problem CUDA Graphs solves is launch overhead. Every time the host CPU tells the GPU to run a kernel, there's a few microseconds of overhead. For a big training kernel, that's noise. For a tiny decode step where you're running fifty kernels per token, those microseconds add up to a real fraction of your latency.
+
+Jenny: Ah. So CUDA Graphs is — you pre-record the sequence of launches and replay it as one unit?
+
+Alex: Exactly. You record the DAG once, then the GPU replays it with no host involvement. It's almost exactly like batching API calls — instead of fifty round trips to the kernel launcher, you do one.
+
+Jenny: But it doesn't reduce HBM traffic. The kernels still do their individual round trips.
+
+Alex: Correct. CUDA Graphs eliminates launch overhead, fusion eliminates HBM traffic. They're complementary. You usually want both.
+
+Jenny: Okay, this all sounds great. But you mentioned torch.compile recompiles when shapes change. That feels like it'd be a nightmare for a serving system where every request has a different sequence length.
+
+Alex: You just identified the single biggest gotcha. Compiled kernels are specialized for specific tensor shapes. Change the batch size, change the sequence length, you trigger a recompile. And compilation takes seconds to minutes.
+
+Jenny: Seconds to minutes? That's an eternity for an inference request.
+
+Alex: Right. So engines handle this by capturing graphs for a finite set of warmup shapes — say, batch sizes 1, 2, 4, 8, 16, 32 — and then for anything that doesn't match, they fall back to eager mode.
+
+Jenny: That's like having a pre-warmed pool of Lambda containers for the common request sizes, and cold-starting for the weird ones.
+
+Alex: That's a really good way to think about it. And you accept that the cold-start path is slower because the alternative is recompiling on every request.
+
+Jenny: Okay, what else breaks?
+
+Alex: Two more things. Profiling gets way harder. When your hot spot is a five-op fused kernel, you can't tell which of the constituent ops is actually the bottleneck. You have to disable fusion to find out, which changes the performance characteristics, so now you're profiling a different program.
+
+Jenny: That's the classic observability problem with any kind of inlining.
+
+Alex: Exactly the same issue. And the third one — numerical drift. Fused kernels often re-order operations for performance reasons. Floating point math isn't associative, so the reordered version produces slightly different bits than the eager-mode reference.
+
+Jenny: How much drift are we talking?
+
+Alex: For most use cases, totally invisible. Last few bits of the mantissa. But if you've got an eval harness that expects bit-exact output to compare against a reference, suddenly your numbers are off and you're spending a day figuring out it's the fusion that did it.
+
+Jenny: That's a really sneaky failure mode. Okay so the takeaway here — fusion is basically the most consistent source of inference speedups, but it's a tradeoff. You're trading flexibility, debuggability, and bit-exactness for speed.
+
+Alex: That's exactly the tradeoff. And it's the tradeoff every serving engine is making constantly.
+
+Jenny: So where does this go next? What should the listener be thinking about?
+
+Alex: So we've talked about how to make individual kernels fast and how to chain them efficiently. The next layer up is — okay, you've got a single GPU running blazing fast. Now what about when your model doesn't fit on one GPU? Or when you need to serve a thousand concurrent requests?
+
+Jenny: Right, fusion is a single-GPU optimization. The next problem is multi-GPU coordination.
+
+Alex: And that opens up a whole other can of worms. Tensor parallelism, pipeline parallelism, expert parallelism for MoE models. The communication primitives — NCCL, NVLink, the interconnect topology. Suddenly the bottleneck isn't HBM round trips on one chip, it's all-reduces across eight chips, or activations being shipped over InfiniBand between nodes.
+
+Jenny: And I'm guessing the same lesson applies — minimize the round trips, keep data local where you can.
+
+Alex: Exactly the same lesson, just at a different scale of the memory hierarchy. Registers, SRAM, HBM, NVLink, InfiniBand — every layer is slower than the one above it, and every optimization is about keeping data as high in that pyramid as possible. That's actually the unifying theme of inference engineering.
+
+Jenny: That's a great frame. The whole field is one giant cache hierarchy problem.
+
+Alex: That's it. That's the whole game.

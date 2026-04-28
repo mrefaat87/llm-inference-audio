@@ -1,0 +1,77 @@
+Alex: So Jenny, you've spent years thinking about auto scaling at AWS. If I told you we were going to deploy an LLM service on Kubernetes with HPA, what's the first thing you'd reach for as a scaling signal?
+
+Jenny: Honestly? CPU utilization or maybe request rate. That's the muscle memory. Why, are you about to tell me both of those are wrong?
+
+Alex: Both of those are catastrophically wrong. And the reason is kind of beautiful once you see it. Let me start with the shape of the deployment, because the K8s part is actually the familiar part. You've got a control plane — API server, scheduler, controller manager — deciding what runs where. You've got worker nodes, except now they have GPUs. The only LLM-specific pieces are the NVIDIA Device Plugin advertising GPUs as schedulable resources, DCGM exporter shipping GPU metrics to Prometheus, and increasingly a controller layer above plain HPA — Dynamo, KAITO, things like that.
+
+Jenny: Okay so the skeleton is the same. It's the muscles that are different.
+
+Alex: Exactly. And the muscles are different because of a number that breaks every assumption you have about elasticity. Cold start on an LLM replica is one to five minutes.
+
+Jenny: Wait, one to five minutes? For what, the container?
+
+Alex: For everything. You provision the GPU instance, you pull the image — which contains tens of gigabytes of model weights — you load those weights from disk into VRAM, and then you warm up the inference engine. Compile CUDA graphs, prime the KV cache allocator, all of it. That whole chain is your cold start.
+
+Jenny: Oh that's brutal. So if I'm watching P95 latency and I scale up when it goes red, by the time my new replica is serving traffic, my SLO has been on fire for five minutes.
+
+Alex: You're already dead. Latency is a lagging indicator. By the time it fires you're in trouble. Which is exactly why you can't autoscale on it as your primary signal.
+
+Jenny: Okay so what's the leading indicator? In a normal web service I'd say request rate, but with LLMs that's misleading because requests are wildly different sizes, right? A two-token classification call and a four-thousand-token essay both count as one request.
+
+Alex: Right, request count is meaningless. The signal you actually want is queue depth. Or pending tokens, if your engine exposes that. It's straight queueing theory — the queue grows before latency does, because the queue *is* the leading edge of latency. Watch the queue and you have time to react before TTFT goes south.
+
+Jenny: That makes sense. The queue is the early warning system, latency is the smoke alarm that goes off after the kitchen's already on fire.
+
+Alex: Perfect framing. And there's a third signal that's specific to LLM serving and surprises everyone — KV cache utilization.
+
+Jenny: Why? If I have GPU compute headroom, why does it matter that the cache is full?
+
+Alex: Because admission to the engine isn't gated by compute, it's gated by cache. Every active sequence reserves KV slots. When the cache is full, new sequences just can't be admitted, even if your GPU is sitting at thirty percent. So you can have a perfectly cromulent looking GPU that is functionally refusing work.
+
+Jenny: Oh that's wild. So you can be compute-idle and capacity-saturated at the same time. That's a really weird failure mode for someone coming from CPU-bound services.
+
+Alex: It is. And it's exactly why nvidia-smi GPU utilization is a trap. It's a binary-ish signal — it'll happily report a hundred percent on a lightly loaded system because it just measures whether any kernel was running in the sample window. Useless for autoscaling decisions.
+
+Jenny: Okay so I throw away CPU and raw GPU utilization. I scale on queue depth, with KV cache utilization as a secondary signal, and I keep latency as a guardrail. Got it.
+
+Alex: Now let's talk about the knobs. There are five that matter, and each one has a default trap. Min replicas — the floor of your fleet. Trap is setting it to zero in production. Max replicas — the ceiling, protects you from runaway scaling under attack. Trap is setting it equal to your reservation, because then you can never burst. Autoscaling window — how long the metric has to exceed threshold before you actually scale. Too short and you flap. Too long and you violate SLO during ramp. Scale-down delay — how long after load drops before you remove replicas. And concurrency target — what metric you're actually targeting.
+
+Jenny: Hang on, scale-down delay. In a normal service I'd want that pretty short — why pay for idle capacity? But you're going to tell me it's different here.
+
+Alex: Very different. If you scale down too quickly, you kill replicas that have warm KV caches and warm engines. Caches that took real work to populate. Then traffic comes back thirty seconds later and you're paying that one-to-five minute cold start tax all over again. The cache hadn't paid off yet.
+
+Jenny: Right, you have to amortize the warmup. So scale-down delay is essentially "give the cache time to be worth what it cost to build."
+
+Alex: Exactly. Now this brings us to the other place where LLM serving completely breaks the load balancer. You can't round-robin LLM traffic.
+
+Jenny: Why not? Round-robin is the simplest thing in the world.
+
+Alex: Because of the cache. Imagine you have a multi-turn conversation. Turn one populates a KV cache on replica A. Round-robin sends turn two to replica B, which has nothing cached, so it has to recompute the entire prefix. You just paid for the same prefill twice. At scale this is pathological — your cache hit rate collapses, your effective throughput collapses, and you blame the model.
+
+Jenny: Oh god. So the load balancer needs to be cache-aware. That's basically session affinity, but driven by what's actually in memory on the replica.
+
+Alex: That's the whole game. Production routers — Dynamo, the vLLM production stack, SGLang's sgl-router — they hash on the prompt prefix and prefer the replica that already has it cached. They spill to other replicas only when the preferred one is over some utilization threshold. And there's a parallel version for LoRA adapters — hash on adapter ID, prefer the replica that already has the adapter loaded, because cold-loading an adapter costs you another hundred-plus milliseconds.
+
+Jenny: So a real production router is making a joint decision — prefix cache, adapter, session — pick the replica that maximizes the combined cache hit score.
+
+Alex: That's literally the algorithm. And without that layer, multi-tenant LoRA serving and prefix-cached deployments just thrash. Every request becomes a worst-case request.
+
+Jenny: Okay last thing I want to push on. Scale-to-zero. AWS Lambda made this normal for stateless workloads. Does it work for LLM serving?
+
+Alex: Sometimes. Never for a latency-critical API. The math is brutal — you save on idle GPU cost, which is real, an H100 is north of thirty bucks an hour just sitting there. But the first user pays the full one-to-five minute cold start. So scale-to-zero is reasonable for dev environments, for batch jobs, for business-hours-only internal agents — workloads with long genuine quiet periods where the first user can wait, or you can warm with a synthetic probe before real traffic hits.
+
+Jenny: But for a 24/7 customer-facing API, min replicas has to be at least one and you eat the floor cost.
+
+Alex: You eat the floor cost. There's no clever trick. The cold start is a physical constraint of moving tens of gigabytes of weights into VRAM and JIT-compiling kernels.
+
+Jenny: So zooming out — the whole thing is shaped by the fact that an LLM replica is enormously expensive to create and enormously valuable once warm. Every autoscaling decision flows from that one fact.
+
+Alex: That is the whole chapter in one sentence. Hold onto that, because it sets up everything coming next. We've talked about scaling within one cluster, but the next layer up is multi-cloud — you literally can't get enough flagship GPUs from any single provider, so you end up bin-packing replicas across hyperscalers, neoclouds, and reserved capacity. And once you're doing that, failure rates start to bite. The Llama 3 paper reported one GPU failure per fifty thousand GPU-hours — sounds rare until you do the math on a thousand-GPU fleet and realize you're seeing three or four incidents a week.
+
+Jenny: Which means active-active isn't a nice-to-have, it's mandatory. And then on top of that you've got SOC 2, HIPAA, data residency — the stuff customers actually put in contracts.
+
+Alex: And tenant isolation that's specific to LLM serving — per-tenant cache scoping so prompts don't leak across customers, authoritative adapter selection so a tenant can't accidentally invoke someone else's fine-tune, sandboxed tool execution. None of these problems exist in a stateless web service. They all emerge from the cache and the model being shared resources.
+
+Jenny: So next episode we go from "how do I scale one cluster" to "how do I run this safely across clouds for paying customers." That's the real production frontier.
+
+Alex: That's where the interesting scars live. We'll see you there.

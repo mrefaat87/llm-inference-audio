@@ -1,99 +1,113 @@
-Alex: So Jenny, let me ask you something. You're running an auto scaling group, traffic is spiking, and you know — you can just feel it — that some of these requests are going to time out no matter what. What do you do?
+Alex: So Jenny, you know how at AWS, the Network Load Balancer doesn't just blindly accept every TCP connection that comes in?
 
-Jenny: I mean, the worst thing you can do is accept them all and let them pile up. You reject at the load balancer. You send back a 503, you set a Retry-After header, and you let the client figure it out. Way better than burning compute on requests that are just going to fail anyway.
+Jenny: Right, there's a connection limit. If a target group is saturated, new connections get rejected at the LB rather than queued into oblivion.
 
-Alex: Exactly. And that instinct — that "reject early" instinct — is the single most important idea in LLM inference scheduling. It's called SLO-aware admission control, and the pattern that really crystallized it comes from a system called Mooncake.
+Alex: Exactly. Now imagine you're running an LLM inference service and a request comes in with a 10,000-token prompt asking for 500 tokens of output. Should you accept it?
 
-Jenny: Okay, but hang on. With a normal web service, I know pretty quickly whether I can handle a request. I check my connection count, maybe my CPU, and I say yes or no. With an LLM, how do you even know if you can serve a request before you start generating?
+Jenny: I mean... the obvious answer is yes? That's the job.
 
-Alex: That's the key question, and it's what makes this so much harder than traditional load balancing. You have to estimate the total time for the request before you commit to it. And that total time has three components. There's queue wait — how long until the request even starts processing. There's prefill time — that's the time to digest the input prompt. And then there's decode time — the time to actually generate the output tokens one by one.
+Alex: But here's the thing. You have an SLO — say, two seconds to first token, ten seconds total. You can actually do the math before accepting. Prefill throughput is maybe 5,000 tokens per second, so that prompt costs you two seconds just to ingest. Decode runs at 50 tokens per second, so 500 output tokens is another ten seconds. Plus whatever the queue wait is.
 
-Jenny: Okay, prefill time I can estimate pretty easily, right? I know how many tokens are in the prompt, I know my prefill throughput — it's just division.
+Jenny: So you're already over budget before you even start.
 
-Alex: Right, that's the easy part. If someone sends you a ten-thousand-token prompt and your prefill throughput is five thousand tokens per second, that's two seconds. Straightforward. Queue wait is also estimable — it's a function of how deep your queue is and your current throughput. But decode time — that's where things get really tricky. Because to estimate decode time, you need to predict how many tokens the model is going to generate. And you don't know that yet. The model hasn't started.
+Alex: Right. And the Mooncake paper made this point really crisply — if you accept that request, you spend GPU cycles on it, you partially generate, and then you miss the SLO anyway. The user gets nothing useful, and you've burned compute that could've served someone you could actually finish in time.
 
-Jenny: So you're doing capacity planning for a request before you've committed resources to it. You're saying, "based on what I think this request will cost me, can I finish it within the SLO?"
+Jenny: So you reject upfront. 503, Retry-After. That's literally admission control on an NLB.
 
-Alex: Exactly. And if your estimate says the total time exceeds the SLO deadline, you reject immediately. 503, Retry-After, done. You never burn a single GPU cycle on tokens that won't reach the user.
+Alex: That's literally admission control on an NLB. The twist is that "can I serve this?" isn't a static health check — it depends on the specific request. A 200-token prompt and a 10,000-token prompt have wildly different costs.
 
-Jenny: That's so much better than the alternative. I've seen this in infrastructure — you accept the request, you start processing it, you're halfway through, and then you realize you're going to blow the deadline. Now you've wasted compute and the user still gets a failure. It's the worst of both worlds.
+Jenny: Okay but — how do you know how many output tokens it's going to generate? That's the whole point of an LLM. The output length is the unknown.
 
-Alex: It's exactly the worst of both worlds. And this is where we need to talk about a metric that I think is going to click for you immediately. It's called goodput.
+Alex: That is the hard part. There's a whole subfield on output length prediction — small classifier models, prompt heuristics, sometimes you just bucket by request type. It's noisy. But even a rough estimate is better than nothing, because the alternative is admitting blind and discovering halfway through decode that you're toast.
 
-Jenny: Goodput — as opposed to just throughput?
+Jenny: Got it. So this changes how you measure the system, doesn't it? Throughput alone is a lie.
 
-Alex: Right. Throughput is tokens per second. It's how fast your system is churning through work. But goodput is the number of requests that actually meet their SLO divided by the total requests attempted. A system can have incredible throughput — say a hundred requests per second — but if only sixty of those finish within the SLO, your goodput is sixty. You've wasted forty percent of your GPU compute on work that didn't count.
+Alex: Exactly the right instinct. The metric that matters is goodput — requests that meet SLO divided by requests attempted. You can have a system pumping a hundred requests per second of pure throughput, but if forty percent miss SLO, your real goodput is sixty.
 
-Jenny: Oh, that's like the difference between instances launched and instances that actually pass health checks and start serving traffic. I don't care how many instances I launched if half of them are failing health checks.
+Jenny: Which is the same trap as measuring an API by raw RPS instead of RPS-under-latency-budget.
 
-Alex: That's a great analogy. And once you start optimizing for goodput instead of raw throughput, your whole scheduling philosophy changes. Because sometimes the right move is counterintuitive.
+Alex: Same trap. And once you optimize for goodput instead of throughput, a bunch of counterintuitive things become correct. Like — sometimes the right move is to *delay* a new request. Make its time-to-first-token worse on purpose.
 
-Jenny: Like what?
+Jenny: Wait, why? That sounds like you're hurting the new request.
 
-Alex: Like deliberately delaying a new request. Increasing its time to first token. Because if you start that request right now, it might cause memory pressure that degrades the token-by-token latency for five other requests that are already in flight. Those five requests miss their SLO, and now your goodput tanks. But if you just wait — let the in-flight requests finish — then you serve all six within SLO.
+Alex: You are. But if admitting it right now causes the in-flight requests to slow their per-token cadence — their TBT, time-between-tokens — you've just blown the SLO for everybody currently streaming. Better to make one request wait an extra 200 milliseconds than to cause ten in-flight users to start stuttering.
 
-Jenny: So you're saying it's better to have one request wait a bit at the door than to let it in and have it crash the party for everyone already inside.
+Jenny: Oh, that's the same logic as token bucket shaping. You sometimes hold a packet to protect the flow already in progress.
 
-Alex: Exactly. It's like — you know how in auto scaling, sometimes the right move is to not scale up immediately? Because the new instances need warm-up time, and during warm-up they might actually steal resources from existing instances through shared infrastructure?
+Alex: Same logic. Now — what happens when the system is genuinely overloaded and you have to evict somebody from GPU memory? Because KV cache is finite, right?
 
-Jenny: Yeah, the thundering herd problem. You scale up too aggressively and everything gets worse. Okay, so we've got admission control deciding who gets in. But what about priority? Not every request is equal, right?
+Jenny: Right, KV cache lives in HBM, you've got a fixed pool. Somebody's getting kicked out.
 
-Alex: Not even close. And this is where weighted fair queuing comes in. You assign weights to priority tiers. So say you've got enterprise customers at weight ten, paid users at weight five, free users at weight one. Under normal load, everyone gets served. But under overload, each class gets bandwidth proportional to its weight.
+Alex: So you have a policy choice. vLLM's default is FCFS — last arrived gets evicted first. Simple, but really stupid in one specific case.
 
-Jenny: So free users get one-sixteenth of total capacity, not zero.
+Jenny: Which is?
 
-Alex: Exactly — one out of sixteen. And that distinction matters. It's not a hard cutoff. It's proportional degradation. The free tier gets squeezed, but it doesn't get completely starved.
+Alex: Imagine a request that's 99% done. It's been decoding for nine seconds, it's about to emit its last token. A new request shows up, memory pressure hits, FCFS says evict the new one. Fine. But flip it — what if the 99%-done one is the *last* arrived in some local window? You just threw away nine seconds of compute.
 
-Jenny: This maps directly to something I know. Tier zero — your critical traffic, your health checks, your enterprise clients — that's Reserved Instances. Guaranteed capacity, always available. Paid users are On-Demand. They get served reliably but they don't have an ironclad reservation. And free tier, batch jobs? That's Spot. First to be interrupted when capacity gets tight.
+Jenny: Oof. So you want least-progress-first instead?
 
-Alex: I love that mapping because it captures the economics too. With Spot, you're saying "I'll take whatever capacity is left over, and I accept that I might get interrupted." That's exactly the contract for best-effort inference traffic.
+Alex: That's one option — evict whoever generated the fewest tokens, because you waste the least work. Another is lowest-priority-first, which matters in multi-tenant. Another, if you trust your output-length predictor, is longest-remaining-first — evict the request that frees the most KV memory per kick.
 
-Jenny: Okay, but here's what I want to understand. Let's say you're under memory pressure. You've admitted too many requests — or your output length predictions were off — and now you need to evict something. Who gets kicked out?
+Jenny: And you'd pick between those based on whether you care more about fairness, compute efficiency, or memory pressure relief.
 
-Alex: So this is preemption policy, and there are several approaches, and they all have different tradeoffs. The default in vLLM is basically FCFS — first come, first served — which means last arrived gets evicted first. Simple, easy to implement.
+Alex: Exactly. None of them is universally right. SGLang actually went a step further — they predict future decode memory needs *before* admitting a request, so they don't end up in the admit-then-preempt cycle in the first place.
 
-Jenny: But that could be terrible, right? What if the last request to arrive is ninety-five percent done? You're about to evict a nearly complete request and throw away all that compute.
+Jenny: That's like capacity reservation. Don't accept the workload unless you've already reserved the headroom for it.
 
-Alex: Exactly. All those tokens you generated? Wasted. So a smarter approach is least-progress-first. You evict the request that has generated the fewest tokens so far. That minimizes wasted compute because you're throwing away the least work.
+Alex: Perfect analogy. TRT-LLM does something similar because their engines are compiled — they know exactly how much memory a given shape needs. vLLM V1 went the other direction: chunked prefill on by default, recompute-only preemption, no swap. They lean on doing prefill in small chunks so the scheduler has more decision points.
 
-Jenny: That makes sense. It's like killing the process that's used the least CPU time. You lose the least investment.
+Jenny: Okay let's talk priority. In a multi-tenant world, not every request is equal. How do you actually do tiers without starving the bottom?
 
-Alex: Right. But then there's another dimension — priority. In a multi-tenant system, maybe you should always evict the lowest priority tier first, regardless of progress. If a free-tier request is ninety percent done and an enterprise request needs memory, the free-tier request gets evicted.
+Alex: Weighted Fair Queuing. You assign weights — say Enterprise is 8, Paid-standard is 4, Free is 2, Anonymous is 1. Under overload, capacity gets divided proportionally. Anonymous still gets one-fifteenth of the system. Not zero.
 
-Jenny: Ouch. But that's the contract, right? That's the Spot Instance deal. You accepted interruptibility.
+Jenny: Which maps almost cleanly onto AWS capacity types. Reserved is your tier zero. On-Demand is the middle. Spot is best-effort, first to be reclaimed.
 
-Alex: Exactly. And there's one more clever approach — longest-remaining-first. If you can predict how many tokens a request still has to generate, you evict the one with the most work remaining. That frees the most memory per eviction because that request was going to consume the most resources going forward.
+Alex: That's exactly the mental model. And within a tier, you still need a queue discipline. Mostly that's FIFO, sometimes a priority queue sorted by predicted output length — shortest-job-first — or by deadline.
 
-Jenny: But that circles back to the output length prediction problem. You need to know how long each request is going to run, which is the hard problem we talked about at the beginning.
+Jenny: FIFO has the head-of-line blocking problem though, right? One huge prompt at the front stalls the whole tier.
 
-Alex: It all connects. Prediction quality is the foundation that everything else builds on. Better predictions mean better admission control, better scheduling, better preemption decisions. It all flows from the same place.
+Alex: Huge problem. A 50K-token prompt at the head of FIFO just sits there hogging prefill for ten seconds while everyone behind it waits. That's why production stacks layer it: WFQ across classes, priority queue within each class, then a token-budget admission gate before you even enter the engine's batch.
 
-Jenny: So how do the different inference engines handle this? Because I imagine they don't all take the same approach.
+Jenny: So three layers of scheduling decisions before the GPU sees the request.
 
-Alex: They really don't, and the differences are fascinating. vLLM V1 does priority-based FCFS with token budgets, and it defaults to chunked prefill — meaning it breaks up long prefills so they don't block decode steps. And when it needs to preempt, it recomputes rather than swapping to CPU memory. It just throws away the KV cache and recomputes it later.
+Alex: Three layers, and that's just within one replica. Then there's cluster-level routing, which has its own twist. You don't just want to pick the least-loaded replica.
 
-Jenny: Wait, recompute instead of swap? Why would you redo the work instead of saving it?
+Jenny: Why not? That's textbook load balancing.
 
-Alex: Because swapping to CPU memory is slow and unpredictable. Recomputing is actually faster in many cases, and it's simpler — no memory management complexity for swapped-out KV cache. It's a pragmatic tradeoff.
+Alex: Because of KV cache. If a replica already has the prefix of this conversation warm in HBM — the system prompt, the prior turns — sending the request to a "less loaded" replica means recomputing all of that from scratch. You'd torch your prefix-cache hit rate.
 
-Jenny: Huh. That's like choosing to re-provision an instance from scratch instead of hibernating it. Sometimes a fresh start is faster than restoring state.
+Jenny: Oh — that's session affinity. But the sticky key isn't the user, it's the prompt prefix.
 
-Alex: Great analogy. Now SGLang takes a different approach — predictive reservation. It estimates future decode memory needs before admitting a request. It uses something called a new-token ratio to reserve memory for tokens that haven't been generated yet. This prevents the "admit then preempt" cycle — you never let someone in if you think you'll have to kick them out.
+Alex: Exactly. Hash of the prefix tokens, or a radix-tree match score. Same idea applies to LoRA adapters — you want the request to land on a replica that already has the right adapter loaded, otherwise every request triggers a swap from CPU or SSD.
 
-Jenny: That's proactive capacity management. Don't admit the connection if you know you'll have to drop it.
+Jenny: And in multi-tenant LoRA, that swap cost would be... catastrophic.
 
-Alex: Exactly. TensorRT-LLM has a different advantage — because it compiles the model into an optimized engine, it knows exact memory requirements at compile time. So admission decisions are more precise. Less guesswork. And then Dynamo does something really interesting with two-level scheduling — a global planner that routes requests to specialized workers, some optimized for prefill, some for decode, with KV-cache-aware routing.
+Alex: Hour-long P99s. Multi-tenant LoRA without LoRA-aware routing is basically unusable. Production routers — SGLang's sgl-router, Dynamo, vLLM's production stack — fold both into one decision: pick the replica that maximizes joint prefix-cache plus adapter-cache hit score, with a spill threshold so a hot prefix doesn't pin everyone to one replica.
 
-Jenny: That's the disaggregation idea — splitting the workload by its resource profile. Like separating reads and writes to different database replicas because they have fundamentally different resource characteristics.
+Jenny: And then there's the cold start problem, which is where this gets really fun for an autoscaling person.
 
-Alex: Exactly right. Prefill is compute-heavy — it wants big GPUs with lots of FLOPS. Decode is memory-bandwidth-heavy — it wants lots of memory bandwidth and KV cache capacity. Different hardware profiles for different phases of the same request.
+Alex: Right, this is the part that hits home for you. When the autoscaler decides to add a replica, you're looking at four stages. GPU procurement — could be tens of seconds, could be minutes. Container image pull — these images are ten-plus gigs because of CUDA. Model weight load — a 70B model is hundreds of gigs into HBM, a 405B is minutes. And then engine startup — CUDA graph capture, kernel autotune, sometimes a TRT-LLM compile.
 
-Jenny: Okay, so let me make sure I've got the big picture. Admission control is the front door — decide whether to let a request in based on whether you can actually finish it. Goodput is the metric you optimize for — not raw speed, but the fraction of work that actually counts. Priority tiers give you proportional degradation under overload, not cliff edges. And preemption policies determine who gets evicted when things get tight. All of it depends on being able to predict how much work a request will take before you start it.
+Jenny: So end-to-end, a cold replica is one to five minutes. Which means by the time queue depth tells you "we need capacity," you're already in violation.
 
-Alex: That's a perfect summary. And here's what's coming next — all of this assumes you know where to route a request. But what if you have multiple GPU workers, some of which already have the KV cache data this request needs? That's cache-aware routing, and it changes the scheduling game completely. Because now admission isn't just "can I serve this?" — it's "who can serve this most efficiently?"
+Alex: You have to trigger the autoscaler on a leading indicator, not on queue saturation. And the new replica has to be drained from the routing pool — invisible to traffic — until it passes a warmup probe. Otherwise the first real user request pays the compile latency and trips your SLO.
 
-Jenny: So routing becomes a cache locality problem. Like session affinity, but for KV cache.
+Jenny: Replica readiness as a routing dimension. Same as ELB pre-warming, but for GPUs.
 
-Alex: Exactly like session affinity. And that's where we're headed next — smart routing, prefix caching, and how to turn your fleet of GPUs into something that looks a lot more like a distributed cache with compute attached to it. That's where things get really interesting.
+Alex: Exactly the same shape. Okay — so where does this all lead?
 
-Jenny: I love it. We're basically rebuilding all of distributed systems, but for inference. Every concept has a direct analog. Can't wait to dig into routing next time.
+Jenny: Where *does* it lead? Because it feels like we've been treating prefill and decode as if they live on the same box.
+
+Alex: That's the perfect setup for what's next. Prefill is compute-bound, decode is memory-bandwidth-bound. They have completely different hardware appetites. Running them on the same GPU is like running your write-heavy OLTP and your analytical reads on the same database instance.
+
+Jenny: So the next step is splitting them. Disaggregation.
+
+Alex: Disaggregation. Separate pools, separate scaling, KV cache transferred over the network between them. It changes the routing problem, the admission problem, and the cold-start problem all at once — because now you have two replica fleets to keep warm, not one.
+
+Jenny: And presumably the goodput math changes too, because the bottleneck shifts depending on workload mix.
+
+Alex: It changes everything. That's the next episode. The short version — once you stop pretending one GPU should do both jobs, a lot of the contention we just talked about gets cleaner. But you trade it for a whole new class of problem: KV cache transfer cost.
+
+Jenny: Looking forward to it. Scheduling within a box was already three layers deep — I can't wait to see what splitting the box does.
+
+Alex: Buckle up.

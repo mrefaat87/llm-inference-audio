@@ -1,0 +1,85 @@
+Alex: So today we're talking about something that I think is genuinely a phase change in how we think about deploying these models. For about a decade, the unit of inference capacity was the 8-GPU node. Eight GPUs in a box, NVLink between them inside, InfiniBand across boxes. That was the world.
+
+Jenny: Right, and that maps cleanly to how I think about EC2. The instance is the unit. You scale by adding instances, you network them together, done.
+
+Alex: Exactly. And that worked beautifully until frontier models started outgrowing the box. Take a 405B-parameter dense model in BF16. Just the weights are around 800 gigabytes of HBM. An 8-GPU H100 node has 640 gigs of HBM total. The model literally does not fit.
+
+Jenny: Hang on — so you'd just shard across two nodes, right? That's the obvious move.
+
+Alex: You can, and people do, but the moment you cross the node boundary, you fall off a performance cliff. Inside the node you're on NVLink, which is on the order of 900 gigabytes per second per GPU. Cross the box and you're on InfiniBand, which is more like 50 gigs per second. That's almost a 20x drop.
+
+Jenny: Oof. And for tensor parallelism, every layer needs an all-reduce, so you're paying that tax constantly.
+
+Alex: Every single layer. Which is why TP traditionally caps out at 8 — you keep it inside the NVLink domain. The moment you go TP16 across two nodes, your per-token latency tanks because every all-reduce is bottlenecked on InfiniBand.
+
+Jenny: Okay, so the model doesn't fit and you can't just span boxes without paying a huge latency cost. What's NVIDIA's move?
+
+Alex: Their move is essentially: stop treating the server as the unit. Make the rack the unit. They built a system called NVL72 — 72 Blackwell GPUs all in one NVLink domain. Every GPU can talk to every other GPU at 1.8 terabytes per second.
+
+Jenny: Wait, all 72? At full NVLink speed? That's not "racks of nodes connected by InfiniBand" — that's one giant logical machine.
+
+Alex: That's exactly the right framing. It's one NVLink-coherent rack. From the software's perspective, you can do a TP72 all-reduce and it's all "fast-everywhere." The intra-node-fast versus inter-node-slow distinction just dissolves inside the rack.
+
+Jenny: Okay let me make sure I'm getting the scale right. 72 Blackwell GPUs, that's roughly 13 and a half terabytes of HBM in a single NVLink domain?
+
+Alex: Exactly that. And the building block is something called the GB200 superchip — two B200 GPUs and one Grace ARM CPU on a single board, connected by something called NVLink-C2C at 900 gigs per second. You take 36 of those boards, wire them up with NVSwitch, and you've got an NVL72.
+
+Jenny: Hold on, let me back up. Why is the CPU on the board with the GPUs? In my world, the CPU host is just the thing the GPU hangs off of via PCIe. It's the boring part.
+
+Alex: That's the question I want you to ask, because it's the deepest part of this whole architecture. In the traditional world, host RAM is 50 times slower than HBM. So on the hot path of inference, you basically never touch it. Your KV cache lives in HBM or it doesn't exist.
+
+Jenny: Right, host RAM is for cold storage. Like S3 versus instance store.
+
+Alex: Beautiful analogy, exactly. But now NVLink-C2C connects the Grace CPU to the GPU at 900 gigs per second. That's near-HBM bandwidth. Suddenly host RAM isn't S3 anymore — it's more like a slightly slower instance store tier you can actually use.
+
+Jenny: Oh wait. So you can spill KV cache from HBM into host RAM and not pay a catastrophic cost?
+
+Alex: Now you're seeing it. There's this concept of a four-tier KV cache hierarchy — HBM is G1, host RAM is G2, then local SSD is G3, remote storage G4. Before NVLink-C2C, G2 was almost theoretical. The bandwidth was so bad you'd never spill there on a live request. Now G2 is multi-terabyte and serving-relevant. You can keep the KV cache for thousands more conversations warm.
+
+Jenny: That's a big deal for multi-turn chat. That's basically the bin-packing problem for memory — you've added a whole new tier you can actually pack into.
+
+Alex: That's exactly it. And the Grace CPU isn't really a "CPU" in the sense we usually mean. NVIDIA didn't build it to win on SPECint. They built it specifically to sit next to the GPU and feed it. It's a memory-attach controller as much as it is a CPU.
+
+Jenny: Okay so now I want to come back to the rack-scale thing. You said TP72 becomes practical. What about MoE? Because mixture-of-experts is the other thing that's been pushing past the 8-GPU node, right?
+
+Alex: Huge driver, yeah. Modern MoE models want 16, 32, sometimes more experts. To serve them efficiently you want expert parallelism, EP, where each GPU hosts a different expert. But EP requires all-to-all communication every layer — every token has to get routed to whichever expert is selected.
+
+Jenny: And all-to-all on InfiniBand is brutal. You're shuffling tokens across 50-gig links every layer.
+
+Alex: Brutal. Inside an NVL72, you can do EP72 with all-to-all over NVLink at 1.8 terabytes per second. The communication pattern that was previously a non-starter just becomes... a thing you do.
+
+Jenny: Okay, one more I want to push on. Disaggregation. We talked about this in another episode — splitting prefill and decode onto different GPUs because they have different compute profiles. But the catch was always the KV cache transfer cost, right?
+
+Alex: Correct. In a disaggregated setup, prefill chews through the prompt and produces a KV cache, then you have to ship that KV cache to whichever decode worker handles that conversation. On InfiniBand, that transfer is the dominant tax — it can eat all the gains from disaggregating in the first place.
+
+Jenny: So in NVL72...
+
+Alex: 1.8 terabytes per second instead of 50 gigs per second. Roughly 36x speedup on the KV transfer hop. Disaggregation's biggest cost basically goes away — as long as both workers are inside the same rack.
+
+Jenny: As long as they're in the same rack. That's the new boundary.
+
+Alex: That's the new boundary. The rack is the failure domain, the scheduling domain, and the latency domain. Above the rack, you're back on the slow network. Below the rack, it's all fast.
+
+Jenny: This really does change how I'd think about capacity planning. Instead of "how many 8-GPU nodes do I need," it's "how many racks." The blast radius of a rack failure is way bigger though.
+
+Alex: Massively bigger. A rack going down takes 72 GPUs and a couple of dozen Grace CPUs with it. So scheduling and failover get a lot more interesting. And the next-gen system, Vera Rubin NVL144, doubles this to 144 GPUs in one domain — and adds dedicated prefill chips called CPX for disaggregation.
+
+Jenny: Wait, dedicated prefill chips? They're literally building separate silicon for the prefill stage?
+
+Alex: That's where this is going. Once disaggregation becomes the default, why have one chip that's good at both? Build a prefill-optimized chip with tons of compute, and a decode-optimized chip with more memory bandwidth. The rack houses both, and they cooperate over NVLink.
+
+Jenny: That's wild. The hardware is bending around the serving topology.
+
+Alex: That's the whole story of this episode, really. The serving patterns drove the rack architecture, and now the rack architecture is enabling new serving patterns. It's a feedback loop.
+
+Jenny: So where does this lead? What should the listener be thinking about for next time?
+
+Alex: Two threads to pull on. First, all this NVLink-coherent fabric is great, but there's still a world above the rack — multi-rack deployments, cross-DC inference, geo-distributed serving. So we need to talk about what the network looks like when one rack isn't enough. Second, we've been very NVIDIA-centric here. There's a real question about TPUs, Trainium, MI300X, Groq, Cerebras — competitive silicon that doesn't have CUDA's software ecosystem. Why is the market still on NVIDIA?
+
+Jenny: The CUDA moat conversation. That's the one I really want to have.
+
+Alex: We'll get there. But the short version is: the silicon is increasingly competitive, the software is not. And in inference serving, the software stack — kernels, schedulers, the whole CUDA ecosystem — is most of the actual product.
+
+Jenny: Alright, until next time.
+
+Alex: Until next time.

@@ -1,0 +1,109 @@
+Alex: So Jenny, I want to start with a question. If I told you that on every single request to your LLM service, the GPU is redoing about a hundred million operations that it already did on the last request — would you be okay with that?
+
+Jenny: Absolutely not. That sounds like we forgot to put a cache in front of something expensive.
+
+Alex: Right. And that's basically the situation with prefill in LLM inference before prefix caching existed. Remember, prefill is the phase where the model reads the prompt and builds up its internal state — the KV cache — before it starts generating tokens.
+
+Jenny: Yeah, KV cache being the warm-instance pool you keep around so you don't redo attention for every decode step.
+
+Alex: Exactly. Now here's the kicker. Prefill is dominated by self-attention, and self-attention is O(N²) in sequence length. So if you have a 10,000-token system prompt that's identical on every single request — say it's your big policy preamble — that's about a hundred million attention ops. Per request. That the GPU recomputes from scratch. Every time.
+
+Jenny: Wait, hold on. Identical bytes. Same tokens. And we're recomputing the same attention matrix over and over?
+
+Alex: Every time. And decode by comparison is cheap — it's one new K and V per step. So if you're going to cache anything in your stack, the highest-leverage cache is not the answer cache. It's the KV cache of the prompt prefix.
+
+Jenny: Okay so this is basically a CDN for prompt prefixes. First request pays the full prefill, every subsequent request that shares the prefix gets a warm hit and skips straight to the suffix.
+
+Alex: That's the mental model. The engine indexes the KV blocks it produced during prefill. New request comes in, it walks the tokens against the index, finds the longest matching prefix, and only computes attention on the suffix. The savings are entirely on TTFT and prefill throughput. Decode cost is unchanged.
+
+Jenny: And where does this actually pay off? Like, what workloads make this go?
+
+Alex: Three big ones. Long shared system prompts — that 4,000-token policy preamble every request inherits. Multi-turn chat — every turn extends the same stable prefix from the previous turns. And agent loops — tool outputs append to a growing scratchpad, so each iteration's prefix is the previous iteration plus a little more.
+
+Jenny: So in all three the cached prefix is most of the prompt.
+
+Alex: Easily 80% or more. And TTFT drops accordingly. Public agent benchmarks routinely show 60 to 90 percent TTFT reduction on the shared portion.
+
+Jenny: Okay. So how do you actually implement the lookup? Because if I'm thinking about this like a CDN, I need a key. What's the key?
+
+Alex: This is where it gets interesting, because there are two schools of thought. vLLM and TensorRT-LLM use what's called a hash-chained block cache. The KV cache is already paged into fixed-size blocks — vLLM uses 16 tokens per block, TRT-LLM uses 128 by default. Each block gets a hash of its parent's hash, plus its own tokens, plus extras like the LoRA ID and a per-tenant cache salt.
+
+Jenny: Oh — so it's literally a chain. Block N's hash includes block N minus 1's hash.
+
+Alex: Exactly. So matching a prefix is just walking a chain of O(1) hash lookups. Super fast, super simple. It's basically consistent hashing applied to fixed-size blocks of tokens.
+
+Jenny: Okay but I'm already seeing the catch. If my block size is 16 and my prompt is 1,025 tokens, I get to share 64 blocks and the trailing one token is wasted.
+
+Alex: That's exactly it. Only full blocks are reusable. Partial blocks don't get a stable hash, because the hash depends on the token contents.
+
+Jenny: So that's the granularity floor. 16 versus 128 is a real tradeoff — more bookkeeping per prompt but finer reuse.
+
+Alex: Right. Now SGLang takes a completely different approach. They use something called RadixAttention. Instead of a hash table, all active KV cache entries live in a radix tree, where the edges are token spans and the leaves point to paged KV blocks.
+
+Jenny: A trie of tokens. Okay.
+
+Alex: And here's the magic. When generations branch — parallel sampling, beam search, tree-of-thought, agent fan-out — every divergence is automatically a tree split. And every shared ancestor lives in GPU memory exactly once.
+
+Jenny: Oh wait, that's beautiful. Because in the hash-chained world, if I fork an agent into ten parallel branches, those are basically ten independent prompts with the same prefix...
+
+Alex: They'd all hit the cached prefix on the lookup, sure. But you can't natively express "these ten suffixes share an ancestor" in a flat hash table the way a tree does. The tree gets subtree sharing for free.
+
+Jenny: So hash-chained is the right call when traffic looks like high-QPS chat with stable system prompts. Radix tree wins on agent and RAG and tree-of-thought workloads where the call graph branches.
+
+Alex: That's the summary. SGLang's paper claims up to 6.4x higher throughput versus prior SOTA across nine workloads. The LMSYS launch blog cites up to 5x versus vLLM and Guidance on agent and ToT and JSON workloads.
+
+Jenny: Okay, I want to push on memory. Where does this cache actually live? Is it a separate pool?
+
+Alex: Great question, and the answer surprises people. The prefix cache and the live decode KV pool share the same paged memory. There is no separate cache RAM.
+
+Jenny: Wait, so a hot prefix cache literally eats into my decode batch capacity?
+
+Alex: Exactly. That's the throughput-versus-TTFT knob the operator turns. How aggressively are you willing to keep cold prefixes around at the cost of fewer concurrent decodes?
+
+Jenny: That's a real tradeoff. So how do they decide what to evict?
+
+Alex: Reference counting plus LRU. A block in use by an active request cannot be evicted, period. Among free blocks, least-recently-used goes first. vLLM keeps a doubly-linked free queue — when a request finishes, it queues its blocks in reverse order so the deepest, most-reusable prefix blocks survive longest in the queue.
+
+Jenny: Oh that's clever. Because the prefix root is what new requests are most likely to hit, so you want it to die last.
+
+Alex: Exactly. SGLang does the equivalent on the radix tree — recursively evict leaves under the same LRU rule.
+
+Jenny: Okay, here's the question that's been bugging me. None of this matters if my load balancer is round-robin. If request one lands on replica A and gets its prefix cached, and request two lands on replica B, replica B doesn't have anything.
+
+Alex: You just identified the single biggest deployment failure mode. Cache-aware routing is as important as the cache itself. A round-robin load balancer destroys your hit rate by design.
+
+Jenny: So this is session affinity at the gateway, basically.
+
+Alex: Yes. Hash the prompt prefix, consistent-hash to replicas. Same prefix, same replica, near-zero TTFT. SGLang's scheduler does this. vLLM's Production Stack does it. NVIDIA's Dynamo Smart Router, AIBrix — they all hash the prefix and pin it to a replica.
+
+Jenny: And without that, you might as well not have a prefix cache at all.
+
+Alex: Literally. You're just paying the bookkeeping cost for zero benefit.
+
+Jenny: Okay, what else breaks this? Because exact-prefix matching feels brittle.
+
+Alex: It is brittle. A single different token at position zero kills the whole chain. Whitespace differences. BOS token handling. Chat-template version drift. Tokenizer changes. All of these silently destroy reuse.
+
+Jenny: Silently. That's the dangerous part.
+
+Alex: Worst is tokenizer determinism. Two replicas running slightly different tokenizer versions, or NFC versus NFKC unicode normalization, will produce different token IDs and zero cross-replica hits.
+
+Jenny: And LoRA and multimodal — the hash has to include the adapter ID, otherwise two completely different requests collide on the same block.
+
+Alex: Right. And cross-tenant — use sha256 with a per-tenant cache salt so tenant A can't reuse tenant B's cached KV. That's a real isolation requirement.
+
+Jenny: One more — what's the timing window thing?
+
+Alex: TRT-LLM only reuses a block if the second request launches after the first one completed. So in bursty traffic where every prompt is new, the block gets evicted before any second request can land on it.
+
+Jenny: So you need both temporal locality and structural overlap to win.
+
+Alex: Exactly.
+
+Jenny: Okay, so where does this lead next? What's the natural next problem?
+
+Alex: Well, prefix caching solves the prefill side beautifully. But notice we haven't touched decode. Decode is still memory-bandwidth-bound, one token at a time, every step. So the next question becomes — how do you make decode itself faster? That pulls you into speculative decoding, into quantization to shrink the weights you have to stream, into FlashAttention to fuse the kernels. And then a level up — when prefill and decode have such different bottlenecks, why are we running them on the same GPU at all? That's the disaggregation conversation, and it's where this whole story really starts to bite at scale.
+
+Jenny: So prefix caching is the gateway drug. Once you've squeezed prefill, you start asking why decode is sharing a fate with it at all.
+
+Alex: That's exactly the arc. And we'll pick that up next time.

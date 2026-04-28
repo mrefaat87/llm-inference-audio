@@ -1,0 +1,101 @@
+Alex: So we've spent the last few episodes deep in NVIDIA-land — SMs, Tensor Cores, NVLink, Grace-Hopper. And the whole time, there's been this elephant in the room we haven't talked about.
+
+Jenny: Let me guess. Everybody else.
+
+Alex: Everybody else. TPU, Trainium, Groq, Cerebras, AMD, Etched, SambaNova, Qualcomm. The hardware landscape is genuinely diverse. The software landscape… is not.
+
+Jenny: Okay, that's the part I've never understood. Because when I look at this from an AWS lens, I see Trainium chips that are genuinely competitive on price-performance. I see TPUs that Google trains Gemini on. I see AMD MI300X with comparable HBM and TFLOPS to an H100. So why does NVIDIA still have like 85% of the market?
+
+Alex: That's exactly the right question, and the answer isn't really about silicon. It's about everything sitting on top of the silicon. But before we get there, let me actually walk you through who these players are, because they're not all trying to do the same thing.
+
+Jenny: Yeah, please. Because in my head they're all just "not-NVIDIA" and that's clearly wrong.
+
+Alex: Very wrong. So start with Google TPU. v4, v5e, v5p, now Trillium. HBM-based, but the interconnect is a 2D torus instead of NVLink. It's the chip Gemini is trained and served on internally, and you can rent it on GCP if you're using JAX or MaxText. Outside Google's ecosystem? Almost nobody uses it.
+
+Jenny: Why? Like, technically it's a great chip.
+
+Alex: Because the entire software stack is JAX and XLA-first. If your team writes PyTorch and uses vLLM, you're not casually spinning up a TPU pod on Tuesday. The chip is great. The on-ramp is steep.
+
+Jenny: Okay so that's Google's walled garden. What about Trainium? That one I should actually know.
+
+Alex: You should. AWS Inferentia and Trainium, HBM, NeuronLink as the interconnect. The economics for AWS-native customers running stable inference workloads are real. Bedrock and SageMaker NeuronCore use it heavily under the hood. The catch is the same as TPU — the open-source ecosystem is thinner than CUDA. You're betting on AWS's Neuron SDK keeping pace.
+
+Jenny: So far the pattern is: vendor builds great chip, vendor builds good-enough software, customers stay because they're already in that cloud.
+
+Alex: Exactly. Now Groq is a totally different animal. Groq's LPU has no HBM at all. SRAM only.
+
+Jenny: Wait, no HBM? At all? How does that even work? An H100 has 80 gigs of HBM and people are still complaining it's not enough.
+
+Alex: Right, so the trade is: SRAM is maybe a hundred times faster than HBM, but you get vastly less of it. So Groq's bet is, if your model fits in SRAM across a bunch of LPUs, you get insane latency. Like, hundreds of tokens per second on small-to-medium models. But for a frontier 400-billion-parameter model? You'd need a stadium of LPUs to hold the weights.
+
+Jenny: Oh, that's wild. That's basically the opposite design philosophy from "stuff as much HBM as physically possible on the package."
+
+Alex: Completely opposite. And Cerebras is even more extreme. The WSE-3 is wafer-scale — they don't cut the wafer into chips, the whole wafer is the chip. Hundreds of thousands of cores, all SRAM, all on one piece of silicon.
+
+Jenny: Hold on. The whole wafer? That sounds like the kind of thing that should not yield. How do they not lose the entire wafer to a single defect?
+
+Alex: They route around bad cores. The architecture has so much redundancy that defects just become disabled tiles. But to your point — they get extreme tokens-per-second on a single replica because there's no chip-to-chip communication, it's all on-die. The downside is it's one expensive replica. You don't horizontally scale a wafer.
+
+Jenny: So these are basically specialized latency machines. Hosted API plays, not fleet plays.
+
+Alex: That's the right framing. Then there's Etched Sohu, which is a transformer-fixed ASIC. They etched the transformer architecture into silicon.
+
+Jenny: That feels like a huge bet. What if architectures change?
+
+Alex: That's exactly the bet. They're saying transformers are stable enough for the next several years that hardcoding the dataflow is worth a 10x efficiency win. If Mamba or some state-space model takes over, they're in trouble. Inference-only, early stage, not really in production yet.
+
+Jenny: Okay, and AMD? Because that's the one that feels most like a real GPU alternative.
+
+Alex: AMD is the most credible drop-in. MI300X, MI350X — HBM3, Infinity Fabric instead of NVLink, comparable HBM capacity and TFLOPS to H100 and H200. And critically, vLLM and SGLang both have working AMD backends now.
+
+Jenny: So if I'm running vLLM today, I can actually swap to MI300X without rewriting my serving stack?
+
+Alex: Mostly. ROCm — that's AMD's CUDA equivalent — has gotten dramatically better in the last year. There are still rough edges, kernel coverage gaps, but the gap narrows every quarter. And the $/TFLOP is often better than NVIDIA. Then there's Qualcomm Cloud AI 100 and SambaNova RDU rounding out the niche end of the market.
+
+Jenny: Okay. So back to my original question. The silicon is genuinely competitive. So why is NVIDIA at 85%?
+
+Alex: This is where it gets interesting. The moat isn't the chip. The moat is four layers stacked on top of the chip. Want me to walk through them?
+
+Jenny: Yeah, do it.
+
+Alex: First layer: kernels. Years of hand-tuned libraries — cuBLAS, cuDNN, CUTLASS, FlashAttention, DeepGEMM. Every other vendor is in some stage of porting equivalents. Some are close, most are not.
+
+Jenny: So even if AMD's silicon does the same FLOPs, the kernels squeezing those FLOPs out aren't as mature.
+
+Alex: Right. Second layer: engines. vLLM, SGLang, TensorRT-LLM — all CUDA-first by birth. ROCm has the strongest non-CUDA support, but it's still partial. If a new feature ships in vLLM, the AMD path is usually weeks behind, the Trainium path months.
+
+Jenny: That's the cloud equivalent of an AMI being available in us-east-1 six months before any other region.
+
+Alex: That's a perfect analogy actually. Third layer: models. Frontier labs — OpenAI, Anthropic, Meta — train on H100s, H200s, B200s. So when a new architecture drops, day-zero engine support is a CUDA story. Everyone else is catching up to a moving target.
+
+Jenny: And fourth?
+
+Alex: Talent. The pool of engineers who can hand-write a fast attention kernel on CUDA is roughly ten times larger than for any other platform. That's a multi-year hiring problem, not a software bug you can fix.
+
+Jenny: So it's not one moat, it's four moats reinforcing each other. Better kernels attract better engines, which attract frontier models, which attract the talent, which writes better kernels.
+
+Alex: It's a flywheel. And every other vendor is trying to spin up their own version of that flywheel, but they're starting from rest.
+
+Jenny: Okay, but where are the alternatives actually winning today? Like, when does it make sense to leave NVIDIA?
+
+Alex: Four real cases. One: you're an AWS-native shop with cost pressure and stable workloads — Inferentia and Trainium have real economics. Two: you're already inside Google's stack — TPUs are obvious. Three: you need H100-class capability with better $/TFLOP and you can tolerate some ROCm rough edges — MI300X is a serious option. Four: you have a specific latency-sensitive API where Groq or Cerebras's architecture is a perfect fit.
+
+Jenny: And everywhere else, the CUDA flywheel just wins.
+
+Alex: For now. The interesting question is whether anyone breaks out of being a niche, or whether the flywheel just keeps accelerating.
+
+Jenny: Okay, so where does this go? What's next?
+
+Alex: This is actually a great pivot point. We've spent this whole chapter going deep on hardware — SMs, Tensor Cores, memory hierarchies, NVLink domains, and now the non-NVIDIA landscape. Next chapter, we climb up the stack. We start asking: given all this silicon, how do we actually serve a request?
+
+Jenny: Meaning the engines. vLLM, SGLang, TensorRT-LLM.
+
+Alex: Right. How does a request come in, get scheduled onto a GPU, share that GPU with other requests, manage its KV cache, get batched with others — all the systems-level stuff that turns raw silicon into a tokens-per-second number.
+
+Jenny: That's the part that feels most like my world. Scheduling, packing, multi-tenancy, resource isolation.
+
+Alex: It's exactly your world, just with weirder constraints. The unit of work is a token, not a request. The memory pressure is from KV cache, not RSS. And the SLO isn't latency in milliseconds, it's time-to-first-token plus tokens-per-second.
+
+Jenny: Now I'm hooked. Let's go.
+
+Alex: Next episode.

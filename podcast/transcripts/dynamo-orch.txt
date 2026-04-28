@@ -1,0 +1,77 @@
+Alex: So I want to start today with a question. You've spent years running auto scaling at AWS. When you have a fleet of EC2 instances serving traffic, what sits between the load balancer and the instances?
+
+Jenny: I mean, a lot of things. There's the ALB doing routing, there's the auto scaling group deciding capacity, there's placement logic deciding which AZ. Why?
+
+Alex: Right. So you have layers. The instance itself doesn't know about the fleet. The fleet doesn't know about the region. Each layer owns a different concern. Now, until really recently, LLM inference didn't have that. You had an engine — vLLM, or TensorRT-LLM, or SGLang — and that one engine was trying to do everything. Per-GPU scheduling, KV cache management, kernel selection, AND cluster-wide routing, AND capacity planning. All in one process.
+
+Jenny: Wait, all of it? So vLLM was basically being asked to be the EC2 hypervisor and the ALB and the ASG controller at the same time?
+
+Alex: Exactly that. And it worked, sort of, when deployments were small. But then 2024 and 2025 happened. Disaggregation came in — splitting prefill and decode across different machines. Multi-tier KV caching showed up. People started running mixed engine fleets. And suddenly the engine was the wrong place to put any of that logic.
+
+Jenny: Okay so this is where Dynamo comes in. But — let me get this straight. Dynamo is not a new engine. It's not competing with vLLM.
+
+Alex: No, and this is the thing people get wrong constantly. Dynamo is one layer above. A single Dynamo deployment can have vLLM workers, SGLang workers, and TRT-LLM workers all running under the same control plane, doing different jobs for different requests. Think of it as — vLLM is the EC2 instance. Dynamo is the ALB plus the ASG plus the routing logic. Kubernetes is still underneath, doing pod placement and GPU procurement.
+
+Jenny: So we now have a clean three-layer stack. Engine, orchestrator, cluster scheduler.
+
+Alex: Right. And each layer owns specific things. The engine owns per-replica scheduling, KV cache within a replica, batching, kernel selection. Dynamo owns cross-replica routing, prefill/decode disaggregation, KV-aware load balancing, multi-node parallelism, SLA-based capacity planning. Kubernetes owns pod placement, autoscaling pods up and down, GPU procurement.
+
+Jenny: Okay, hold on. Let me push on this. Why couldn't vLLM just keep growing to handle cluster-wide stuff? Like, AWS made the ALB a separate service, sure, but a lot of systems just keep adding features to one binary.
+
+Alex: Great question. The answer is that the concerns became too cross-cutting. Take disaggregation. Prefill is compute-bound — it wants high-TFLOPS GPUs, like H100s or B200s pushed hard. Decode is memory-bandwidth-bound — it wants different GPUs, sometimes even different chip generations, configured differently. So now you have two pools, with different tensor parallelism, and you need to ship the KV cache from the prefill pool to the decode pool over RDMA. That requires a transpose kernel because the TP layouts don't match. None of that is engine-internal anymore. It's fundamentally a cluster-level concern.
+
+Jenny: Oh. So the engine literally cannot see the other pool. It would need to know about networking topology, RDMA, all of it.
+
+Alex: Right. And Dynamo handles this with a thing called NIXL, which is the RDMA-based KV transfer fabric. Prefill finishes, KV cache gets pushed across the network to a decode replica, decode picks it up and starts streaming tokens. The engine on each side just sees a normal request — it doesn't know it's part of a disaggregated pipeline.
+
+Jenny: That's slick. Okay so that's thing one. What's thing two?
+
+Alex: Thing two is the KV Block Manager. KVBM. This is the one that I think is the most interesting architecturally. It treats KV cache as a global resource across four tiers — GPU HBM is G1, host RAM is G2, local SSD is G3, networked storage is G4. One pool. Cache-aware routing.
+
+Jenny: Wait wait wait. So the KV cache for a session can live in HBM on one GPU, get evicted to host RAM, and then if the user comes back five minutes later, any GPU in the cluster can pick it up?
+
+Alex: Any GPU. That's the whole point. You're describing exactly the cache hierarchy you already know — L1, L2, L3, main memory — except it's distributed across the cluster. And the routing is cache-aware, meaning when a request comes in, Dynamo looks at where the KV blocks for that session live and routes the request to the GPU closest to that data.
+
+Jenny: That's basically locality-aware scheduling. Like — when you place a Lambda invocation, you want it near its warm container. Same idea, just for KV blocks.
+
+Alex: Exactly the same idea. And without this, every multi-turn conversation would have to re-prefill from scratch every time it bounced to a different replica. Which is wasteful, and at scale, ruinous.
+
+Jenny: Okay, thing three.
+
+Alex: SLA-based planner. This one is going to feel familiar to you. Today, if you're running auto scaling on EC2, you scale on what?
+
+Jenny: CPU utilization, memory, request count, custom CloudWatch metrics. Whatever proxies for load.
+
+Alex: Right. And those are all proxies. They don't directly correspond to user experience. Dynamo's planner takes the actual SLA targets — time-to-first-token, tokens-per-second — and works backward. It decides how many prefill replicas you need, how many decode replicas, which engine type each should be, and what tensor-parallel and expert-parallel and pipeline-parallel plan to use.
+
+Jenny: Hold on. So instead of saying "scale up when GPU utilization hits 70%," you say "I need TTFT under 200 milliseconds at p99, figure it out"?
+
+Alex: Yes. Capacity planning becomes a target function instead of a manual ratio. Because here's the thing — the right ratio of prefill to decode replicas depends on the workload. A chatbot with short prompts and long outputs is mostly decode. A RAG system with long retrieved contexts is mostly prefill. The ratio shifts hour by hour. You cannot tune that by hand.
+
+Jenny: That's huge. The number of times I've seen teams hand-tune ratios and then traffic shifts and everything falls over...
+
+Alex: Right. And the fourth thing — cross-engine routing. This is where the multi-engine fleet pays off. A short-prompt request can go to a vLLM replica with aggressive prefix caching. A long-context request can go to a TRT-LLM replica that has a compiled engine for that exact shape. An MoE request can go to an SGLang replica with expert parallelism enabled. The right engine for each request, in one cluster.
+
+Jenny: That's wild. I assumed you'd pick one engine and standardize. But you're saying — different engines have different strengths, and Dynamo lets you exploit all of them?
+
+Alex: That's the bet. No engine is best at everything. vLLM is great at prefix caching and high-throughput serving. TRT-LLM is great at compiled, latency-optimized inference for known shapes. SGLang is great at structured workloads and MoE. Picking one means giving up the others. Dynamo says you don't have to.
+
+Jenny: Okay so the meta question. When does a team know they need this? Because if you're running one model with steady traffic, you probably don't.
+
+Alex: The signal is concrete. If you find yourself building per-tenant KV-aware routing by hand. Or writing prefill/decode autoscaling logic. Or doing SLA-driven capacity planning with spreadsheets and crontabs. That's the moment you've outgrown a single engine. For a long time, that work either got folded into the engine itself or left to whatever you bolted onto Kubernetes. Now there's a proper layer for it.
+
+Jenny: So Dynamo is what happens when the industry admits that orchestration is its own discipline.
+
+Alex: That's exactly what it is. And it's not just NVIDIA — other vendors are building similar orchestrators. The pattern is the response to a real architectural pressure.
+
+Jenny: Alright, so where does this lead? What should listeners be watching for next?
+
+Alex: Two threads. The first is that as orchestrators mature, the engines themselves are going to get simpler. They'll stop trying to do cluster-level work and refocus on what they're good at — squeezing performance out of a single replica. We'll see vLLM and TRT-LLM and SGLang specialize more, not less. The second thread is that the KV cache as a global resource — KVBM and friends — is going to push storage and networking into the inference critical path in ways that didn't exist before. Suddenly your inference fleet cares about RDMA fabrics and tiered storage and cache coherence protocols.
+
+Jenny: Which means the next conversation people have is about the network and storage layer underneath all this.
+
+Alex: Right. We've been talking about GPUs and engines. Next we have to talk about the fabric they sit on — because once your KV cache spans four tiers and your prefill and decode pools are talking RDMA, the network is the bottleneck, not the GPU.
+
+Jenny: Love it. Until next time.
+
+Alex: Until next time.

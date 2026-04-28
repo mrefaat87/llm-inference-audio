@@ -1,0 +1,125 @@
+Alex: So we've spent this whole chapter walking through how a transformer turns a prompt into a vector of logits — one number per token in the vocabulary. Today is the part nobody talks about but everybody tunes. How do you actually pick a token from that vector?
+
+Jenny: Right, because up until now we've basically been computing a probability distribution over, what, 128,000 possible next tokens?
+
+Alex: Exactly. And the model itself doesn't pick. The model's job ends at "here's how strongly I want each token." The sampler is what turns that into one concrete output. And it runs on every decode step, every request, in front of every user.
+
+Jenny: Okay so this is the thing that sits between the GPU and the response stream. It's basically the policy layer.
+
+Alex: That's a perfect framing. Think of it like — the model is your forecasting service. It outputs a ranked list with confidence scores. The sampler is the action policy on top of it. Same forecast, different policy, totally different behavior.
+
+Jenny: So is that why you can change temperature without breaking the KV cache? The forward pass doesn't know or care?
+
+Alex: Exactly right. The logits are identical regardless of sampling settings. You can crank temperature from zero to one-point-five mid-conversation and the cache stays valid. The sampler is downstream of everything expensive.
+
+Jenny: Good. Okay, so simplest possible policy — just pick the top one?
+
+Alex: That's greedy. Or argmax. Highest logit wins, every time. Fully deterministic. Same prompt, same weights, same output, bit for bit.
+
+Jenny: Sounds great. Why don't we just always do that?
+
+Alex: Because the model can't escape its own early commitments. Imagine it picks a slightly wrong token at step three. Now every subsequent token is conditioned on that wrong token being correct. There's no backtracking. You've locked in a bad path.
+
+Jenny: Oh — so it's like a greedy bin-packing algorithm. Locally optimal at every step, globally bad.
+
+Alex: Yes. Exactly that. And the fix is the same fix you'd reach for in scheduling — inject some randomness so you don't get trapped. That's where temperature comes in.
+
+Jenny: Okay break that down. What is temperature actually doing to the numbers?
+
+Alex: You divide every logit by a scalar T before you softmax. That's it. One scalar divide.
+
+Jenny: That's the whole thing? One scalar?
+
+Alex: One scalar. But it reshapes the distribution dramatically. T equals one, you get the model's natural distribution. T less than one, like point three, you sharpen — the probable tokens get even more probable, the long tail collapses. T greater than one, like one point five, you flatten. Unlikely tokens become reachable.
+
+Jenny: And T equals zero?
+
+Alex: That's just greedy. The argmax becomes overwhelmingly dominant.
+
+Jenny: So temperature is basically an exploration knob. Like epsilon-greedy but smoother.
+
+Alex: That's exactly right. And the practical defaults track that intuition. T equals zero for code generation and structured extraction — you want determinism. T equals point seven for chat — a little variety so it doesn't sound robotic. T equals one for creative writing.
+
+Jenny: What about cranking it really high? Like T equals five?
+
+Alex: Garbage. As T goes to infinity, the distribution flattens to uniform. You're literally sampling random tokens from a vocabulary of 128,000. It's noise. In practice anything past one-point-two, you've stopped doing useful work and you're letting the next thing — top-p — do the actual sampling.
+
+Jenny: Okay so top-p. What's that fix?
+
+Alex: So even with temperature applied, the long tail is still there. There are tens of thousands of tokens with tiny but nonzero probability. Sometimes you sample one of them and the output goes off the rails. Truncation samplers cut the tail before you draw.
+
+Jenny: And the two flavors are top-k and top-p?
+
+Alex: Right. Top-k is the simple one — keep the k highest probability tokens, throw the rest away, renormalize, sample. So k equals fifty means "only ever sample from the top fifty candidates."
+
+Jenny: That seems fine. Why isn't that enough?
+
+Alex: Because k is fixed but the distribution shape isn't. Sometimes the model is super confident — ninety-five percent of the mass is on three tokens. K equals fifty is wasting forty-seven candidates that have basically zero probability anyway, no harm done. But sometimes the distribution is flat — the model genuinely isn't sure, mass is spread across two hundred tokens. Now k equals fifty is clipping you too aggressively.
+
+Jenny: Right. Fixed-size buckets in a workload with bursty distributions. That's a classic capacity planning mistake.
+
+Alex: Exactly. So top-p adapts. You say "keep the smallest set of tokens whose probabilities sum to at least p." P equals point nine means "give me whatever set of tokens covers ninety percent of the probability mass."
+
+Jenny: So if the model is confident, that might be three tokens. If it's uncertain, it might be eighty.
+
+Alex: Right. Self-tuning width. That's why top-p is the production default. Modern stack — temperature point seven, top-p point nine, top-k either disabled or set very high as a hard cap.
+
+Jenny: Hang on, you said top-p has known failure modes earlier when I was reading the source. What goes wrong?
+
+Alex: Bimodal distributions. Imagine the model is torn between two strong contenders — two tokens at thirty-five percent each. To hit ninety percent total, top-p has to keep grabbing weak tokens until it gets there. So it ends up including a bunch of long-tail garbage just to hit the cumulative threshold.
+
+Jenny: Oh, that's annoying. Does anyone fix it?
+
+Alex: Yeah, min-p is the newer alternative. Instead of "include tokens until cumulative mass hits p," it says "keep tokens whose probability is at least p times the max probability." So the threshold scales with the top token. Bimodal case stays clean.
+
+Jenny: Okay. So far this is all about shape — temperature reshapes, top-p truncates. What about when the user wants to force or block specific tokens?
+
+Alex: That's logit biasing. Before softmax, you add a scalar to specific token IDs. Want to forbid a token? Add minus one hundred to its logit. After softmax it's effectively zero probability. Want to force a token? Add a huge positive number.
+
+Jenny: This is just an element-wise add on the logits vector before softmax?
+
+Alex: Yep. Free at inference time. One add. OpenAI exposes it as logit_bias, vLLM and SGLang have equivalents. You use it to suppress profanity, block known-bad outputs, prevent the model from emitting a stop sequence too early, force a JSON output to start with a curly brace.
+
+Jenny: Okay so now generalize that. What if I want the entire output to be valid JSON, not just start with a brace?
+
+Alex: That's structured output. Same mechanism, but cranked up. At every decode step, you mask to negative infinity any token that would violate the schema, then sample from what's left.
+
+Jenny: Wait, you do that at every single decode step?
+
+Alex: Every single one. You compile the schema — JSON schema, regex, whatever — into a finite-state machine. At each step, you check which tokens would keep the FSM in a valid state, mask everything else, sample.
+
+Jenny: That sounds expensive.
+
+Alex: The mask itself is cheap — one element-wise multiply. The FSM compilation can be slow for complex schemas, but you cache by schema hash. The huge win is that your output always parses. Always. Zero parse failures.
+
+Jenny: Oh that's massive for agentic loops. Every tool call is a JSON block — if even one in a thousand fails to parse, you're building retry logic everywhere.
+
+Alex: That's the whole game. Constrained decoding turns "the model usually produces valid JSON" into "the model produces valid JSON by construction." It collapses an entire class of error handling.
+
+Jenny: It's like schema validation enforced at the protocol layer rather than at the application layer.
+
+Alex: Exactly. You can't emit an invalid token, so you can't emit invalid output.
+
+Jenny: Okay one last thing — stop sequences. How do those fit in?
+
+Alex: The sampler also checks every generated token against a list of stop strings. End-of-message tokens, closing tool tags, conversational turn boundaries like newline-User-colon. When it matches, decode halts immediately. There's a subtlety with partial matches and buffering, but we'll cover that in the agentic section.
+
+Jenny: And one thing I want to nail down — even at T equals zero, do you actually get bit-identical outputs across runs?
+
+Alex: Honestly? Usually not. CUDA reductions in attention aren't always deterministic. The batch composition at decode time changes fused-kernel behavior. Mixed-precision rounding differs run to run. You can pin a seed and a deterministic flag, but it interacts badly with continuous batching. Most production teams don't bother — they accept some output drift and validate with evals instead of diffs.
+
+Jenny: That's such a distributed-systems answer. "We gave up on determinism and switched to behavioral testing."
+
+Alex: Welcome to ML inference.
+
+Jenny: Okay so where does this lead next?
+
+Alex: So we've now covered the whole forward pass — tokenization, embeddings, attention, the layers, sampling. You now know everything about how one token gets produced for one request. The next chapters zoom out. We start asking — what happens when you have hundreds of requests hitting the same GPU at once? How do you pack them? How do you schedule them? How do you reuse the KV cache across turns? How do you split a model across eight GPUs?
+
+Jenny: So we go from "how does one inference call work" to "how does a fleet of GPUs serve millions of inference calls."
+
+Alex: Right. And that's where your AWS instincts are going to start firing on every single concept. Continuous batching, prefix caching, tensor parallelism, disaggregated prefill — every single one of these maps to something you already know from EC2 capacity management or auto scaling. We just have to translate the vocabulary.
+
+Jenny: Looking forward to it. The model internals were the foreign part. Now we're back on home turf.
+
+Alex: Exactly. See you in the next one.

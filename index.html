@@ -372,6 +372,55 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
       <button class="nav-item" data-sec="mfu" onclick="show('mfu')">Roofline, MFU, SOL & Unhobblers</button>
     </div>
   </div>
+  <div class="ch-group" data-ch="ch7">
+    <button class="ch-header" onclick="toggleChapter('ch7')">
+      <span class="ch-arrow">&#9656;</span>
+      <span class="ch-title">Software Stack</span>
+      <span class="ch-count" id="count-ch7">0/7</span>
+    </button>
+    <div class="ch-topics">
+      <button class="nav-item" data-sec="cuda" onclick="show('cuda')">CUDA Primer <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="numlibs" onclick="show('numlibs')">Numerical Libraries <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="fusion" onclick="show('fusion')">Kernel Fusion <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="fileformats" onclick="show('fileformats')">Model File Formats <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="dynamo-orch" onclick="show('dynamo-orch')">NVIDIA Dynamo Orchestration <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="profiling" onclick="show('profiling')">Profiling Tools <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="quiz-ch7" onclick="show('quiz-ch7')">Chapter 7 Quiz</button>
+    </div>
+  </div>
+  <div class="ch-group" data-ch="ch8">
+    <button class="ch-header" onclick="toggleChapter('ch8')">
+      <span class="ch-arrow">&#9656;</span>
+      <span class="ch-title">Hardware Depth</span>
+      <span class="ch-count" id="count-ch8">0/8</span>
+    </button>
+    <div class="ch-topics">
+      <button class="nav-item" data-sec="gpuinternals" onclick="show('gpuinternals')">GPU Internals <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="cachehier" onclick="show('cachehier')">Cache Hierarchy <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="archroadmap" onclick="show('archroadmap')">Architecture Roadmap <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="superchips" onclick="show('superchips')">Superchips & Racks <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="mig" onclick="show('mig')">MIG Slicing <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="otheraccel" onclick="show('otheraccel')">Non-NVIDIA Accelerators <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="formfactors" onclick="show('formfactors')">PCIe vs SXM <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="quiz-ch8" onclick="show('quiz-ch8')">Chapter 8 Quiz</button>
+    </div>
+  </div>
+  <div class="ch-group" data-ch="ch9">
+    <button class="ch-header" onclick="toggleChapter('ch9')">
+      <span class="ch-arrow">&#9656;</span>
+      <span class="ch-title">Production</span>
+      <span class="ch-count" id="count-ch9">0/7</span>
+    </button>
+    <div class="ch-topics">
+      <button class="nav-item" data-sec="containers" onclick="show('containers')">Containers & Cold Starts <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="autoscaling" onclick="show('autoscaling')">Autoscaling & Routing <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="multicloud" onclick="show('multicloud')">Multi-Cloud & Reliability <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="security" onclick="show('security')">Security & Compliance <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="observability" onclick="show('observability')">Observability & Deployment <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="clientside" onclick="show('clientside')">Client-Side & Streaming <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="quiz-ch9" onclick="show('quiz-ch9')">Chapter 9 Quiz</button>
+    </div>
+  </div>
 </div>
 <div style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
 <!-- Mode toggle bar -->
@@ -3550,7 +3599,766 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   <div class="highlight">The pattern to internalize: optimization techniques (quantization, kernel fusion, batching) improve constant factors — they make existing things faster. Unhobblers change the scaling curve — they make previously impossible things possible. When evaluating a new technique, asking "is this a constant-factor improvement or does it change the scaling curve?" tells you how transformative it's likely to be.</div>
 
   <div class="resource-bar">📖 <a href="https://situational-awareness.ai/" target="_blank">Situational Awareness — Leopold Aschenbrenner (introduces "unhobbler")</a><a href="https://arxiv.org/abs/2204.02311" target="_blank">PaLM paper — introduced MFU as a standard metric</a></div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('costeconomics')">&#8592; Cost Economics</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('costeconomics')">&#8592; Cost Economics</a><a class="pn-link pn-next" onclick="show('cuda')">CUDA Primer &#8594;</a></div>
+</div>
+
+<div id="sec-cuda" class="hidden">
+<div class="breadcrumb">Software Stack &rsaquo; CUDA Primer</div>
+<h2>CUDA — what's actually running on the GPU <span class="new-badge">new</span></h2>
+  <p class="subtitle">Kernels, graphs, the runtime, and why GEMM is the operation that matters</p>
+
+  <div class="sec-h">The stack you're sitting on top of</div>
+  <p>Every line of vLLM, SGLang, or TRT-LLM ultimately compiles down to <strong>CUDA kernels</strong> running on NVIDIA GPUs. When something is slow or breaks, the trail of blame usually leads here. Reading inference engine logs becomes much easier once you know what each layer does.</p>
+  <table>
+    <tr><th>Layer</th><th>What it is</th><th>You touch it when…</th></tr>
+    <tr><td><strong>CUDA kernel</strong></td><td>A C++ function annotated with <code>__global__</code> that runs on GPU threads. Compiled by <code>nvcc</code> into PTX/SASS.</td><td>Writing or hand-tuning a custom op (FlashAttention, Marlin, custom MoE).</td></tr>
+    <tr><td><strong>CUDA runtime</strong></td><td>The userspace library (<code>libcudart</code>) that dispatches kernels, manages streams, and copies memory.</td><td>Debugging launch failures, OOMs, illegal memory accesses.</td></tr>
+    <tr><td><strong>CUDA driver</strong></td><td>The kernel-mode driver providing the actual GPU API surface (<code>libcuda</code>). Versioned independently from the runtime.</td><td>Mismatched driver vs CUDA toolkit version blocks engine startup — first thing to check on a new node.</td></tr>
+    <tr><td><strong>CUDA Graphs</strong></td><td>A pre-recorded DAG of kernel launches replayed in one shot, eliminating per-kernel launch overhead (~5–10 μs per kernel).</td><td>Reducing decode step time when you have many small kernels per layer.</td></tr>
+  </table>
+
+  <div class="sec-h">The thread/block/grid hierarchy in one paragraph</div>
+  <p>A kernel launches a <strong>grid</strong> of <strong>thread blocks</strong>. Each block runs on one SM (streaming multiprocessor — see Hardware Depth chapter) and contains up to 1024 threads grouped into <strong>warps</strong> of 32. Threads in the same warp execute in lockstep (SIMT). Threads in the same block share fast SRAM ("shared memory") and can synchronize. Threads in different blocks cannot. This hierarchy maps directly onto the hardware: warps onto SIMT lanes, blocks onto SMs, grid onto the full GPU. Every CUDA optimization technique is fundamentally about laying out work so this mapping is efficient.</p>
+
+  <div class="sec-h">GEMM is the operation that matters</div>
+  <p><strong>GEMM</strong> (General Matrix Multiply, pronounced "gem") is the central operation of LLM inference. Every attention projection, every FFN linear layer, every output projection is a GEMM. <strong>~95% of inference compute lives in GEMMs</strong>; everything else (softmax, layer norm, RoPE, activation functions) is small.</p>
+  <p>That's why the rest of this chapter is mostly about libraries and tools that make GEMMs fast: cuBLAS provides the standard implementation, CUTLASS lets you write custom variants, FlashAttention is a fused attention-as-GEMM kernel, DeepGEMM is FP8-specialized for Hopper. When someone says "the kernel," they almost always mean "the GEMM kernel for this specific shape and precision."</p>
+
+  <div class="sec-h">CUDA Graphs — the under-appreciated decode optimization</div>
+  <p>A single decode step on a 70B model launches dozens to hundreds of small kernels: attention QKV projections, FlashAttention, FFN up/down projections, layer norm, residuals, RoPE. Each launch costs ~5–10 μs of host-side overhead. For a 20 ms decode step, that's potentially 25–50% pure overhead before any actual GPU work.</p>
+  <p>CUDA Graphs let you record this entire kernel sequence once and replay it as a single dispatch. The replay cost is microseconds. vLLM, TRT-LLM, and SGLang all use CUDA Graphs for the decode hot path — it's why their benchmarks always include a "warmup" phase where the graph is captured for each batch size. The graph is keyed by tensor shapes, so the engine has to keep one per relevant shape combination; this is also why suddenly changing batch size mid-run can cause a latency hiccup.</p>
+
+  <div class="sec-h">Why kernel selection matters across hardware generations</div>
+  <p>A kernel optimized for H100 isn't automatically optimal on B200. Tensor Core instruction widths, supported precisions (FP8 vs FP4), shared memory sizes, and async-copy semantics all change between generations. The same engine running the same model on different hardware will pick different kernels — sometimes from totally different libraries (cuBLAS-on-Ampere vs CUTLASS-on-Hopper vs DeepGEMM-on-Hopper). Engine release notes that say "improved Blackwell support" mean someone spent weeks porting kernels.</p>
+
+  <div class="resource-bar">📖 <a href="https://docs.nvidia.com/cuda/cuda-c-programming-guide/" target="_blank">CUDA C++ Programming Guide</a><a href="https://developer.nvidia.com/blog/cuda-graphs/" target="_blank">CUDA Graphs blog</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('mfu')">&#8592; Roofline, MFU, SOL & Unhobblers</a><a class="pn-link pn-next" onclick="show('numlibs')">Numerical Libraries &#8594;</a></div>
+</div>
+
+<div id="sec-numlibs" class="hidden">
+<div class="breadcrumb">Software Stack &rsaquo; Numerical Libraries</div>
+<h2>cuBLAS, cuDNN, CUTLASS, CuTe, FlashInfer, DeepGEMM <span class="new-badge">new</span></h2>
+  <p class="subtitle">The library stack between PyTorch and the metal — what each one does and when each one wins</p>
+
+  <div class="sec-h">The library tower</div>
+  <table>
+    <tr><th>Library</th><th>Owner</th><th>What it does</th><th>When it's used</th></tr>
+    <tr><td><strong>cuBLAS</strong></td><td>NVIDIA, closed-source</td><td>Highly tuned GEMM and BLAS-3 primitives. Picks the best precompiled kernel for given shape + precision.</td><td>The default GEMM backend for PyTorch, vLLM, and most engines on standard precisions.</td></tr>
+    <tr><td><strong>cuDNN</strong></td><td>NVIDIA, closed-source</td><td>Deep-learning ops (convolution, attention fusions, normalization). Tightly tuned for each GPU generation.</td><td>Convolution-heavy workloads, some attention paths, RNNs.</td></tr>
+    <tr><td><strong>CUTLASS</strong></td><td>NVIDIA, open-source (Apache 2.0)</td><td>A C++ template library for writing custom GEMMs. Lets you compose tile sizes, instruction shapes, and epilogues.</td><td>When cuBLAS doesn't have a fast kernel for your specific shape/precision (custom MoE GEMMs, fused attention variants, INT4 GEMMs).</td></tr>
+    <tr><td><strong>CuTe</strong></td><td>NVIDIA (part of CUTLASS 3.x)</td><td>"CUDA Tensors" — a layout algebra for describing how tile data flows through registers, shared memory, and Tensor Cores.</td><td>Writing modern Hopper/Blackwell kernels that need precise control over async copy and Tensor Core MMAs.</td></tr>
+    <tr><td><strong>FlashInfer</strong></td><td>UW + community, open-source</td><td>A specialized library of attention kernels for serving (PagedAttention, varlen attention, sparse attention).</td><td>vLLM's modern attention path, SGLang's RadixAttention, anywhere mixed prefill+decode batches need varlen kernels.</td></tr>
+    <tr><td><strong>DeepGEMM</strong></td><td>DeepSeek, open-source</td><td>FP8 GEMM kernels specialized for Hopper. Very small (~few hundred lines) and very fast on the precise shapes DeepSeek models use.</td><td>FP8 inference on H100/H200; reference for "what does a focused kernel achieve vs a general library?"</td></tr>
+  </table>
+
+  <div class="sec-h">When you'd hand-write a kernel</div>
+  <p>You don't write CUDA from scratch every day. The realistic pattern: an engine team writes new kernels when (1) a new model architecture has a GEMM shape cuBLAS doesn't tune well for, (2) a new precision (FP8, FP4, NVFP4) lands on a new GPU and needs library support, or (3) profiling shows a custom-fused kernel could replace 3–4 separate ops with one. FlashAttention, Marlin, DeepGEMM, and the per-engine MoE kernels all came from one of these three motivations.</p>
+
+  <div class="sec-h">Reading engine release notes through this lens</div>
+  <p>"Added DeepGEMM support" → faster FP8 inference on Hopper. "Switched attention backend to FlashInfer" → better paged + varlen handling, particularly for mixed prefill/decode batches. "CUTLASS 3.x integration" → engine can now target Hopper's WGMMA and async copy properly. Once you know which library does what, the changelog reads like an architecture diagram.</p>
+
+  <div class="resource-bar">📖 <a href="https://github.com/NVIDIA/cutlass" target="_blank">CUTLASS on GitHub</a><a href="https://github.com/flashinfer-ai/flashinfer" target="_blank">FlashInfer</a><a href="https://github.com/deepseek-ai/DeepGEMM" target="_blank">DeepGEMM</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('cuda')">&#8592; CUDA Primer</a><a class="pn-link pn-next" onclick="show('fusion')">Kernel Fusion &#8594;</a></div>
+</div>
+
+<div id="sec-fusion" class="hidden">
+<div class="breadcrumb">Software Stack &rsaquo; Kernel Fusion</div>
+<h2>Kernel fusion <span class="new-badge">new</span></h2>
+  <p class="subtitle">Why combining ops into one kernel is the most consistent source of inference speedups</p>
+
+  <div class="sec-h">The HBM round-trip problem</div>
+  <p>Most LLM ops alone are simple: layer norm is a few muls and adds, RoPE is a rotation, residual addition is just <code>+</code>. They're individually trivial. The problem is that each op, run as a separate kernel, has to (1) read its inputs from HBM into registers, (2) compute, (3) write the output back to HBM. Then the next kernel reads what was just written. For memory-bound ops, the HBM round-trip dominates the actual arithmetic by an order of magnitude or more.</p>
+  <p>Concrete example: a residual block does <code>y = x + LayerNorm(MLP(x))</code>. Run naively, that's at least 4 kernels (MLP up, MLP down, LayerNorm, add) and 4 HBM round-trips for the residual stream. Fused into one kernel, the intermediate values stay in registers/SRAM and the residual stream touches HBM exactly once.</p>
+
+  <div class="sec-h">Three flavors of fusion</div>
+  <table>
+    <tr><th>Flavor</th><th>How</th><th>Win</th></tr>
+    <tr><td><strong>Hand-written fused kernels</strong></td><td>Custom CUDA — fuse a known op pattern by hand (FlashAttention, Marlin, fused RoPE+attention, fused LayerNorm+residual)</td><td>Largest possible speedup on the targeted op; requires significant engineering per kernel.</td></tr>
+    <tr><td><strong>Compiler fusion</strong> (<code>torch.compile</code>, Triton)</td><td>Trace the model, identify fusible op patterns, emit a single generated kernel automatically.</td><td>Broad but conservative — captures simple element-wise + reduction fusions without manual work; doesn't beat hand-tuned for complex ops.</td></tr>
+    <tr><td><strong>Engine-level CUDA Graphs</strong></td><td>Not fusion strictly, but a sibling — replays a pre-recorded sequence of kernel launches with no host overhead.</td><td>Eliminates launch overhead but doesn't reduce HBM traffic.</td></tr>
+  </table>
+
+  <div class="sec-h">torch.compile in production</div>
+  <p>PyTorch 2.x introduced <code>torch.compile</code>, which traces a model's forward pass and uses a Triton-based backend to generate fused kernels for the parts it can. For LLM serving its biggest impact is fusing the small ops around attention (LayerNorm, RoPE, residuals) into the attention kernel proper — a 10–25% decode speedup without rewriting anything by hand. vLLM and SGLang both use <code>torch.compile</code> selectively; TRT-LLM does its own equivalent at engine-build time. The first run after a compile is slow (compilation takes seconds to minutes); subsequent runs use the cache.</p>
+
+  <div class="sec-h">When fusion fails or hurts</div>
+  <ul>
+    <li><strong>Shape changes invalidate compiled kernels.</strong> A new batch size or sequence length triggers a recompile. Engines manage this by capturing graphs for a finite set of "warmup" shapes and falling back to eager mode for the rest.</li>
+    <li><strong>Fused kernels are harder to profile.</strong> When a 5-op fused kernel is the hot spot, you can't tell which constituent op is the actual bottleneck without disabling fusion.</li>
+    <li><strong>Numerical drift.</strong> Fused kernels often re-order operations for performance; FP precision can differ from the eager-mode reference. For evals expecting bit-exact output, that's a problem.</li>
+  </ul>
+
+  <div class="resource-bar">📖 <a href="https://pytorch.org/docs/stable/torch.compiler.html" target="_blank">torch.compile docs</a><a href="https://triton-lang.org/" target="_blank">Triton — the language behind compiler-fused kernels</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('numlibs')">&#8592; Numerical Libraries</a><a class="pn-link pn-next" onclick="show('fileformats')">Model File Formats &#8594;</a></div>
+</div>
+
+<div id="sec-fileformats" class="hidden">
+<div class="breadcrumb">Software Stack &rsaquo; Model File Formats</div>
+<h2>Model file formats <span class="new-badge">new</span></h2>
+  <p class="subtitle">safetensors, ONNX, GGUF, and why one of them is the universal LLM serving default</p>
+
+  <div class="sec-h">The four formats you'll see</div>
+  <table>
+    <tr><th>Format</th><th>Maintained by</th><th>What it stores</th><th>Used for</th></tr>
+    <tr><td><strong>safetensors</strong></td><td>Hugging Face</td><td>Just weights. A simple header (JSON) + raw tensor data, memory-mapped on load.</td><td>The de facto LLM serving format. vLLM, SGLang, TRT-LLM all consume it natively.</td></tr>
+    <tr><td><strong>PyTorch .pt / .bin</strong></td><td>PyTorch</td><td>Pickled Python objects (potentially weights + optimizer state + arbitrary code).</td><td>Training output, legacy. <strong>Security risk</strong> — pickle can execute arbitrary code on load.</td></tr>
+    <tr><td><strong>ONNX</strong></td><td>Linux Foundation</td><td>Weights + the full execution graph in a portable serialization.</td><td>Cross-framework deployment, ONNX Runtime, some TensorRT paths.</td></tr>
+    <tr><td><strong>GGUF</strong></td><td>llama.cpp</td><td>Weights + metadata + in-file quantization (mixed-precision K-quants).</td><td>CPU and edge inference (Ollama, llama.cpp, LM Studio). Not used in GPU production.</td></tr>
+  </table>
+
+  <div class="sec-h">Why safetensors won for GPU serving</div>
+  <p>Three reasons:</p>
+  <ul>
+    <li><strong>Memory-mapped loading.</strong> The OS maps the file directly into virtual memory; the engine can lazily fault in only the tensors it needs, in the order it needs them. A 140 GB Llama 70B checkpoint can begin serving before the full file has even been read.</li>
+    <li><strong>Sharded loading.</strong> Large models ship as N shards (e.g., 30 × 5 GB shards for a 150 GB model). Each TP rank reads only the shards covering its slice, in parallel. Cuts cold-start I/O time by N.</li>
+    <li><strong>No code execution.</strong> The header is JSON; the tensors are raw bytes. Compare to <code>.pt</code>, where loading a checkpoint can run arbitrary Python — a real attack vector for shared model registries.</li>
+  </ul>
+
+  <div class="sec-h">ONNX — when it shows up</div>
+  <p>ONNX stores the model's <em>execution graph</em>, not just weights. Useful when you need to deploy across frameworks (PyTorch trained, served on ONNX Runtime), or when a kernel-fusing compiler (TensorRT) wants to consume the graph and generate optimized engines. The catch: novel architectures often don't export cleanly. DeepSeek V3's MLA was famously hard to export to ONNX because the standard ops didn't cover the latent compression, and engine teams had to hand-write the equivalent. ONNX is a better fit for stable, conventional architectures than for the cutting edge.</p>
+
+  <div class="sec-h">The release-day file-format dance</div>
+  <p>When a frontier model launches:</p>
+  <ol>
+    <li>Lab releases <strong>safetensors</strong> + tokenizer + config.json on Hugging Face.</li>
+    <li>vLLM/SGLang/TRT-LLM open day-zero PRs adding architecture support (config parsing, tensor mapping, attention kernel choice).</li>
+    <li>Quantization toolchains (AutoAWQ, llm-compressor, ModelOpt) re-quantize and re-publish FP8/INT4 variants.</li>
+    <li>llama.cpp converts to <strong>GGUF</strong> for CPU/edge.</li>
+    <li>NVIDIA publishes a <strong>NIM</strong> (containerized pre-quantized + pre-compiled engine) for production.</li>
+  </ol>
+  <p>The whole pipeline now happens inside hours of a release, not weeks. safetensors is the format that makes this speed possible — a single canonical source of truth that every downstream tool consumes the same way.</p>
+
+  <div class="resource-bar">📖 <a href="https://github.com/huggingface/safetensors" target="_blank">safetensors spec</a><a href="https://onnx.ai/" target="_blank">ONNX</a><a href="https://github.com/ggerganov/llama.cpp/blob/master/gguf-py/README.md" target="_blank">GGUF spec</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('fusion')">&#8592; Kernel Fusion</a><a class="pn-link pn-next" onclick="show('dynamo-orch')">NVIDIA Dynamo Orchestration &#8594;</a></div>
+</div>
+
+<div id="sec-dynamo-orch" class="hidden">
+<div class="breadcrumb">Software Stack &rsaquo; NVIDIA Dynamo Orchestration</div>
+<h2>NVIDIA Dynamo — orchestration above the engine <span class="new-badge">new</span></h2>
+  <p class="subtitle">Why a layer above vLLM/SGLang/TRT-LLM exists, and what it does that no single engine can</p>
+
+  <div class="sec-h">What Dynamo is, and what it isn't</div>
+  <p>Dynamo is <strong>not</strong> another inference engine. It sits one layer above engines and orchestrates them. A single Dynamo deployment can have vLLM workers, SGLang workers, and TRT-LLM workers under the same control plane, doing different jobs.</p>
+  <table>
+    <tr><th>Layer</th><th>Owns</th><th>Examples</th></tr>
+    <tr><td><strong>Inference engine</strong></td><td>Per-replica scheduling, KV cache, batching, kernel selection</td><td>vLLM, SGLang, TRT-LLM</td></tr>
+    <tr><td><strong>Dynamo (orchestration)</strong></td><td>Cross-replica routing, prefill/decode disaggregation, KV-aware load balancing, multi-node parallelism, SLA-based capacity planning</td><td>NVIDIA Dynamo</td></tr>
+    <tr><td><strong>Cluster scheduler</strong></td><td>Pod placement, autoscaling, GPU procurement</td><td>Kubernetes (with Dynamo as a controller)</td></tr>
+  </table>
+
+  <div class="sec-h">Four things Dynamo does that no single engine can</div>
+  <ul>
+    <li><strong>Disaggregated prefill/decode across the cluster.</strong> Routes prefill to a high-TFLOPS pool and decode to a high-bandwidth pool, transfers KV cache between them via NIXL-based RDMA, with the transpose kernel handling differing TP between fleets (see Disaggregation section).</li>
+    <li><strong>KV cache as a global resource.</strong> The KV Block Manager (KVBM) treats GPU HBM (G1), host RAM (G2), local SSD (G3), and networked storage (G4) as one pool with cache-aware routing — so any GPU in the cluster can resume any session.</li>
+    <li><strong>SLA-based planner.</strong> Instead of scaling on raw utilization, Dynamo's planner takes TTFT/TPS targets and decides how many prefill and decode replicas to run, of which engine type, with what TP/EP/PP plan. Capacity planning becomes a target function, not a manual ratio.</li>
+    <li><strong>Cross-engine routing.</strong> A short-prompt request can go to a vLLM replica with aggressive prefix caching; a long-context request can go to a TRT-LLM replica with a compiled engine; an MoE request can go to an SGLang replica with EP enabled. The right engine for each request, in one cluster.</li>
+  </ul>
+
+  <div class="sec-h">Why this layer didn't exist before</div>
+  <p>For a long time the orchestration concerns above were either folded into the engine itself (vLLM's production stack) or left to whatever you wrote on top of Kubernetes. The 2024–2025 wave of disaggregation, multi-tier KV, and multi-engine deployments made these concerns too cross-cutting to live inside any one engine. Dynamo (and similar orchestrators emerging from other vendors) is the response. If you find yourself building per-tenant KV-aware routing, prefill/decode autoscaling, and SLA-driven capacity planning by hand, that's the signal you've outgrown a single engine and need this layer.</p>
+
+  <div class="resource-bar">📖 <a href="https://github.com/ai-dynamo/dynamo" target="_blank">NVIDIA Dynamo on GitHub</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('fileformats')">&#8592; Model File Formats</a><a class="pn-link pn-next" onclick="show('profiling')">Profiling Tools &#8594;</a></div>
+</div>
+
+<div id="sec-profiling" class="hidden">
+<div class="breadcrumb">Software Stack &rsaquo; Profiling Tools</div>
+<h2>Profiling tools <span class="new-badge">new</span></h2>
+  <p class="subtitle">Nsight Systems, Nsight Compute, PyTorch Profiler — picking the right tool for "why is this slow?"</p>
+
+  <div class="sec-h">Three tools, three altitudes</div>
+  <table>
+    <tr><th>Tool</th><th>Altitude</th><th>What it shows</th><th>When to reach for it</th></tr>
+    <tr><td><strong>PyTorch Profiler</strong></td><td>Framework-level</td><td>Time spent per Python op (attention, FFN, layer norm), CUDA stream activity, memory allocation timeline</td><td>"Where is my engine spending time at the op level?"</td></tr>
+    <tr><td><strong>Nsight Systems (nsys)</strong></td><td>System-wide timeline</td><td>CPU threads, CUDA streams, kernel launches, NCCL collective ops, NVLink/PCIe traffic — all on one timeline</td><td>"Why is there a gap?" / "Is the GPU starved waiting for the CPU?" / "Are my collectives overlapping with compute?"</td></tr>
+    <tr><td><strong>Nsight Compute (ncu)</strong></td><td>Per-kernel deep dive</td><td>One kernel's SM occupancy, register pressure, memory bandwidth utilization, Tensor Core throughput, stall reasons</td><td>"This specific kernel is the bottleneck — why?"</td></tr>
+  </table>
+
+  <div class="sec-h">The standard escalation path</div>
+  <ol>
+    <li><strong>Start with PyTorch Profiler</strong> to identify which op family dominates. If 70% of time is in attention, that's where to dig.</li>
+    <li><strong>Drop to Nsight Systems</strong> if the issue is "the engine is slow but no single op stands out." Look for gaps between kernels (host-side overhead → CUDA Graphs), uneven stream utilization (load imbalance), or collective ops blocking compute (poor TP overlap).</li>
+    <li><strong>Pull out Nsight Compute</strong> only when you've isolated a specific kernel and need to know whether it's compute-bound, memory-bound, or starved on instruction issue. This is where roofline analysis happens — ncu reports arithmetic intensity, achieved bandwidth, and how close you are to the SOL.</li>
+  </ol>
+
+  <div class="sec-h">What "the GPU is at 100% utilization" actually means</div>
+  <p><code>nvidia-smi</code>'s GPU-Util column reports "any kernel ran during the last sampling interval" — it's binary, not throughput. A GPU running one tiny kernel reports 100%. The metric you actually want for inference is <strong>SM activity</strong> or <strong>memory bandwidth utilization</strong>, both available from Nsight Systems / DCGM. The number of production incidents that started with "but nvidia-smi says 100%!" is uncomfortably large.</p>
+
+  <div class="sec-h">DCGM for production telemetry</div>
+  <p>Nsight tools are interactive and offline. <strong>DCGM</strong> (Data Center GPU Manager) is the production telemetry equivalent — exports metrics like SM occupancy, HBM bandwidth, NVLink traffic, and tensor-core utilization to Prometheus/Grafana. A reasonable production observability stack runs DCGM continuously and reaches for Nsight only when DCGM flags an anomaly.</p>
+
+  <div class="resource-bar">📖 <a href="https://developer.nvidia.com/nsight-systems" target="_blank">Nsight Systems</a><a href="https://developer.nvidia.com/nsight-compute" target="_blank">Nsight Compute</a><a href="https://docs.nvidia.com/datacenter/dcgm/latest/" target="_blank">DCGM</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('dynamo-orch')">&#8592; NVIDIA Dynamo Orchestration</a><a class="pn-link pn-next" onclick="show('quiz-ch7')">Chapter 7 Quiz &#8594;</a></div>
+</div>
+
+<div id="sec-quiz-ch7" class="hidden">
+<div class="breadcrumb">Software Stack &rsaquo; Quiz</div>
+<h2>Chapter 7 Quiz — Software Stack</h2>
+  <p class="subtitle">Test your understanding of CUDA, GEMM, fusion, file formats, Dynamo orchestration, and profiling</p>
+  <div class="quiz">
+    <div class="quiz-title">Chapter 7 Quiz — Software Stack</div>
+    <details class="quiz-q">
+      <summary><span class="quiz-num">1</span> Why are CUDA Graphs a meaningful decode-step optimization but not a meaningful prefill optimization?</summary>
+      <div class="quiz-a">A decode step launches dozens of small kernels (attention sub-ops, FFN, norms) totaling ~25–50% of the step in pure host-side launch overhead. CUDA Graphs replay that whole sequence in one dispatch, eliminating most of that overhead. Prefill, by contrast, is a single big GEMM-heavy forward pass — kernel launches are tiny relative to the work, so eliminating them recovers very little. CUDA Graphs are an optimization for <em>many small kernels</em>, which is exactly decode's profile.</div>
+    </details>
+    <details class="quiz-q">
+      <summary><span class="quiz-num">2</span> An engine team replaces cuBLAS with DeepGEMM for FP8 GEMMs on H100. Why might this be a 30%+ speedup despite cuBLAS being NVIDIA's flagship library?</summary>
+      <div class="quiz-a">cuBLAS is general — it must serve every shape, precision, and access pattern. DeepGEMM is specialized: just FP8, just Hopper, just the GEMM shapes DeepSeek's models actually use. Specialization lets it pick instruction sequences and tile sizes that cuBLAS's heuristics would never choose because they wouldn't generalize. The win comes from <em>narrowness</em>, not better engineering. The same pattern is why Marlin beat cuBLAS on INT4 weight-only GEMMs and why FlashAttention beat cuDNN on attention.</div>
+    </details>
+    <details class="quiz-q">
+      <summary><span class="quiz-num">3</span> Why is safetensors safer than PyTorch <code>.pt</code> files for shared model registries?</summary>
+      <div class="quiz-a"><code>.pt</code> uses Python pickle, which can execute arbitrary code on load — a malicious checkpoint can run shell commands the moment <code>torch.load()</code> hits it. safetensors stores weights as raw bytes with a JSON header; loading is purely deserialization with no code execution surface. For Hugging Face Hub-style public model sharing, that difference is the whole reason safetensors became the default.</div>
+    </details>
+    <details class="quiz-q">
+      <summary><span class="quiz-num">4</span> Your model serves at "100% GPU utilization" per <code>nvidia-smi</code> but TPS is half what theory predicts. What's most likely going on, and which tool tells you?</summary>
+      <div class="quiz-a"><code>nvidia-smi</code>'s GPU-Util is binary ("any kernel ran during the sampling window") — it reports 100% even if the kernels were tiny. The actual issue is usually low <em>SM occupancy</em> or low <em>memory bandwidth utilization</em>. <strong>Nsight Systems</strong> gives the timeline view (gaps between kernels, stream activity); <strong>Nsight Compute</strong> on the suspect kernel reports occupancy and achieved bandwidth. In production, DCGM exports the same metrics continuously to Prometheus.</div>
+    </details>
+    <details class="quiz-q">
+      <summary><span class="quiz-num">5</span> A request arrives needing 50 ms of prefill and 5 seconds of decode. Why might NVIDIA Dynamo route the prefill and decode to different replicas — possibly running different engines?</summary>
+      <div class="quiz-a">Prefill is compute-bound (wants high TFLOPS, high TP); decode is bandwidth-bound (wants high HBM bandwidth, possibly different TP). Dynamo's disaggregated routing sends prefill to a fleet optimized for compute and decode to a fleet optimized for bandwidth, transferring KV cache between them via RDMA. The two fleets can even run different engines (e.g., TRT-LLM compiled engine for prefill, vLLM for decode) — Dynamo treats each fleet as a pool and picks the right one per request. This is the orchestration layer's job; no single engine does it alone.</div>
+    </details>
+  </div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('profiling')">&#8592; Profiling Tools</a><a class="pn-link pn-next" onclick="show('gpuinternals')">GPU Internals &#8594;</a></div>
+</div>
+
+<div id="sec-gpuinternals" class="hidden">
+<div class="breadcrumb">Hardware Depth &rsaquo; GPU Internals</div>
+<h2>GPU internals — what's actually inside the chip <span class="new-badge">new</span></h2>
+  <p class="subtitle">SMs, CUDA cores, Tensor Cores, SFUs, and the MMA op that powers every matmul</p>
+
+  <div class="sec-h">The basic units</div>
+  <table>
+    <tr><th>Unit</th><th>Count on H100</th><th>What it does</th></tr>
+    <tr><td><strong>SM (Streaming Multiprocessor)</strong></td><td>132 (some idle for yield)</td><td>The basic execution unit. One thread block from a kernel launch runs on one SM. Each SM contains its own scheduler, registers, shared memory, and execution units.</td></tr>
+    <tr><td><strong>CUDA Cores</strong></td><td>128 per SM (16,896 total)</td><td>Scalar FP32/INT32 ALUs. Handle non-matmul math: activation functions, layer norm, RoPE, residual additions.</td></tr>
+    <tr><td><strong>Tensor Cores</strong></td><td>4 per SM (528 total) — 4th-gen on Hopper</td><td>Matrix-multiply-accumulate (MMA) units. Each one performs <code>D = A · B + C</code> on small tile shapes per cycle. ~95% of LLM inference compute happens here.</td></tr>
+    <tr><td><strong>SFUs (Special Function Units)</strong></td><td>4 per SM</td><td>Hardware-accelerated transcendentals — <code>sin</code>, <code>cos</code>, <code>exp</code>, <code>log</code>, reciprocal, square root. Critical for softmax and activations.</td></tr>
+  </table>
+
+  <div class="sec-h">The MMA op — what a Tensor Core actually computes</div>
+  <p>A Tensor Core executes a single matrix-multiply-accumulate instruction:</p>
+  <div class="highlight"><code>D = A · B + C</code></div>
+  <p>where A, B, C, D are small fixed-shape tiles. On Hopper FP16, one Tensor Core executes a 16×16×16 MMA per cycle — that's 4096 multiply-adds (8192 FLOPs) every clock tick from one Tensor Core. With 528 Tensor Cores at 1.83 GHz, the H100 hits ~989 TFLOPS theoretical peak in FP16. The whole game of GEMM kernel optimization is feeding these MMAs without stalls.</p>
+  <p>Newer generations introduce wider/denser MMAs: Hopper added <code>wgmma</code> (warp-group MMA, 64×64×16 in one op), Blackwell adds 5th-gen Tensor Cores supporting FP4/MXFP4/NVFP4 natively at 2× the throughput of FP8.</p>
+
+  <div class="sec-h">Sparse Tensor Cores (2:4 structured sparsity)</div>
+  <p>Modern Tensor Cores can exploit a specific sparsity pattern: <strong>2:4 structured sparsity</strong> — in every group of 4 weights, exactly 2 must be zero. With this constraint baked in, the Tensor Core skips half the multiplies, doubling effective throughput. The constraint is strict: random ~50% sparsity does not qualify. Models trained with 2:4 awareness achieve essentially full quality. The advertised "TF32 with sparsity" or "FP8 with sparsity" peak FLOPS in NVIDIA spec sheets are this 2× figure; without sparsity-aware training, you get the dense numbers.</p>
+
+  <div class="sec-h">SM occupancy and why it matters</div>
+  <p>Each SM has finite resources: registers, shared memory, threads-per-block. A kernel that uses too many registers per thread reduces the number of concurrent thread blocks an SM can host (lower <strong>occupancy</strong>), which means fewer warps available to hide memory latency. Higher occupancy ≠ better performance automatically — but very low occupancy almost always means you're leaving performance on the table. Nsight Compute reports occupancy as a primary metric.</p>
+
+  <div class="resource-bar">📖 <a href="https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#hardware-implementation" target="_blank">CUDA Hardware Implementation</a><a href="https://developer.nvidia.com/blog/nvidia-hopper-architecture-in-depth/" target="_blank">Hopper architecture deep dive</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('quiz-ch7')">&#8592; Chapter 7 Quiz</a><a class="pn-link pn-next" onclick="show('cachehier')">Cache Hierarchy &#8594;</a></div>
+</div>
+
+<div id="sec-cachehier" class="hidden">
+<div class="breadcrumb">Hardware Depth &rsaquo; Cache Hierarchy</div>
+<h2>The GPU memory and cache hierarchy <span class="new-badge">new</span></h2>
+  <p class="subtitle">Registers, L1/SRAM, L2, HBM — bandwidths, sizes, and what optimization techniques each tier enables</p>
+
+  <div class="sec-h">The hierarchy on H100</div>
+  <table>
+    <tr><th>Tier</th><th>Size</th><th>Bandwidth (approx)</th><th>Scope</th><th>What lives here</th></tr>
+    <tr><td><strong>Registers</strong></td><td>~256 KB per SM</td><td>cycle-rate (TBs/s)</td><td>Per-thread</td><td>Currently active values inside a kernel</td></tr>
+    <tr><td><strong>L1 / Shared memory (SRAM)</strong></td><td>256 KB per SM (configurable split)</td><td>~20 TB/s</td><td>Per-block</td><td>Tiles staged for Tensor Core MMAs (FlashAttention works here)</td></tr>
+    <tr><td><strong>L2 cache</strong></td><td>50 MB (chip-wide)</td><td>~7 TB/s</td><td>All SMs</td><td>Active KV cache pages, working tensors</td></tr>
+    <tr><td><strong>HBM3</strong></td><td>80 GB</td><td>3.35 TB/s</td><td>Full GPU</td><td>Model weights, full KV cache, large activations</td></tr>
+    <tr><td><strong>Host RAM (over PCIe 5.0)</strong></td><td>TBs</td><td>~64 GB/s</td><td>System</td><td>KV cache spillover (G2 in the 4-tier hierarchy)</td></tr>
+  </table>
+
+  <div class="sec-h">Each tier enables a specific optimization</div>
+  <ul>
+    <li><strong>SRAM tiling →</strong> FlashAttention. Keeps the N×N attention score matrix in SRAM tiles so it never touches HBM. Without on-chip SRAM, FlashAttention would not exist.</li>
+    <li><strong>L2 cache →</strong> KV cache reuse and continuous batching efficiency. Active sequences' KV pages stay warm in L2 between decode steps; cold sequences fall back to HBM. PagedAttention's block layout is partly tuned to keep recently used blocks L2-resident.</li>
+    <li><strong>HBM bandwidth →</strong> the cap on decode throughput. Every decode step loads the full model weights from HBM. A 70B FP16 model = 140 GB; at 3.35 TB/s that's ~42 ms of pure HBM read time per decode step. This is the floor — no kernel optimization gets you below it without reducing model size or increasing batch size.</li>
+    <li><strong>PCIe / host RAM →</strong> swap-based preemption, KV offload to G2. Anything that crosses this boundary pays a 50× bandwidth penalty vs HBM.</li>
+  </ul>
+
+  <div class="sec-h">Why H200 is "the same H100 with more bandwidth"</div>
+  <p>H200 has identical compute (989 TFLOPS FP16) to H100. The difference: HBM3e instead of HBM3, raising bandwidth from 3.35 TB/s to ~4.8 TB/s, and capacity from 80 GB to 141 GB. For decode-bound workloads (the common case), H200 is ~40% faster per GPU than H100 — entirely from feeding the same Tensor Cores faster. This is the cache hierarchy in action: when you're already memory-bound, more bandwidth is more performance, full stop.</p>
+
+  <div class="resource-bar">📖 <a href="https://www.nvidia.com/en-us/data-center/h100/" target="_blank">H100 / H200 datasheets</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('gpuinternals')">&#8592; GPU Internals</a><a class="pn-link pn-next" onclick="show('archroadmap')">Architecture Roadmap &#8594;</a></div>
+</div>
+
+<div id="sec-archroadmap" class="hidden">
+<div class="breadcrumb">Hardware Depth &rsaquo; Architecture Roadmap</div>
+<h2>NVIDIA architecture roadmap <span class="new-badge">new</span></h2>
+  <p class="subtitle">Ampere → Hopper → Blackwell → Rubin → Feynman, and what each generation actually changed</p>
+
+  <div class="sec-h">The generations that matter for inference</div>
+  <table>
+    <tr><th>Generation</th><th>Year</th><th>Flagship</th><th>What it added that matters for inference</th></tr>
+    <tr><td><strong>Turing</strong></td><td>2018</td><td>T4</td><td>First-gen Tensor Cores. Still common as a cheap inference instance.</td></tr>
+    <tr><td><strong>Ampere</strong></td><td>2020</td><td>A100</td><td>3rd-gen Tensor Cores; BF16 native; structured sparsity; NVLink 3.</td></tr>
+    <tr><td><strong>Ada Lovelace</strong></td><td>2022</td><td>L40, L4</td><td>FP8 Tensor Cores; graphics-oriented, no NVLink. PCIe-only — unsuitable for TP across cards.</td></tr>
+    <tr><td><strong>Hopper</strong></td><td>2022</td><td>H100, H200</td><td>4th-gen Tensor Cores; <strong>FP8</strong> native; thread-block clusters; async copy; distributed shared memory; FlashAttention 3 hardware support.</td></tr>
+    <tr><td><strong>Blackwell</strong></td><td>2024</td><td>B100, B200, GB200</td><td>5th-gen Tensor Cores; <strong>FP4 / MXFP4 / NVFP4</strong> native; FlashAttention 4 hardware support; chip-to-chip NVLink-C2C; transformer engine 2.</td></tr>
+    <tr><td><strong>Rubin</strong></td><td>2026</td><td>R-series + Vera CPU</td><td>HBM4; explicit prefill chip ("CPX") for disaggregated serving; Vera ARM CPU on-package.</td></tr>
+    <tr><td><strong>Feynman</strong></td><td>~2028 (announced)</td><td>F-series</td><td>Next-gen architecture details still under wraps.</td></tr>
+  </table>
+
+  <div class="sec-h">The recurring pattern — each generation adds a precision and changes attention</div>
+  <p>If you squint, every generation since Ampere has done two things:</p>
+  <ol>
+    <li><strong>Add a smaller precision</strong> with native Tensor Core support. Ampere added BF16. Hopper added FP8. Blackwell added FP4 and microscaling formats. Each step roughly doubles raw TFLOPS at the new precision relative to the previous one. <strong>Quantization research follows hardware</strong>: FP8 only became a serving default once H100s shipped; MXFP4/NVFP4 only matters once you have Blackwells.</li>
+    <li><strong>Add hardware support for the next FlashAttention.</strong> FA3 needed Hopper's async copy and warpgroup-MMA. FA4 needs Blackwell's tensor memory accelerator. Each FlashAttention generation lands ~6 months after the GPU ships and unlocks longer contexts at lower cost.</li>
+  </ol>
+
+  <div class="sec-h">When does generation matter operationally?</div>
+  <ul>
+    <li><strong>Capacity planning.</strong> An H100 fleet has different economics from a B200 fleet — different precisions, different per-GPU TFLOPS, different memory. Reservations made at one generation expire and must be re-evaluated.</li>
+    <li><strong>Engine support lag.</strong> A new generation usually gets <em>partial</em> engine support at launch; advanced features (FP4, async tile, FA4) trail by 3–9 months. New gen ≠ instantly usable in production.</li>
+    <li><strong>Model-architecture co-design.</strong> Frontier model labs increasingly target specific generations (DeepSeek V3 was designed around H100 FP8, FLUX assumes Blackwell for video, GPT-OSS ships in MXFP4 because Blackwell exists). Running a Blackwell-targeted model on Hopper means leaving real performance on the table.</li>
+  </ul>
+
+  <div class="resource-bar">📖 <a href="https://developer.nvidia.com/blog/nvidia-blackwell-architecture/" target="_blank">Blackwell architecture overview</a><a href="https://nvidianews.nvidia.com/news/nvidia-rubin" target="_blank">Rubin announcement</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('cachehier')">&#8592; Cache Hierarchy</a><a class="pn-link pn-next" onclick="show('superchips')">Superchips & Racks &#8594;</a></div>
+</div>
+
+<div id="sec-superchips" class="hidden">
+<div class="breadcrumb">Hardware Depth &rsaquo; Superchips & Racks</div>
+<h2>Superchips and rack-scale systems <span class="new-badge">new</span></h2>
+  <p class="subtitle">Grace, GB200, NVL72, NVL144 — when the unit of capacity is a rack, not a server</p>
+
+  <div class="sec-h">From server to rack as the unit of deployment</div>
+  <p>For a decade the standard inference unit was a <strong>single 8-GPU node</strong>: 8 GPUs connected by NVLink within the box, InfiniBand across boxes. Frontier models are starting to outgrow this. A 405B-parameter dense model in BF16 needs ~800 GB of HBM; a multi-tenant production deployment of an MoE model wants 16+ experts with EP ≥ 16. Both push beyond what an 8-GPU node can host with low-latency interconnect.</p>
+  <p>NVIDIA's response: package multiple nodes into a single NVLink-coherent <em>rack</em>, with all GPUs reachable over NVLink instead of InfiniBand.</p>
+
+  <div class="sec-h">The current and upcoming rack systems</div>
+  <table>
+    <tr><th>System</th><th>GPUs</th><th>CPUs</th><th>Total HBM</th><th>What it enables</th></tr>
+    <tr><td><strong>GH200</strong> superchip</td><td>1 H200 + 1 Grace CPU</td><td>1 Grace</td><td>141 GB HBM3e + 480 GB LPDDR5X</td><td>NVLink-C2C 900 GB/s between GPU and CPU — KV cache spill to host RAM at near-HBM bandwidth.</td></tr>
+    <tr><td><strong>GB200</strong> superchip</td><td>2 B200 + 1 Grace CPU</td><td>1 Grace</td><td>~384 GB HBM3e</td><td>The Blackwell building block. Two GPUs and one CPU on one board with NVLink-C2C.</td></tr>
+    <tr><td><strong>NVL72</strong> rack</td><td>72 B200 (36 GB200 boards)</td><td>36 Grace</td><td>~13.5 TB</td><td>All 72 GPUs in one NVLink domain at 1.8 TB/s. TP up to 72-way; EP across 72 experts with no InfiniBand hop.</td></tr>
+    <tr><td><strong>Vera Rubin NVL144</strong></td><td>144 R-series</td><td>Vera CPUs</td><td>~30+ TB</td><td>Doubles the NVLink domain; introduces dedicated prefill chips ("CPX") for disaggregated serving.</td></tr>
+  </table>
+
+  <div class="sec-h">Why this changes serving topology</div>
+  <p>Inside an NVL72, the all-reduce that used to be "intra-node NVLink fast vs inter-node InfiniBand slow" becomes "all-fast-everywhere, up to 72 GPUs." Concretely:</p>
+  <ul>
+    <li><strong>TP scales further.</strong> An 8-way TP cap in a single node becomes practical at TP16/TP32/TP72 inside an NVL72 rack. Latency per token drops proportionally.</li>
+    <li><strong>EP across many experts becomes affordable.</strong> Mixed TP+EP for MoE models can run EP72 inside the rack with all-to-all over NVLink instead of InfiniBand.</li>
+    <li><strong>Disaggregation stays inside the rack.</strong> Prefill→decode KV transfer over NVLink at 1.8 TB/s instead of InfiniBand at 50 GB/s — a 36× speedup on the KV-transfer hop, eliminating disaggregation's biggest tax.</li>
+  </ul>
+
+  <div class="sec-h">The Grace / Vera CPU pieces</div>
+  <p>Grace (current, ARM-based) and Vera (next-gen, ARM-based) are not generic CPUs — they're specifically designed to sit next to the GPU with a 900 GB/s coherent interconnect. The point isn't CPU speed; it's that <strong>host RAM becomes a usable spillover tier</strong> for KV cache (G2 in the 4-tier hierarchy) and LoRA adapters at near-HBM bandwidth. Without NVLink-C2C, host RAM was 50× slower than HBM and hence rarely touched on the hot path. With it, multi-TB G2 caches become serving-relevant.</p>
+
+  <div class="resource-bar">📖 <a href="https://www.nvidia.com/en-us/data-center/gb200-nvl72/" target="_blank">GB200 NVL72</a><a href="https://nvidianews.nvidia.com/news/nvidia-vera-rubin-nvl144" target="_blank">Vera Rubin NVL144</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('archroadmap')">&#8592; Architecture Roadmap</a><a class="pn-link pn-next" onclick="show('mig')">MIG Slicing &#8594;</a></div>
+</div>
+
+<div id="sec-mig" class="hidden">
+<div class="breadcrumb">Hardware Depth &rsaquo; MIG Slicing</div>
+<h2>MIG — Multi-Instance GPU <span class="new-badge">new</span></h2>
+  <p class="subtitle">Carving one physical GPU into smaller hardware-isolated GPUs</p>
+
+  <div class="sec-h">The problem MIG solves</div>
+  <p>An H100 has 132 SMs and 80 GB of HBM. For a 7B model in INT4, that's overkill — the model fits in 4 GB and uses a fraction of the SMs. But you can't just run multiple processes on one GPU and expect predictable latency: they share L2, HBM, scheduler, and noisy-neighbor effects are real. <strong>MIG (Multi-Instance GPU)</strong> partitions the GPU at the hardware level into up to 7 isolated instances, each with its own slice of SMs, L2, and HBM, with hardware-enforced QoS.</p>
+
+  <div class="sec-h">How the partitioning works</div>
+  <table>
+    <tr><th>Profile (H100)</th><th>SMs</th><th>HBM</th><th>Use</th></tr>
+    <tr><td>1g.10gb</td><td>~14</td><td>10 GB</td><td>Smallest slice — embedding models, small classifiers</td></tr>
+    <tr><td>2g.20gb</td><td>~28</td><td>20 GB</td><td>Quantized 7B models, Whisper</td></tr>
+    <tr><td>3g.40gb</td><td>~42</td><td>40 GB</td><td>Mid-size models</td></tr>
+    <tr><td>7g.80gb (full GPU)</td><td>132</td><td>80 GB</td><td>One job uses the whole device — large LLMs</td></tr>
+  </table>
+  <p>You configure MIG profiles via <code>nvidia-smi mig</code> at the driver level. Each instance appears to userspace as a separate CUDA device. Kubernetes-level GPU operators (NVIDIA's K8s device plugin, GPU Operator) advertise MIG instances as schedulable resources.</p>
+
+  <div class="sec-h">When MIG is the right answer</div>
+  <ul>
+    <li><strong>Multi-tenant small-model serving.</strong> Seven tenants each running a quantized 7B model on a shared H100 — MIG gives each tenant a real GPU's worth of isolation without dedicating a full chip.</li>
+    <li><strong>Live ASR / specialized models</strong> with predictable per-instance load that doesn't need the full chip.</li>
+    <li><strong>Dev/test/CI shared pools</strong> where you want isolation but not dedicated hardware per developer.</li>
+  </ul>
+
+  <div class="sec-h">When MIG is the wrong answer</div>
+  <ul>
+    <li><strong>Frontier LLMs.</strong> Anything over ~30B parameters wants the full GPU; MIG just reduces what's available.</li>
+    <li><strong>Tensor parallelism.</strong> MIG instances cannot communicate over NVLink; TP across MIG slices is not a thing. If you need TP, you need the whole GPU.</li>
+    <li><strong>Bursty load.</strong> MIG slices are statically sized — you can't temporarily borrow capacity from an idle neighbor. Continuous batching across the whole GPU usually wins on bursty workloads.</li>
+  </ul>
+
+  <div class="resource-bar">📖 <a href="https://docs.nvidia.com/datacenter/tesla/mig-user-guide/" target="_blank">MIG User Guide</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('superchips')">&#8592; Superchips & Racks</a><a class="pn-link pn-next" onclick="show('otheraccel')">Non-NVIDIA Accelerators &#8594;</a></div>
+</div>
+
+<div id="sec-otheraccel" class="hidden">
+<div class="breadcrumb">Hardware Depth &rsaquo; Non-NVIDIA Accelerators</div>
+<h2>Non-NVIDIA accelerators <span class="new-badge">new</span></h2>
+  <p class="subtitle">TPU, Trainium, Groq, Cerebras, Etched, AMD — what each is good at and where the LLM serving market actually uses them</p>
+
+  <div class="sec-h">The landscape</div>
+  <table>
+    <tr><th>Accelerator</th><th>Vendor</th><th>Memory model</th><th>Where it's used in LLM serving</th></tr>
+    <tr><td><strong>Google TPU</strong> (v4, v5e, v5p, Trillium)</td><td>Google</td><td>HBM, 2D torus interconnect</td><td>Internal Google (Gemini), GCP-hosted JAX/MaxText workloads, some open-source via OpenXLA. Not common outside Google's ecosystem.</td></tr>
+    <tr><td><strong>AWS Inferentia / Trainium</strong></td><td>AWS</td><td>HBM, NeuronLink</td><td>AWS-hosted inference (Bedrock, SageMaker NeuronCore). Strong cost efficiency for AWS-native customers; weaker open-source ecosystem than CUDA.</td></tr>
+    <tr><td><strong>Groq LPU</strong></td><td>Groq</td><td>SRAM-only (no HBM!)</td><td>Hosted inference API. Very low latency on small-medium models because everything fits in SRAM; capacity-constrained for big models.</td></tr>
+    <tr><td><strong>Cerebras WSE-3</strong></td><td>Cerebras</td><td>Wafer-scale SRAM</td><td>Hosted inference API. Extremely fast TPS on a single replica; few production users compared to GPU clouds.</td></tr>
+    <tr><td><strong>Etched Sohu</strong></td><td>Etched</td><td>Transformer-fixed ASIC</td><td>Bet on transformer architecture being stable. Inference-only. Early-stage; not yet in mainstream production.</td></tr>
+    <tr><td><strong>AMD Instinct MI300X / MI350X</strong></td><td>AMD</td><td>HBM3, Infinity Fabric</td><td>Production GPU alternative. Comparable HBM/TFLOPS to H100/H200; ROCm software stack catching up to CUDA. vLLM and SGLang both have AMD backends.</td></tr>
+    <tr><td><strong>Qualcomm Cloud AI 100</strong></td><td>Qualcomm</td><td>On-chip + DDR</td><td>Niche; cost-optimized inference for specific workloads.</td></tr>
+    <tr><td><strong>SambaNova RDU</strong></td><td>SambaNova</td><td>3-tier memory</td><td>Hosted inference; small market share.</td></tr>
+  </table>
+
+  <div class="sec-h">Why CUDA still dominates</div>
+  <p>The hardware landscape is more diverse than the software landscape. NVIDIA has ~85%+ of training and inference deployment despite many of these alternatives being competitive on raw silicon. The reasons are stack-deep:</p>
+  <ul>
+    <li><strong>Kernels.</strong> Years of tuned libraries (cuBLAS, cuDNN, CUTLASS, FlashAttention, DeepGEMM) targeting CUDA. Other vendors are still porting equivalents.</li>
+    <li><strong>Engines.</strong> vLLM, SGLang, TRT-LLM all started CUDA-first. AMD ROCm has the strongest non-CUDA support; others are partial.</li>
+    <li><strong>Models.</strong> Frontier model labs train and tune on H100/H200/B200. Day-zero engine support for new model architectures is a CUDA story.</li>
+    <li><strong>Talent.</strong> The pool of engineers who can hand-write a fast attention kernel on CUDA is ~10× larger than for any other platform.</li>
+  </ul>
+
+  <div class="sec-h">Where the alternatives are real today</div>
+  <p>If you're an AWS-native shop with cost pressure, Inferentia/Trainium have real economics for stable workloads. If you're already inside Google, TPUs are the obvious choice. AMD MI300X is the most credible drop-in alternative for H100/H200-class workloads — same engines, similar TFLOPS, often better $/TFLOP, ROCm gap narrowing every quarter. Groq and Cerebras win on specific latency-sensitive APIs. The rest are niche.</p>
+
+  <div class="resource-bar">📖 <a href="https://aws.amazon.com/machine-learning/trainium/" target="_blank">AWS Trainium</a><a href="https://www.amd.com/en/products/accelerators/instinct/mi300.html" target="_blank">AMD Instinct</a><a href="https://groq.com/" target="_blank">Groq</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('mig')">&#8592; MIG Slicing</a><a class="pn-link pn-next" onclick="show('formfactors')">PCIe vs SXM &#8594;</a></div>
+</div>
+
+<div id="sec-formfactors" class="hidden">
+<div class="breadcrumb">Hardware Depth &rsaquo; PCIe vs SXM</div>
+<h2>PCIe vs SXM form factors <span class="new-badge">new</span></h2>
+  <p class="subtitle">Same chip, different package — and why the form factor sometimes matters more than the chip</p>
+
+  <div class="sec-h">The two packages</div>
+  <table>
+    <tr><th></th><th>PCIe</th><th>SXM</th></tr>
+    <tr><td><strong>Physical form</strong></td><td>Standard PCIe card; slots into a server backplane</td><td>NVIDIA's mezzanine form factor; mounts directly to a baseboard</td></tr>
+    <tr><td><strong>Power budget</strong></td><td>~300–400 W (limited by PCIe slot power)</td><td>700+ W (custom power delivery)</td></tr>
+    <tr><td><strong>Memory bandwidth</strong></td><td>Slightly lower (e.g., H100 PCIe = 2 TB/s vs SXM = 3.35 TB/s)</td><td>Full advertised bandwidth</td></tr>
+    <tr><td><strong>NVLink</strong></td><td>Optional bridge between adjacent cards (~600 GB/s, 2-card pairs only)</td><td>NVSwitch fabric — all 8 GPUs in the box reach each other at 900 GB/s</td></tr>
+    <tr><td><strong>Cooling</strong></td><td>Air-cooled in standard servers</td><td>Liquid or high-CFM air; requires purpose-built chassis</td></tr>
+    <tr><td><strong>Cost</strong></td><td>Lower per GPU; cheaper total system</td><td>Higher per GPU; only available in HGX/DGX-class systems</td></tr>
+  </table>
+
+  <div class="sec-h">Why this matters for inference</div>
+  <p>For LLM serving at scale, the SXM advantages compound:</p>
+  <ul>
+    <li><strong>Tensor parallelism needs NVLink.</strong> 8-way TP across an SXM node is normal; 8-way TP across PCIe cards (without a full NVSwitch) chokes on interconnect bandwidth.</li>
+    <li><strong>HBM bandwidth gap moves the roofline.</strong> A 40% bandwidth difference (2 TB/s vs 3.35 TB/s on H100) translates almost 1-for-1 to decode throughput on memory-bound workloads.</li>
+    <li><strong>Power headroom enables sustained boost.</strong> SXM cards can hold higher clocks longer under load; PCIe cards throttle sooner under sustained inference traffic.</li>
+  </ul>
+  <p>For batch inference, embedding workloads, or single-GPU serving of small models, PCIe is fine and cheaper. For frontier-model serving with TP/EP, SXM is effectively required. Cloud SKUs reflect this: H100 PCIe instances (AWS p5.48xlarge variants, GCP A3) coexist with H100 SXM instances (AWS p5e, DGX) at very different prices.</p>
+
+  <div class="sec-h">L4, L40, L40S — the PCIe-only Ada line</div>
+  <p>The Ada Lovelace generation (L4, L40, L40S) is PCIe-only. No NVLink, no SXM. NVIDIA's positioning is graphics + light inference; in practice, these cards are a real option for embedding services, small-model serving, and single-GPU CV workloads — but they fundamentally cannot do tensor-parallel large-model serving. Buying L40s and trying to run TP4 on Llama 70B is a common, expensive mistake.</p>
+
+  <div class="resource-bar">📖 <a href="https://www.nvidia.com/en-us/data-center/h100/" target="_blank">H100 PCIe vs SXM specs</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('otheraccel')">&#8592; Non-NVIDIA Accelerators</a><a class="pn-link pn-next" onclick="show('quiz-ch8')">Chapter 8 Quiz &#8594;</a></div>
+</div>
+
+<div id="sec-quiz-ch8" class="hidden">
+<div class="breadcrumb">Hardware Depth &rsaquo; Quiz</div>
+<h2>Chapter 8 Quiz — Hardware Depth</h2>
+  <p class="subtitle">Test your understanding of GPU internals, cache hierarchy, generations, racks, MIG, and accelerators</p>
+  <div class="quiz">
+    <div class="quiz-title">Chapter 8 Quiz — Hardware Depth</div>
+    <details class="quiz-q">
+      <summary><span class="quiz-num">1</span> H200 has the same TFLOPS as H100 but is ~40% faster on decode. Why?</summary>
+      <div class="quiz-a">Decode is memory-bandwidth-bound, not compute-bound (see roofline section). H200 has the same Tensor Cores as H100, so peak TFLOPS are identical. But its HBM3e gives 4.8 TB/s vs H100's 3.35 TB/s — roughly 40% more bandwidth. Every decode step reads the full model weights from HBM, so 40% more bandwidth ≈ 40% more decode throughput. The Tensor Cores were already idle waiting for data; feeding them faster recovers what was lost to bandwidth-boundedness.</div>
+    </details>
+    <details class="quiz-q">
+      <summary><span class="quiz-num">2</span> An NVL72 rack has 72 B200 GPUs all reachable via NVLink at 1.8 TB/s. What changes operationally compared to nine standard 8-GPU nodes connected by InfiniBand?</summary>
+      <div class="quiz-a">The NVLink-only domain expands from 8 to 72 GPUs. Concretely: TP scales beyond 8-way (TP72 inside the rack becomes practical, dropping per-token latency); EP across MoE experts can use NVLink for all-to-all (no InfiniBand hop); prefill/decode disaggregation can transfer KV between fleets at 1.8 TB/s instead of 50 GB/s — a 36× speedup on the KV-transfer hop. Workloads that were "too tightly coupled to span nodes" become single-rack jobs.</div>
+    </details>
+    <details class="quiz-q">
+      <summary><span class="quiz-num">3</span> Why does 2:4 structured sparsity double Tensor Core throughput when random 50% sparsity does not?</summary>
+      <div class="quiz-a">Tensor Cores have hardware support for one specific sparsity pattern: in every group of 4 weights, exactly 2 are zero, encoded with metadata indicating which two. The MMA unit reads only the non-zero weights, halving the work per output. Random 50% sparsity has no such structure — the hardware has no way to know which weights to skip without checking each one, which negates any savings. Models trained with 2:4 awareness from the start match dense quality; bolting it on post-hoc usually doesn't.</div>
+    </details>
+    <details class="quiz-q">
+      <summary><span class="quiz-num">4</span> Your team buys L40S cards for "Llama 70B serving" because they're cheaper per GPU than H100. Why is this a mistake?</summary>
+      <div class="quiz-a">L40S is Ada Lovelace generation — PCIe-only, no NVLink. Llama 70B in BF16 is 140 GB; it doesn't fit on one card and needs TP across multiple GPUs. TP requires per-layer all-reduce at NVLink bandwidth (900 GB/s); over PCIe (~64 GB/s) the all-reduces dominate decode step time and you lose the entire parallelism benefit. L40S is fine for embedding services, single-GPU 7–13B serving, and CV — not for tensor-parallel large LLMs. The cost saving disappears the moment you need TP.</div>
+    </details>
+    <details class="quiz-q">
+      <summary><span class="quiz-num">5</span> A multi-tenant SaaS runs seven different small fine-tuned 7B models, each with its own customer. How would MIG help, and what would it not help?</summary>
+      <div class="quiz-a"><strong>Helps:</strong> partition one H100 into 7 × 1g.10gb instances; each tenant gets a hardware-isolated slice with predictable latency, immune to noisy-neighbor effects in L2 or HBM. Effectively turns one $30K GPU into 7 independent serving environments. <strong>Does not help:</strong> if any tenant's load spikes, MIG can't borrow capacity from idle neighbors — slices are statically sized. And if one of the 7B models is large enough to need TP, MIG is wrong because TP across MIG slices isn't possible. For bursty or growing workloads, multi-LoRA on the full GPU usually beats MIG.</div>
+    </details>
+  </div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('formfactors')">&#8592; PCIe vs SXM</a><a class="pn-link pn-next" onclick="show('containers')">Containers & Cold Starts &#8594;</a></div>
+</div>
+
+<div id="sec-containers" class="hidden">
+<div class="breadcrumb">Production &rsaquo; Containers & Cold Starts</div>
+<h2>Containers and cold starts <span class="new-badge">new</span></h2>
+  <p class="subtitle">Why a "new replica" takes 1–5 minutes to start serving, and what each minute is doing</p>
+
+  <div class="sec-h">What's in an inference container</div>
+  <p>An LLM serving container is unusually large — easily 10–30 GB before the model weights:</p>
+  <ul>
+    <li><strong>Base image</strong> (CUDA + cuDNN + the right driver version) — usually pinned to a specific NVIDIA-published tag like <code>nvidia/cuda:12.4.0-devel-ubuntu22.04</code>.</li>
+    <li><strong>Engine binaries</strong> — vLLM, SGLang, or TRT-LLM with their compiled kernels.</li>
+    <li><strong>Python deps</strong> — torch, transformers, the engine's pinned versions of everything.</li>
+    <li><strong>System packages</strong> — ffmpeg for audio paths, networking utilities for RDMA, sometimes the InfiniBand userspace stack.</li>
+    <li><strong>Tokenizer + config</strong> — small (~MBs) but the model loader needs them.</li>
+  </ul>
+  <p>Model weights typically <em>aren't</em> in the image — they're mounted from object storage at startup. A 140 GB Llama-70B checkpoint inside the image would make the container unwieldy and force you to rebuild on every weight update.</p>
+
+  <div class="sec-h">The four phases of a cold start</div>
+  <table>
+    <tr><th>Phase</th><th>Typical duration</th><th>Dominant cost</th></tr>
+    <tr><td><strong>1. GPU procurement</strong></td><td>seconds to minutes</td><td>Cloud scheduler placing a pod on a node with the right GPU type, optionally provisioning a new node</td></tr>
+    <tr><td><strong>2. Image pull</strong></td><td>~10–60 s</td><td>10–30 GB image fetched from registry; depends on registry locality and network</td></tr>
+    <tr><td><strong>3. Weight load</strong></td><td>~10s of seconds for 70B; minutes for 405B</td><td>Streaming safetensors from object storage into HBM</td></tr>
+    <tr><td><strong>4. Engine warmup</strong></td><td>~5–60 s (TRT-LLM compile is the slowest)</td><td>Capturing CUDA Graphs for each batch shape, autotuning kernels, optionally compiling a TRT engine</td></tr>
+  </table>
+  <p>Aggregate: 1–5 minutes for a typical production replica. Long enough that "scale up when queue grows" usually triggers SLO violations before the new replica is ready.</p>
+
+  <div class="sec-h">Mitigations that actually work</div>
+  <ul>
+    <li><strong>Smaller images.</strong> Multi-stage builds, no dev tools in the runtime image, prune unused PyTorch parts. A well-built image can be 4–6 GB instead of 25.</li>
+    <li><strong>In-region registry mirror.</strong> Pull from <code>123456789012.dkr.ecr.us-east-1.amazonaws.com</code>, not Docker Hub. Bandwidth jumps from ~100 MB/s to multi-GB/s.</li>
+    <li><strong>In-datacenter weight cache.</strong> Pre-stage weights on a local NVMe cache (S3 Express, FSx, Mountpoint-S3) so all replicas in the cluster pull from the cache instead of object storage. Weight load time drops from minutes to ~10 s.</li>
+    <li><strong>Cached compiled engines.</strong> TRT-LLM engines, torch.compile artifacts, and CUDA Graph captures are GPU-specific and shape-specific — but they can be cached. Some teams build per-(model, GPU type, batch shape) caches that turn warmup from 60 s into 5 s.</li>
+    <li><strong>Warm pools.</strong> Keep N idle replicas already past warmup. Costs money but turns scale-up into "route traffic" instead of "boot pod."</li>
+  </ul>
+
+  <div class="sec-h">NIM — pre-baked everything</div>
+  <p><strong>NVIDIA Inference Microservices (NIM)</strong> are containers where stages 2–4 are mostly pre-done: pre-quantized weights, pre-compiled TRT-LLM engine, autotuned for the target GPU. Pull, run, serve — no compile, no quantization. Trade-off is reduced flexibility (you serve what NVIDIA shipped, not your custom checkpoint), but for standard model deployments it cuts cold start to under a minute and removes the engineering work of building all of the above yourself.</p>
+
+  <div class="resource-bar">📖 <a href="https://docs.nvidia.com/nim/" target="_blank">NVIDIA NIM</a><a href="https://github.com/awslabs/mountpoint-s3" target="_blank">Mountpoint-S3 for in-region weight cache</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('quiz-ch8')">&#8592; Chapter 8 Quiz</a><a class="pn-link pn-next" onclick="show('autoscaling')">Autoscaling & Routing &#8594;</a></div>
+</div>
+
+<div id="sec-autoscaling" class="hidden">
+<div class="breadcrumb">Production &rsaquo; Autoscaling & Routing</div>
+<h2>Autoscaling and routing <span class="new-badge">new</span></h2>
+  <p class="subtitle">Kubernetes, the five autoscaling knobs, scale-to-zero, and why your load balancer needs to know about KV cache</p>
+
+  <div class="sec-h">The K8s control plane / worker plane split</div>
+  <p>A production LLM serving deployment on Kubernetes has the same shape as any other K8s workload: a <strong>control plane</strong> (API server, scheduler, controller manager) decides what should run where; <strong>worker nodes</strong> (with GPUs) run the actual pods. The GPU-specific pieces are the NVIDIA Device Plugin (advertises GPUs as schedulable resources), DCGM exporter (GPU metrics to Prometheus), and increasingly Dynamo or KAITO as a controller layer above plain HPA.</p>
+
+  <div class="sec-h">The five autoscaling knobs</div>
+  <table>
+    <tr><th>Knob</th><th>What it controls</th><th>Common trap</th></tr>
+    <tr><td><strong>min replicas</strong></td><td>Floor — the smallest fleet you'll ever run</td><td>Set to 0 for dev environments, ≥1 for production (avoids cold start on first request)</td></tr>
+    <tr><td><strong>max replicas</strong></td><td>Cap — protects you from runaway scaling under attack or bug</td><td>Setting it equal to your reservation means you can't burst; leave headroom</td></tr>
+    <tr><td><strong>autoscaling window</strong></td><td>How long the metric must exceed threshold before scaling triggers</td><td>Too short → flapping; too long → SLO violations during ramp</td></tr>
+    <tr><td><strong>scale-down delay</strong></td><td>How long to wait after load drops before removing replicas</td><td>Too short → replicas churn during traffic dips; KV caches and warm engines die before they pay off</td></tr>
+    <tr><td><strong>concurrency target</strong></td><td>What metric counts as "loaded" (concurrent requests, queue depth, GPU utilization, TTFT)</td><td>CPU utilization is wrong for GPU workloads; pick a queueing- or latency-based signal</td></tr>
+  </table>
+
+  <div class="sec-h">What to scale on</div>
+  <p>For LLM serving specifically:</p>
+  <ul>
+    <li><strong>Queue depth or pending tokens</strong> — the queueing-theory signal that "we are about to violate SLO." Best leading indicator.</li>
+    <li><strong>P95 TTFT or TBT</strong> — the SLO directly. Lagging indicator; you're already in trouble when this fires.</li>
+    <li><strong>KV cache utilization</strong> — when the cache is full, new sequences can't be admitted regardless of compute headroom.</li>
+    <li><strong>NOT raw GPU utilization</strong> — as discussed in the GPU internals chapter, <code>nvidia-smi</code>-style utilization is a binary signal that easily reports 100% on lightly-loaded systems.</li>
+  </ul>
+
+  <div class="sec-h">Routing — KV-aware and LoRA-aware</div>
+  <p>Plain round-robin / least-connections load balancing is wrong for LLM serving. The scheduling chapter covers this in detail; the production-side recap:</p>
+  <ul>
+    <li><strong>KV-aware routing.</strong> Hash on prompt prefix; prefer the replica that already has it cached. Spill to other replicas above a utilization threshold.</li>
+    <li><strong>LoRA-aware routing.</strong> Hash on adapter ID; prefer the replica with the adapter loaded. Cold adapters cost ~100 ms+ to fetch.</li>
+    <li><strong>Session-aware routing.</strong> For multi-turn conversations with KV persistence, sticky-route on conversation ID.</li>
+  </ul>
+  <p>Production routers (NVIDIA Dynamo, vLLM production stack, SGLang's <code>sgl-router</code>) implement these as a single decision: pick the replica that maximizes joint cache-hit score across prefix + adapter + session. Without this layer, multi-tenant LoRA serving and prefix-cached deployments collapse into pathological thrash.</p>
+
+  <div class="sec-h">Scale-to-zero — when it makes sense</div>
+  <p>Scale-to-zero (no replicas when there's no traffic) is appealing for dev environments, batch jobs, and business-hours-only agents. The cost: 1–5 minute cold start when traffic returns. Reasonable when:</p>
+  <ul>
+    <li>The workload has long quiet periods (overnight, weekends).</li>
+    <li>The first user is OK waiting for warmup, or you can warm-up via a synthetic probe before real traffic hits.</li>
+    <li>The savings (you're paying $30+/hour per H100 idle) outweigh the latency cost.</li>
+  </ul>
+  <p>For latency-critical APIs serving 24/7, scale-to-zero is wrong. Keep <code>min replicas ≥ 1</code> and accept the floor cost.</p>
+
+  <div class="resource-bar">📖 <a href="https://github.com/Azure/kaito" target="_blank">KAITO — K8s for LLM workloads</a><a href="https://docs.vllm.ai/en/latest/serving/distributed_serving.html" target="_blank">vLLM production deployment</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('containers')">&#8592; Containers & Cold Starts</a><a class="pn-link pn-next" onclick="show('multicloud')">Multi-Cloud & Reliability &#8594;</a></div>
+</div>
+
+<div id="sec-multicloud" class="hidden">
+<div class="breadcrumb">Production &rsaquo; Multi-Cloud & Reliability</div>
+<h2>Multi-cloud capacity and reliability <span class="new-badge">new</span></h2>
+  <p class="subtitle">Bin packing across providers, neoclouds vs hyperscalers, and the failure rates you should actually plan for</p>
+
+  <div class="sec-h">Where GPU capacity comes from</div>
+  <table>
+    <tr><th>Source</th><th>Examples</th><th>Strengths</th><th>Watch out for</th></tr>
+    <tr><td><strong>Hyperscalers</strong></td><td>AWS, GCP, Azure, OCI</td><td>Mature ecosystem, broad region coverage, full IAM/network/compliance integration</td><td>Highest $/GPU-hour; capacity constraints on flagship SKUs (H100 SXM, GB200) at peak demand</td></tr>
+    <tr><td><strong>Neoclouds</strong></td><td>CoreWeave, Lambda, Nebius, Crusoe, Together, Fireworks</td><td>Cheaper than hyperscalers, often have flagship GPUs available when AWS doesn't, GPU-specialist support</td><td>Smaller region footprint; less mature non-GPU tooling (networking, IAM); contract terms vary widely</td></tr>
+    <tr><td><strong>Spot / preemptible</strong></td><td>AWS Spot, GCP Preemptible, Lambda spot</td><td>40–70% cheaper than on-demand</td><td>Can be reclaimed with minutes' notice — only safe for batch, training, or stateless inference with fast restart</td></tr>
+    <tr><td><strong>Resellers / brokers</strong></td><td>SF Compute, Foundry, sfcompute</td><td>Aggregated capacity across many providers, shorter contracts, daily-spot-style pricing</td><td>You don't own the relationship with the underlying hardware operator; reliability varies</td></tr>
+    <tr><td><strong>On-prem / colo</strong></td><td>Your own DGX or HGX cluster</td><td>Best $/GPU at scale once you've absorbed the capex; full control</td><td>You become a datacenter operator. Power, cooling, network, ops staff all on you.</td></tr>
+  </table>
+
+  <div class="sec-h">Bin-packing across providers</div>
+  <p>At scale, no single provider has enough flagship GPUs to host your full footprint at on-demand prices. The answer is multi-cloud: a control plane that knows about replicas across AWS, GCP, CoreWeave, and your colo, and routes traffic accordingly. Benefits:</p>
+  <ul>
+    <li><strong>Capacity:</strong> bin-pack workloads across providers' available GPUs instead of being constrained by any one.</li>
+    <li><strong>Redundancy:</strong> a regional outage at one provider doesn't kill your service.</li>
+    <li><strong>Latency:</strong> serve EU users from a EU region (whichever provider has GPUs there); US users from US.</li>
+    <li><strong>Compliance:</strong> data residency requirements can pin specific tenants to specific providers.</li>
+  </ul>
+  <p>Cost: the control plane is genuinely complex. Identity, networking, secrets, monitoring, deployment all have to span providers. Most teams start single-cloud and add providers only when the GPU constraint forces the issue.</p>
+
+  <div class="sec-h">Geo-aware routing — the 5ms-per-timezone rule</div>
+  <p>Network latency is roughly speed-of-light limited at long distance. A useful rule of thumb: <strong>~5 ms of round-trip latency per timezone of distance</strong>. NY ↔ LA = ~70 ms RTT; NY ↔ London = ~75 ms; SF ↔ Tokyo = ~110 ms. For a streaming LLM API with a 200 ms TTFT budget, that's a serious chunk consumed before the GPU even starts working. Multi-region deployments aren't optional for global low-latency products; they're table stakes.</p>
+
+  <div class="sec-h">GPU failure rates — the number you should plan for</div>
+  <p>The Llama 3 paper reported their pretraining cluster: 16,000 GPUs running for 54 days experienced 419 hardware interruptions — roughly <strong>1 failure per 50,000 GPU-hours</strong>. At that rate, a steady-state 1,000-GPU inference fleet sees a hardware-driven incident every ~50 hours, or roughly 3–4 a week.</p>
+  <p>Implications for serving:</p>
+  <ul>
+    <li>Active-passive failover is too slow for inference; you want <strong>active-active</strong> across at least two zones / regions.</li>
+    <li>Replicas should be cattle, not pets. A failing replica gets drained, replaced, and the request retries somewhere else within seconds.</li>
+    <li>Multi-region <em>and</em> multi-provider isn't just "for fun" — provider-wide outages happen and they happen during your peak.</li>
+  </ul>
+
+  <div class="resource-bar">📖 <a href="https://arxiv.org/abs/2407.21783" target="_blank">The Llama 3 Herd of Models — failure rates section</a><a href="https://sfcompute.com/" target="_blank">SF Compute</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('autoscaling')">&#8592; Autoscaling & Routing</a><a class="pn-link pn-next" onclick="show('security')">Security & Compliance &#8594;</a></div>
+</div>
+
+<div id="sec-security" class="hidden">
+<div class="breadcrumb">Production &rsaquo; Security & Compliance</div>
+<h2>Security and compliance <span class="new-badge">new</span></h2>
+  <p class="subtitle">What's worth protecting in an inference deployment, and the certifications customers will ask for</p>
+
+  <div class="sec-h">Three things to protect</div>
+  <table>
+    <tr><th>Asset</th><th>Threat</th><th>Defense</th></tr>
+    <tr><td><strong>User data</strong> (prompts, completions, conversation history)</td><td>Leakage to other tenants, to logs, to model providers, to training data</td><td>TLS in transit; encryption at rest; tenant isolation; opt-out from training; PII redaction; KV cache scoped per tenant</td></tr>
+    <tr><td><strong>Model weights</strong></td><td>Exfiltration of fine-tunes, frontier checkpoints, or licensed third-party weights</td><td>Encrypted weight storage; signed images; minimal egress; container image attestation</td></tr>
+    <tr><td><strong>Infrastructure</strong></td><td>Lateral movement from a compromised tenant, supply-chain attacks via Python deps, malicious checkpoints (pickle exec)</td><td>Network segmentation; rootless containers; safetensors-only loading; signed-package supply chain; runtime sandboxing for tool calls</td></tr>
+  </table>
+
+  <div class="sec-h">Tenant isolation in shared inference</div>
+  <p>Multi-tenant LLM serving — many customers on one base model — has a specific risk surface that doesn't exist in single-tenant deployments:</p>
+  <ul>
+    <li><strong>KV cache leakage.</strong> Prefix cache hits are great for performance, but accidentally hitting another tenant's prefix is a data breach. Caches must be scoped per tenant (or per security boundary), with the cache key including the tenant ID.</li>
+    <li><strong>LoRA adapter mix-up.</strong> Routing the wrong adapter is functionally a data leak in production tenanted fine-tunes. Adapter selection must be authoritative based on authenticated identity, not user-supplied parameters.</li>
+    <li><strong>Tool call privileges.</strong> An agent's tool calls run with whatever permissions the sandbox has. A prompt injection that triggers a tool call can become a privilege-escalation primitive. Sandbox per tenant; never share tool execution environments.</li>
+  </ul>
+
+  <div class="sec-h">The certifications customers ask for</div>
+  <table>
+    <tr><th>Certification</th><th>What it covers</th><th>Who asks for it</th></tr>
+    <tr><td><strong>SOC 2 Type II</strong></td><td>Operational controls (security, availability, confidentiality) audited over a multi-month period</td><td>Most B2B SaaS customers; effectively table stakes for enterprise sales</td></tr>
+    <tr><td><strong>ISO 27001</strong></td><td>Information security management systems</td><td>European enterprises; global procurement</td></tr>
+    <tr><td><strong>HIPAA</strong></td><td>Protected health information handling</td><td>US healthcare; requires Business Associate Agreement</td></tr>
+    <tr><td><strong>FedRAMP</strong></td><td>US federal government workloads</td><td>Government / public sector deals</td></tr>
+    <tr><td><strong>PCI DSS</strong></td><td>Payment card data handling</td><td>Anyone touching cardholder data — usually not LLM serving directly, but sometimes downstream</td></tr>
+  </table>
+  <p>For LLM serving specifically, customers increasingly also ask: are you training on customer data? (Default answer should be "no, opt-in only.") Where is data stored, and for how long? What happens if a customer requests deletion?</p>
+
+  <div class="sec-h">Data residency</div>
+  <p>Some customers — EU public sector, Canadian healthcare, Japanese financial — require their data never leave specific jurisdictions. This forces region-specific deployments and changes the multi-cloud calculus: you can't serve a Frankfurt customer from a Virginia replica. Operationally this means region-pinned tenancy at the routing layer (the request never crosses the boundary) and an audit trail proving it. Often the single biggest constraint on which providers and regions you must support.</p>
+
+  <div class="resource-bar">📖 <a href="https://www.aicpa.org/topic/audit-assurance/audit-and-assurance-greater-than-soc-2" target="_blank">SOC 2</a><a href="https://www.hhs.gov/hipaa/index.html" target="_blank">HIPAA overview</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('multicloud')">&#8592; Multi-Cloud & Reliability</a><a class="pn-link pn-next" onclick="show('observability')">Observability & Deployment &#8594;</a></div>
+</div>
+
+<div id="sec-observability" class="hidden">
+<div class="breadcrumb">Production &rsaquo; Observability & Deployment</div>
+<h2>Observability and deployment patterns <span class="new-badge">new</span></h2>
+  <p class="subtitle">What to dashboard, what to alert on, and how to ship changes without breaking everyone</p>
+
+  <div class="sec-h">The dashboards you need</div>
+  <table>
+    <tr><th>Layer</th><th>Metrics</th><th>Tool</th></tr>
+    <tr><td><strong>API gateway</strong></td><td>QPS, status codes (2xx/4xx/5xx), request size, response size, TTFB</td><td>Datadog, Cloudflare, your CDN</td></tr>
+    <tr><td><strong>Engine</strong></td><td>P50/P90/P99 TTFT, P50/P90/P99 TBT, queue depth, batch size, KV cache utilization, prefix-cache hit rate</td><td>Engine-exposed Prometheus metrics + Grafana</td></tr>
+    <tr><td><strong>GPU</strong></td><td>SM activity, HBM bandwidth utilization, NVLink/PCIe traffic, GPU memory, GPU temperature</td><td>DCGM exporter → Prometheus</td></tr>
+    <tr><td><strong>Host</strong></td><td>CPU, memory, network, disk I/O</td><td>node_exporter</td></tr>
+    <tr><td><strong>Cluster</strong></td><td>Replica count, autoscaling events, pod restarts, image pull failures</td><td>Kube-state-metrics, Prometheus</td></tr>
+  </table>
+
+  <div class="sec-h">Latency, the way it should be reported</div>
+  <p>Always P50, P90, P95, P99 — never just mean (cross-link to the benchmarking section's right-skewness argument). Per-endpoint and per-model. A dashboard that shows "average TTFT 200 ms" when P99 is 8 s is actively misleading. SLOs live at P95 or P99; that's what your alerts should fire on.</p>
+
+  <div class="sec-h">Queue depth as the leading indicator</div>
+  <p>Latency is a lagging metric — by the time P99 spikes, you're already shedding requests. <strong>Queue depth</strong> (or pending-tokens) is the leading metric: it grows before latency does and gives autoscaling enough lead time to bring up new replicas. Set <em>warning</em> alerts on queue depth, <em>page</em> alerts on latency SLO violations.</p>
+
+  <div class="sec-h">Deployment patterns</div>
+  <table>
+    <tr><th>Pattern</th><th>How it works</th><th>When to use</th></tr>
+    <tr><td><strong>Blue-green</strong></td><td>Deploy "green" alongside "blue"; flip a switch to send all traffic to green. Roll back by flipping back.</td><td>Stateless services with simple rollback. Less common for LLM serving because you double the GPU footprint during the swap.</td></tr>
+    <tr><td><strong>Canary</strong> (4-step)</td><td>Send 1% → 10% → 50% → 100% of traffic to the new version, watching SLO at each step.</td><td>Default for LLM serving. Cheaper than blue-green; quality regressions show up in evals against canary traffic before full rollout.</td></tr>
+    <tr><td><strong>Shadow traffic</strong></td><td>Mirror real requests to the new version; discard responses; compare to production.</td><td>Validating engine upgrades, quantization changes, model swaps without any user impact. Standard for high-stakes changes.</td></tr>
+  </table>
+  <p>For model upgrades specifically, <strong>shadow + canary</strong> is the safe pattern: shadow first to compare quality and latency at production load, then canary for the actual cutover. Anthropic, OpenAI, and major hosted-API providers use variants of this.</p>
+
+  <div class="sec-h">Alerting — what's worth waking someone up for</div>
+  <ul>
+    <li><strong>SLO burn rate</strong> on TTFT P99, TBT P99, error rate. Use multi-window multi-burn-rate alerting (Google SRE book) to catch both fast-burning incidents and slow-burning quality regressions.</li>
+    <li><strong>Queue saturation</strong> — pending tokens above a threshold for >1 minute.</li>
+    <li><strong>Replica health</strong> — repeated pod restarts, failed warmups, GPU thermal throttling.</li>
+    <li><strong>Quality regressions</strong> from automated evals — the silent killer; wire eval failures into the same on-call surface as latency.</li>
+  </ul>
+
+  <div class="resource-bar">📖 <a href="https://sre.google/sre-book/" target="_blank">Google SRE book — alerting on SLOs</a><a href="https://docs.nvidia.com/datacenter/dcgm/latest/" target="_blank">DCGM exporter</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('security')">&#8592; Security & Compliance</a><a class="pn-link pn-next" onclick="show('clientside')">Client-Side & Streaming &#8594;</a></div>
+</div>
+
+<div id="sec-clientside" class="hidden">
+<div class="breadcrumb">Production &rsaquo; Client-Side & Streaming</div>
+<h2>Client-side and streaming protocols <span class="new-badge">new</span></h2>
+  <p class="subtitle">TLS handshakes, async-with-webhooks, and HTTP vs WebSocket vs gRPC</p>
+
+  <div class="sec-h">The TLS handshake tax</div>
+  <p>A new HTTPS connection costs one or two round-trips before the first byte of the request can be sent: TCP handshake (1 RTT) + TLS handshake (1 RTT for TLS 1.3, 2 RTTs for TLS 1.2). For a client 50 ms away from the server, that's 100 ms of pure overhead per connection. On a 300 ms TTFT budget, you've burned 33% before the GPU did anything.</p>
+  <p><strong>The fix:</strong> reuse connections. HTTP/1.1 keep-alive, HTTP/2 multiplexing, and HTTP/3 connection migration all amortize the handshake across many requests. Standard SDKs (OpenAI's Python client, Anthropic's, LiteLLM) handle this for you — but only if the calling code reuses one client object. Per-request <code>requests.post()</code> is a TLS-handshake-per-request anti-pattern that silently doubles latency.</p>
+
+  <div class="sec-h">Streaming protocols compared</div>
+  <table>
+    <tr><th>Protocol</th><th>Format</th><th>Direction</th><th>When to use</th></tr>
+    <tr><td><strong>HTTP / SSE</strong> (Server-Sent Events)</td><td>Text events over a long-lived HTTP response</td><td>Server → client only</td><td>Default for LLM streaming APIs (OpenAI, Anthropic). Trivially proxyable, works through corporate firewalls and CDNs.</td></tr>
+    <tr><td><strong>WebSocket</strong></td><td>Arbitrary binary or text frames over a long-lived bidirectional connection</td><td>Both directions</td><td>Bidirectional streaming (live tool callbacks, audio, interactive agents). More finicky through proxies.</td></tr>
+    <tr><td><strong>gRPC</strong></td><td>Protobuf over HTTP/2 streams; schema-enforced</td><td>Both directions</td><td>Internal service-to-service when you want strict contracts and language-agnostic clients. Rarely used for public LLM APIs because browsers don't speak it natively.</td></tr>
+  </table>
+
+  <div class="sec-h">Async with webhooks — for jobs that take minutes</div>
+  <p>For batch transcription, long-running agent loops, deep-research tasks, or anything that takes more than ~30 s, holding an HTTP connection open is fragile. The standard pattern is <strong>fire-and-forget with webhooks</strong>:</p>
+  <ol>
+    <li>Client POSTs the request and gets back a job ID.</li>
+    <li>Server processes the job in the background, possibly minutes-hours.</li>
+    <li>When done, server POSTs the result to a callback URL the client provided.</li>
+  </ol>
+  <p>This decouples client and server lifecycles, survives client reconnects, and is the only sane pattern for jobs longer than a few minutes. OpenAI's Batch API, Anthropic's Message Batches, and most ASR providers use variants of this.</p>
+
+  <div class="sec-h">Client-side latency budgeting</div>
+  <p>End-to-end perceived latency = network RTT + TLS overhead (if cold) + queue wait + TTFT + first-render time on the client. For a "feels instant" target of 200 ms, the GPU has maybe 80–120 ms to play with after the network and client-side costs. Two consequences for serving:</p>
+  <ul>
+    <li>Geographic placement matters — see the multi-cloud chapter.</li>
+    <li>Streaming is non-negotiable — TTFT becomes the felt metric, not E2E. Even a slow generator feels fast if the first token arrives quickly.</li>
+  </ul>
+
+  <div class="resource-bar">📖 <a href="https://datatracker.ietf.org/doc/html/rfc8446" target="_blank">TLS 1.3 RFC</a><a href="https://www.w3.org/TR/eventsource/" target="_blank">Server-Sent Events spec</a><a href="https://platform.openai.com/docs/guides/batch" target="_blank">OpenAI Batch API</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('observability')">&#8592; Observability & Deployment</a><a class="pn-link pn-next" onclick="show('quiz-ch9')">Chapter 9 Quiz &#8594;</a></div>
+</div>
+
+<div id="sec-quiz-ch9" class="hidden">
+<div class="breadcrumb">Production &rsaquo; Quiz</div>
+<h2>Chapter 9 Quiz — Production</h2>
+  <p class="subtitle">Test your understanding of containers, autoscaling, multi-cloud, security, observability, and client-side</p>
+  <div class="quiz">
+    <div class="quiz-title">Chapter 9 Quiz — Production</div>
+    <details class="quiz-q">
+      <summary><span class="quiz-num">1</span> Your autoscaler triggers when P95 TTFT crosses 1 s, but new replicas take 3 minutes to start serving. What's wrong with this design and what's the fix?</summary>
+      <div class="quiz-a">P95 TTFT is a <em>lagging</em> indicator — by the time it crosses threshold, you're already in SLO violation, and you have 3 minutes of cold-start before the new capacity helps. The fix: scale on a <em>leading</em> indicator (queue depth or pending tokens) that grows before latency does. Page on TTFT/TBT SLO breaches, but trigger autoscaling on queue. Pair with mitigations: in-datacenter weight cache, cached compiled engines, optionally a small warm pool. Or use NIM-style pre-baked images to compress cold start to under a minute.</div>
+    </details>
+    <details class="quiz-q">
+      <summary><span class="quiz-num">2</span> A multi-tenant deployment caches prefix KVs aggressively for performance. What's the security risk and how is it mitigated?</summary>
+      <div class="quiz-a">Without per-tenant scoping, tenant A's request could hit tenant B's cached prefix — a data leak by accident. Fix: include the authenticated tenant ID in the cache key. Tenant A's hash never matches tenant B's, so no cross-tenant cache hits possible. Same principle applies to LoRA adapters: adapter selection must be driven by authenticated identity, not user-supplied parameters.</div>
+    </details>
+    <details class="quiz-q">
+      <summary><span class="quiz-num">3</span> The Llama 3 paper reported 1 hardware failure per 50,000 GPU-hours. For a steady-state 1,000-GPU inference fleet, how often does a hardware failure happen, and what's the implication for your deployment topology?</summary>
+      <div class="quiz-a">1,000 GPUs × 24 hours = 24,000 GPU-hours/day. At 1/50,000 failure rate, that's about <strong>1 failure every 50 hours</strong> — roughly 3–4 a week. Implication: replicas must be cattle, not pets — failover must be active-active across at least two zones, with seconds-scale request retries. Active-passive failover is too slow; pet-replicas with manual recovery aren't an option at this fleet size.</div>
+    </details>
+    <details class="quiz-q">
+      <summary><span class="quiz-num">4</span> A user complains your API "feels slow" with a 300ms TTFT SLO. Network RTT to your nearest region is 70ms. They're using <code>requests.post()</code> per call instead of a persistent client. What's eating the budget?</summary>
+      <div class="quiz-a">TLS 1.3 handshake = 2 RTTs = 140 ms on a fresh connection. Plus the request RTT itself = 70 ms. That's 210 ms before the GPU starts working — leaving 90 ms for queue + prefill + first token. With connection reuse, the handshake amortizes across many requests; latency drops to roughly one RTT plus server work. Per-call <code>requests.post()</code> is the silent killer of LLM API latency budgets. Switching to a reused HTTP client (the OpenAI/Anthropic SDKs do this by default) is often the single biggest user-perceived speedup with no engine changes.</div>
+    </details>
+    <details class="quiz-q">
+      <summary><span class="quiz-num">5</span> You're cutting over to a new model version. Why is the standard pattern shadow-then-canary rather than just blue-green?</summary>
+      <div class="quiz-a">Blue-green doubles your GPU footprint during the swap — at H100 prices, hours of doubled inference fleet is meaningful money. More importantly, it provides no quality validation: you flip 100% of traffic at once, so any quality regression hits all users. <strong>Shadow</strong> (mirror real traffic to the candidate, discard responses) lets you compare quality and latency under production load with zero user impact. <strong>Canary</strong> (1% → 10% → 50% → 100%) catches anything shadow missed and limits blast radius if something goes wrong. Together they cover both quality regressions and capacity issues. Blue-green is fine for stateless web services; LLM model swaps need the shadow step.</div>
+    </details>
+  </div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('clientside')">&#8592; Client-Side & Streaming</a></div>
 </div>
 
 </div>
@@ -3561,7 +4369,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
 /* ══════════════════════════════════════════════════════════
    SECTION ORDER + NAMES
    ══════════════════════════════════════════════════════════ */
-const order = ['tokenization','embeddings','qkv','multihead','layers','params','moe','numformats','sampling','quiz-ch1','mla','attnvariants','ssm','mtp','codesign','distill','lora','quiz-ch2','nvlink','parallelism','quiz-ch3','batching','kvcache','chunked','flashattn','quant','marlin','specdecode','optlist','quiz-ch4','reqlen','scheduling','outputpred','reqseqbatch','multiturn','agentic','disagg','quiz-ch5','traintoserve','engines','benchmarking','costeconomics','mfu'];
+const order = ['tokenization','embeddings','qkv','multihead','layers','params','moe','numformats','sampling','quiz-ch1','mla','attnvariants','ssm','mtp','codesign','distill','lora','quiz-ch2','nvlink','parallelism','quiz-ch3','batching','kvcache','chunked','flashattn','quant','marlin','specdecode','optlist','quiz-ch4','reqlen','scheduling','outputpred','reqseqbatch','multiturn','agentic','disagg','quiz-ch5','traintoserve','engines','benchmarking','costeconomics','mfu','cuda','numlibs','fusion','fileformats','dynamo-orch','profiling','quiz-ch7','gpuinternals','cachehier','archroadmap','superchips','mig','otheraccel','formfactors','quiz-ch8','containers','autoscaling','multicloud','security','observability','clientside','quiz-ch9'];
 
 const sectionNames = {};
 document.querySelectorAll('.nav-item').forEach(btn => {

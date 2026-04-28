@@ -1,0 +1,97 @@
+Alex: So Jenny, when you SSH into a box running vLLM and tail the logs, and you see something like "CUDA error: illegal memory access" — where do you think that error is actually coming from?
+
+Jenny: Honestly? I treat it like a kernel panic from a black box. I restart the pod and pray. But I'm guessing you're about to tell me that's a terrible instinct.
+
+Alex: It's the universal instinct, but yeah, it's hiding a stack you should know. Because every line of vLLM, SGLang, TRT-LLM — all of it — eventually compiles down to CUDA kernels running on the GPU. So when something breaks, the trail of blame almost always ends here.
+
+Jenny: Okay, define the layers for me. Because in my world, "the stack" means like, ALB, then ECS, then the container, then the app. What's the equivalent on a GPU?
+
+Alex: Great mapping. So at the very bottom you have the CUDA driver — that's kernel-mode, it owns the actual hardware API surface. Think of it like the EC2 hypervisor for the GPU. Above that, userspace, you have the CUDA runtime — libcudart — which is what actually dispatches work, manages streams, copies memory between host and device.
+
+Jenny: And those two are versioned separately, right? I remember our ML team complaining about driver mismatches.
+
+Alex: Exactly, and that's the number one thing to check on a fresh node. CUDA toolkit version and driver version have to be compatible or the engine won't even start. It's the GPU equivalent of "did you check the AMI version."
+
+Jenny: Got it. So driver, runtime — what's above that?
+
+Alex: Above the runtime you have the actual kernels. A CUDA kernel is just a C++ function annotated with `__global__`, compiled by nvcc into PTX and then SASS, which is the GPU's actual machine code. That's the unit of work. When someone says "we wrote a custom kernel for this" — they mean a hand-tuned C++ function that runs on thousands of GPU threads.
+
+Jenny: Hold on. Thousands of threads. That's where I always get lost. Because in my head a thread is like, a Linux pthread, and I know thousands of those is insane. So clearly GPU threads aren't the same thing.
+
+Alex: They are absolutely not the same thing. This is the single biggest mental shift. Let me walk you through the hierarchy. A kernel launches a grid. A grid is made of thread blocks. Each block contains up to 1024 threads. And within a block, threads are organized into warps of 32.
+
+Jenny: Why 32? That feels suspiciously specific.
+
+Alex: Because hardware. A warp of 32 threads executes in lockstep on the SM — the streaming multiprocessor. They all run the same instruction at the same time on different data. It's called SIMT, single instruction multiple threads. So 32 isn't some software convention, it's literally how wide the hardware lanes are.
+
+Jenny: Oh. So a warp is more like a SIMD vector than a thread.
+
+Alex: Exactly. And here's the part that matters for performance: threads inside the same block share fast on-chip SRAM and can synchronize with each other. Threads in different blocks cannot. They're isolated, like processes on different EC2 instances.
+
+Jenny: So the block is basically a co-located workgroup that gets to share an L1 cache, and the grid is the fleet.
+
+Alex: That's exactly it. And every single CUDA optimization technique — every one — is fundamentally about laying out your work so this mapping onto warps, blocks, and SMs is efficient. That's the whole game.
+
+Jenny: Okay. So we have this thread hierarchy, we have kernels running on it. But across an entire LLM forward pass, we're launching, what, dozens of different kernels?
+
+Alex: Dozens to hundreds per layer. But here's the thing — if you actually profile where the cycles go, ~95% of inference compute is one operation. GEMM. General matrix multiply. Pronounced "gem."
+
+Jenny: 95%? That can't be right. What about attention, softmax, layer norm, all that?
+
+Alex: Attention IS a GEMM. Every QKV projection is a GEMM. Every FFN up and down projection is a GEMM. The output projection is a GEMM. Softmax, layer norm, RoPE, activation functions — all of those exist, but they're rounding error in terms of compute. The whole game of fast inference is making GEMMs fast.
+
+Jenny: Wait, so when someone in a meeting says "the kernel" — singular — they actually mean...
+
+Alex: They almost always mean "the GEMM kernel for this specific tensor shape and this specific precision." That's why there's a whole tower of libraries dedicated to it. cuBLAS is NVIDIA's standard, general-purpose GEMM library. CUTLASS lets you compose your own variants. FlashAttention is essentially a fused attention-as-GEMM kernel. DeepGEMM is hyper-specialized for FP8 on Hopper.
+
+Jenny: That sounds like a layered library tower. General purpose at the bottom, narrow and fast at the top.
+
+Alex: That's a perfect way to put it. cuBLAS is "works everywhere, decent performance." DeepGEMM is "blazing fast but only on this specific hardware with this specific precision." Engines pick different libraries depending on shape and hardware.
+
+Jenny: Okay, this is making me think about something. You said dozens to hundreds of kernels per layer. Each one needs to be launched. In CPU-land, launching work has overhead — syscalls, context switches. Is that a thing here?
+
+Alex: Massively. This is one of the most under-appreciated optimizations in modern inference. Every kernel launch costs about 5 to 10 microseconds of host-side overhead. CPU constructs the launch parameters, hands them to the driver, driver enqueues. That's per kernel.
+
+Jenny: Per kernel. So if I have a 70B model launching, say, 200 kernels per decode step...
+
+Alex: 200 times 7-ish microseconds, that's 1.4 milliseconds of pure overhead. And a single decode step might only be 20 milliseconds total. So you're spending 25 to 50% of your latency on launch overhead before any actual GPU work happens.
+
+Jenny: That is insane. That's like having a function call where the calling convention costs more than the function body.
+
+Alex: Right. So the fix is CUDA Graphs. You record the entire kernel sequence once, capture it as a DAG, and then replay the whole DAG as one dispatch. The replay is microseconds total.
+
+Jenny: That sounds exactly like batching a bunch of API calls into one bulk request.
+
+Alex: That's the perfect analogy. You're amortizing the per-call overhead by sending one fat call instead of two hundred thin ones. vLLM, TRT-LLM, SGLang — they all use CUDA Graphs for the decode hot path. It's why benchmarks always have a warmup phase. That warmup is the engine capturing the graph.
+
+Jenny: Hang on though. The graph has to be specific to the tensor shapes, right? Otherwise the kernels inside it wouldn't be valid?
+
+Alex: You just identified the catch. Graphs are keyed by shape. So the engine captures a separate graph for each batch size it expects to see. Batch of 1, batch of 2, batch of 4, batch of 8 — each gets its own graph. And if you suddenly hit a batch size the engine hasn't captured...
+
+Jenny: Cache miss.
+
+Alex: Cache miss. You either fall back to eager mode for that step, which is way slower, or you stall while a new graph gets captured. That's why you sometimes see weird latency spikes when traffic patterns shift.
+
+Jenny: Okay, last question. We just talked about kernels being optimized. Does that mean an engine that runs great on H100 just... works on B200?
+
+Alex: Absolutely not, and this is where a lot of release-notes pain comes from. Tensor Core instruction widths change. Supported precisions change — H100 has FP8, Blackwell adds FP4. Shared memory sizes change. Async-copy semantics change. So the same engine running the same model on different generations picks completely different kernels — sometimes from completely different libraries.
+
+Jenny: So when an engine release note says "improved Blackwell support" —
+
+Alex: That means someone spent weeks porting kernels and re-tuning shape selectors. It's not a flag flip. It's real engineering work every hardware generation.
+
+Jenny: So zooming out — the takeaway is, GPUs aren't a magic compute substrate. There's a real stack underneath, GEMM is the operation, and most performance work is making GEMMs match the shape of the silicon.
+
+Alex: Exactly that. And on that note — we just spent a lot of time saying "the GEMM kernel" without saying how those kernels are actually engineered. Next episode we go a layer deeper into the libraries themselves — cuBLAS versus CUTLASS versus FlashInfer versus DeepGEMM — and figure out why there are four of them and when each one wins.
+
+Jenny: I want to know specifically why FlashAttention was such a big deal. It feels like it came out of nowhere and changed everyone's benchmarks.
+
+Alex: It's a great story, and it's really a story about memory hierarchy, not raw compute. We'll get into kernel fusion, why keeping data in SRAM matters more than peak FLOPs, and how the right kernel for the right shape can be a 2x speedup with zero model changes.
+
+Jenny: Plus, I want to know how anyone debugs this stuff without losing their mind. Profilers, Nsight, all of it.
+
+Alex: That's coming too. Once you know what the kernels are, the next question is how you see them. Timeline profilers versus per-kernel deep-dives — the GPU equivalent of distributed tracing versus a flame graph on one service.
+
+Jenny: Alright, see everyone next time.
+
+Alex: Take care.

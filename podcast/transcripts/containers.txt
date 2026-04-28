@@ -1,0 +1,99 @@
+Alex: So Jenny, you know how at AWS you've spent years tuning auto scaling groups — the whole game is "how fast can I get a new instance serving traffic?"
+
+Jenny: Yeah, and we obsess over it. Warm pools, pre-baked AMIs, the works. A typical EC2 instance is what, 30 seconds to in-service if you've done your homework?
+
+Alex: Right. Now picture this: an LLM inference replica takes one to five minutes. Sometimes longer.
+
+Jenny: Wait, five minutes? In 2026? What is it doing for five minutes?
+
+Alex: That's exactly the right question. And the answer is — four totally different things, sequentially, and each one is its own little disaster. Let me walk you through what's actually happening from the moment the scheduler says "I need a new pod."
+
+Jenny: Okay, hit me.
+
+Alex: Phase one: GPU procurement. The cloud scheduler has to find a node with the right GPU type — H100, H200, B200, whatever you're targeting. If your cluster has headroom, that's seconds. If it has to provision a new node from the underlying capacity pool, that's minutes.
+
+Jenny: So this is basically the same as ASG scaling out when there's no warm capacity. We've lived this.
+
+Alex: Exactly the same shape. Except the GPUs you want are scarce, so the "no warm capacity" case is way more common than with CPU instances. Phase two: image pull. And here's where it gets weird — an LLM inference container is enormous. Ten to thirty gigs before you even add the model weights.
+
+Jenny: Thirty gigs? What's in there? My typical service container is like 200 megs.
+
+Alex: CUDA, cuDNN, the right NVIDIA driver pinned to a specific tag. Then the engine — vLLM or SGLang or TRT-LLM — with all its compiled kernels. Then PyTorch and transformers and the engine's pinned dependency tree. Then ffmpeg for audio paths, the InfiniBand userspace stack for RDMA networking…
+
+Jenny: Hang on. Why is the model itself not in there? That's the obvious thing to bake in.
+
+Alex: Great instinct, and the reason is operational. A Llama-70B checkpoint is 140 gigs. You'd have a 170-gig container image, and every time you fine-tune or swap a checkpoint, you'd rebuild and re-push the whole thing. So weights live in object storage and get mounted at startup.
+
+Jenny: Okay, that makes sense. Container is the runtime, weights are the data. Same separation we use for, like, config in S3 versus the binary in ECR.
+
+Alex: Exactly. So phase two — pulling that 30-gig image — that's ten to sixty seconds depending on where your registry is and how fat the pipe is. Phase three: weight load. Streaming 140 gigs of safetensors from S3 into HBM on the GPU. For a 70B model, tens of seconds. For a 405B model, that can be minutes.
+
+Jenny: And phase four?
+
+Alex: Engine warmup. This one surprises people. Even after the weights are in memory, the engine isn't ready to serve. It has to capture CUDA Graphs for each batch shape it expects, autotune kernels for this specific GPU, and if you're on TRT-LLM, potentially compile a TensorRT engine.
+
+Jenny: Compile? At runtime?
+
+Alex: At runtime, on the GPU, for this specific model and this specific GPU SKU. TRT-LLM compilation can take 60 seconds easily. So when you add it all up — procurement, pull, load, warmup — you're at one to five minutes.
+
+Jenny: Oh that's brutal. Because the whole premise of reactive autoscaling is "queue grows, I add capacity, queue shrinks." But if my new replica takes five minutes to come online, my SLO is already toast.
+
+Alex: That's the punchline. Reactive autoscaling on lagging metrics like latency? Useless for LLMs. By the time latency spikes, you needed the replica two minutes ago.
+
+Jenny: So how do people actually deal with this? Because I refuse to believe production teams just eat five-minute cold starts.
+
+Alex: They don't. There's a stack of mitigations, and they layer. First one is the obvious one: shrink the image. Multi-stage builds, no dev tools in the runtime image, prune the parts of PyTorch you're not using. A well-built inference image can be four to six gigs instead of twenty-five.
+
+Jenny: That alone probably cuts pull time by 4x.
+
+Alex: Right. Then: in-region registry mirror. If you're pulling from Docker Hub across the public internet, you're getting maybe 100 megabytes a second. Pull from your own ECR mirror in the same region as the pod, you're at multi-gigabytes per second.
+
+Jenny: That's just basic locality. We do that for everything. Why isn't this the default?
+
+Alex: It often isn't because the deployment was set up by an ML team that copy-pasted a reference config. The infra obvious-thing isn't obvious to them.
+
+Jenny: Fair.
+
+Alex: Third mitigation, and this is the big one: in-datacenter weight cache. Instead of every replica pulling 140 gigs from S3, you pre-stage weights on local NVMe — S3 Express, FSx, Mountpoint-S3 — so all replicas in the cluster pull from a cache that's literally in the same rack.
+
+Jenny: Oh, that's just a CDN. We're CDN-ing model weights.
+
+Alex: Exactly that. Weight load drops from minutes to about ten seconds. Fourth: cached compiled engines. The TRT-LLM compile artifacts, the torch.compile output, the CUDA Graph captures — those are deterministic for a given model, GPU type, and batch shape. So you cache them.
+
+Jenny: Wait, but you said earlier the compile is GPU-specific. So the cache key is what — model, GPU SKU, batch shape?
+
+Alex: Exactly that tuple. Some teams build per-(model, GPU type, batch shape) artifact caches. Warmup goes from 60 seconds down to 5.
+
+Jenny: And the fifth?
+
+Alex: Warm pools. Keep N idle replicas already past warmup. Scale-up becomes "route traffic to the warm one" instead of "boot a pod."
+
+Jenny: That's just hot standbys. Costs money though, right? You're paying for idle GPUs.
+
+Alex: Yep. And idle H100s are not cheap. So warm pools are tuned tightly — usually just enough to absorb the spike during the time it takes a real cold start to complete.
+
+Jenny: Okay so now I'm tracking. You've basically rebuilt every CDN and warm-pool trick we use for EC2, but for GPUs and weights. Is there a turnkey thing? Because that's a lot of engineering.
+
+Alex: There is, and it's worth knowing about. NVIDIA ships these things called NIMs — NVIDIA Inference Microservices. They're containers where phases two through four are mostly pre-done.
+
+Jenny: Pre-done how?
+
+Alex: Pre-quantized weights baked in, pre-compiled TRT-LLM engine for the target GPU, autotuned. You pull, you run, you serve. No compile step, no quantization step, no warmup dance.
+
+Jenny: So someone did the engineering once, centrally, and shipped the artifact.
+
+Alex: That's the whole pitch. Cold start drops to under a minute. The trade-off — and this matters — is flexibility. You serve what NVIDIA shipped. If you have a custom fine-tune or a weird checkpoint, NIM doesn't help you. But for standard model deployments? It removes a huge chunk of engineering work.
+
+Jenny: That's a classic build-versus-buy. Same call we make on managed services every day.
+
+Alex: Exactly. And the way I'd frame the whole episode: cold starts being five minutes is the forcing function for everything that comes next in production LLM serving. It's why you can't autoscale reactively, which is why you need leading indicators like queue depth. It's why you need warm pools, which is why capacity planning matters. It's why session-affinity routing matters — because evicting a session and re-warming a cache is expensive when the replica itself is expensive to spin up.
+
+Jenny: So this is the foundation. Everything else in production LLM serving is a response to "the replica is slow and expensive to create."
+
+Alex: That's the through-line. And next episode, we're going to pick up exactly there — how do you autoscale a thing that takes five minutes to start? Spoiler: not with CPU utilization. We'll get into the five autoscaling knobs, which one is the leading indicator, and why round-robin load balancing is actively wrong for LLM serving even though it's the default everywhere.
+
+Jenny: I want to know why round-robin is wrong, because that's heresy in load-balancer-land.
+
+Alex: It's because of the KV cache. But that's the next episode. Stay tuned.
+
+Jenny: See you there.

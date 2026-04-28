@@ -1,0 +1,99 @@
+Alex: So Jenny, I want to start today with a question that sounds dumb but actually trips up a lot of really smart infrastructure people. If two GPUs have the exact same chip inside — same silicon, same compute, same memory capacity — should they cost the same and perform the same?
+
+Jenny: I mean... yes? That's literally the definition of "same chip." If I'm buying compute, I'm buying the die.
+
+Alex: Right, that's the intuition. And it's wrong. NVIDIA ships the H100 in two completely different packages — PCIe and SXM — and the SXM version costs roughly twice as much and, for LLM serving, performs dramatically better. Same die. Different package.
+
+Jenny: Wait, hold on. Twice the price for the same silicon? That feels like the kind of thing that would get flagged in a procurement review. What is the package actually doing?
+
+Alex: Okay so think about it the way you'd think about an EC2 instance versus a bare-metal server with the same Xeon inside. The CPU might be identical, but the chassis around it determines power delivery, cooling, networking, and what other components it can talk to at full speed. The package is the chassis for the GPU.
+
+Jenny: Okay, that I get. So what's the chassis difference between PCIe and SXM?
+
+Alex: Start with power. A PCIe slot — the same kind that's been in servers for twenty years — can deliver maybe 300 to 400 watts. That's a hard ceiling defined by the PCIe spec and the connector. SXM is NVIDIA's mezzanine form factor; the GPU bolts directly onto a custom baseboard with custom power delivery, and it can pull 700 watts or more. Almost double.
+
+Jenny: And presumably the chip wants to use that power.
+
+Alex: The chip absolutely wants to use that power. Modern transformers are compute-and-memory hungry, and the H100 die is designed to clock high under sustained load. On PCIe, you hit the power wall, the card throttles, your clocks drop, and your throughput tanks. On SXM, it just keeps running at boost.
+
+Jenny: Hang on — is this like the difference between an EC2 burstable instance and a non-burstable one? Like, PCIe is fine for spiky workloads but the moment you sustain it, you fall off a cliff?
+
+Alex: That is a really good analogy. Inference is the worst case for that, by the way, because production serving traffic isn't bursty — it's a steady firehose of decode steps. You're sustained, all the time. So the throttling shows up in your p50 latency, not just your tail.
+
+Jenny: Okay, power. What else?
+
+Alex: Memory bandwidth. And this one surprises people. The HBM stacks are physically the same parts, but the SXM package routes them at full advertised speed — 3.35 terabytes per second on the H100. The PCIe variant of the same H100 only gets about 2 terabytes per second.
+
+Jenny: Wait, why? Is that a signal integrity thing? A power thing?
+
+Alex: It's a combination. NVIDIA bins them differently and the PCIe board can't sustain the power needed to drive the HBM at full speed reliably. So they downclock the memory. Now — remember from our earlier conversations, decode is memory-bandwidth-bound, not compute-bound.
+
+Jenny: Right, the roofline. You're streaming weights from HBM through the tensor cores once per token.
+
+Alex: Exactly. So a 40% gap in memory bandwidth translates almost one-for-one into a 40% gap in decode throughput on memory-bound workloads. You're paying for an H100 and getting roughly 60% of an H100's decode performance.
+
+Jenny: Oof. Okay, so that's two big ones — power and memory bandwidth. But I have a feeling the real punchline is the interconnect, right? Because everything we've talked about for tensor parallelism depends on GPUs talking to each other fast.
+
+Alex: That's the punchline. NVLink. On an SXM box — your HGX or DGX system — all eight GPUs sit on a baseboard with NVSwitch chips wired between them. Every GPU can talk to every other GPU at 900 gigabytes per second, simultaneously, full mesh.
+
+Jenny: That's the all-to-all fabric.
+
+Alex: All-to-all. On PCIe? You get an optional NVLink bridge — a little connector you physically clip across two adjacent cards — and that gives you about 600 gigabytes per second between those two cards. Only those two. There's no fabric.
+
+Jenny: Wait wait wait. So if I have eight PCIe H100s in a server and I want to do 8-way tensor parallelism...
+
+Alex: You're going through the PCIe bus to talk between cards that aren't bridged. PCIe Gen5 x16 is about 64 gigabytes per second per direction. So you've gone from 900 to 64. More than a 10x drop.
+
+Jenny: And tensor parallelism does an all-reduce after every matrix multiply, right? Like, every layer.
+
+Alex: Every layer, twice — after the attention block and after the MLP block. So now your interconnect is the bottleneck for every single forward pass. The GPUs are sitting idle waiting for data to arrive. You bought eight GPUs and you're getting the throughput of maybe two or three.
+
+Jenny: Oh, that's brutal. So PCIe isn't just "a little slower" for tensor parallelism — it's structurally the wrong tool.
+
+Alex: Structurally the wrong tool. This is why you'll see people say SXM is "effectively required" for frontier-model serving. It's not marketing — it's that the math of TP across PCIe doesn't close.
+
+Jenny: Okay so let me push on this though. Is there a workload where PCIe is the right answer? Because otherwise why does NVIDIA even ship it?
+
+Alex: Great question. Yes, lots of them. Anything that fits on a single GPU. Embedding services — you're running BERT-sized models, no tensor parallelism needed, throughput per dollar matters. Small-model serving — a 7B model fits comfortably on one card. Batch inference jobs where latency doesn't matter and you can just throw more independent GPUs at it. Computer vision. Any workload where the GPUs don't need to talk to each other.
+
+Jenny: So it's the discount tier for embarrassingly parallel GPU work.
+
+Alex: Exactly right. And it's significantly cheaper — both the cards themselves and the chassis. SXM only ships in HGX and DGX-class systems, which are purpose-built, often liquid-cooled, expensive boxes. PCIe drops into a standard 2U server with standard air cooling.
+
+Jenny: And the cloud SKUs reflect this?
+
+Alex: Directly. On AWS, p5.48xlarge variants have H100 PCIe; p5e has H100 SXM. GCP has A3 in both flavors. Different prices, different positioning. If you provision the wrong one for your workload, you either overpay by 2x or you get a system that can't actually serve your model.
+
+Jenny: Okay, here's the trap I want to ask about. What about the L40 line? I keep seeing those in cloud catalogs and they're way cheaper.
+
+Alex: Ah, the trap. So L4, L40, L40S — these are the Ada Lovelace generation. They're PCIe-only. No SXM variant exists. And critically, no NVLink at all, not even the bridge. NVIDIA positions them as graphics-plus-light-inference cards.
+
+Jenny: But people try to use them for LLM serving.
+
+Alex: People absolutely try. And for the workloads we just talked about — embeddings, small models, single-GPU serving — they're a genuinely good option. Cheap, available, decent FLOPs. The trap is when somebody looks at the spec sheet, sees "48 gigabytes of memory, lots of FP8 throughput," and thinks "great, I'll buy four L40s and run TP4 on Llama 70B."
+
+Jenny: And it doesn't work.
+
+Alex: It technically runs. But you're doing every all-reduce over PCIe with no NVLink anywhere in the system. Your GPUs spend most of their time waiting on the bus. You'd have been better off with one SXM H100 doing the whole model on a single card with no parallelism at all.
+
+Jenny: That is such a classic infrastructure mistake. It's the same mistake people make with networking, right? Like, "I bought enough bandwidth on paper" but the topology is wrong.
+
+Alex: It's exactly that. Aggregate bandwidth lies. Topology is what determines whether your workload actually runs.
+
+Jenny: Okay so the takeaway for someone provisioning this — the form factor is doing more work than the chip name. "I have H100s" doesn't tell you whether you can serve a 70B model with tensor parallelism.
+
+Alex: That's exactly right. The chip name tells you the peak FLOPs and the memory capacity. The form factor tells you whether you can actually use them at scale. PCIe versus SXM is a topology decision dressed up as a SKU.
+
+Jenny: So what comes next? Where does this lead?
+
+Alex: Well, this conversation about NVLink and NVSwitch is really setting up a much bigger story. Because once NVIDIA had eight GPUs talking at 900 gigabytes per second inside one box, the obvious next question was: why stop at one box? Why not have 72 GPUs in a rack all talking at NVLink speed? That's NVL72, and it fundamentally changes how you think about distributed inference. Suddenly the "node" isn't a server — it's a rack.
+
+Jenny: And that probably means tensor parallelism stops being limited to 8-way.
+
+Alex: That's exactly where it leads. We're going to get into rack-scale NVLink domains, what happens when your model is bigger than any single box, and how Grace and Vera — the ARM CPUs that NVIDIA puts on-package with the GPU over NVLink-C2C — turn host memory into a real spillover tier for KV cache.
+
+Jenny: Host memory as a tier in the GPU memory hierarchy. That's a wild idea coming from the cloud world where host and device memory are basically different planets.
+
+Alex: Different planets becoming the same continent. That's the next episode.
+
+Jenny: Can't wait. See you then.

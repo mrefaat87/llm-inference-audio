@@ -1,0 +1,93 @@
+Alex: So Jenny, last episode we talked about autoscaling — min replicas, max replicas, queue depth as the leading indicator. But there's a problem we kind of waved at, and it's the thing that keeps inference platform leads up at night.
+
+Jenny: Let me guess. You set max replicas to a hundred, traffic spikes, and AWS goes "yeah, we don't actually have a hundred H100s for you right now."
+
+Alex: Exactly that. The dirty secret of running inference at scale is that no single cloud provider has enough flagship GPUs to host your full footprint at on-demand prices. Not AWS, not GCP, not Azure. During peak demand windows, H100 SXM and GB200 capacity is just gone.
+
+Jenny: Wait, hang on. AWS is enormous. They have entire regions. How is that even possible?
+
+Alex: Two things. First, the demand for these chips is genuinely insane right now — every AI company is fighting for the same SKUs. Second, hyperscalers allocate their flagship GPU capacity to their biggest reserved-capacity customers first. If you're paying on-demand, you're at the back of the line.
+
+Jenny: Okay, so what do people actually do? Because "sorry, no GPUs today" is not an acceptable answer to your CEO.
+
+Alex: This is where multi-cloud bin packing comes in. You build a control plane that knows about replicas across AWS, GCP, a neocloud like CoreWeave or Lambda, and maybe your own colo. When traffic comes in, it routes to wherever you have capacity.
+
+Jenny: Hold on, neocloud — that's a term I keep hearing. What makes them different from AWS?
+
+Alex: Think of neoclouds as GPU specialists. CoreWeave, Lambda, Nebius, Crusoe — they don't try to be a full cloud. They don't have a hundred and fifty services. They have GPUs, networking between GPUs, and storage for model weights. That's the product.
+
+Jenny: So they're like... a butcher shop next to a Whole Foods. Narrower selection, but the meat counter is way better.
+
+Alex: That's actually a great analogy. And because they're specialists, they often have flagship GPUs available when AWS literally cannot give you any. They're also typically thirty to fifty percent cheaper per GPU-hour.
+
+Jenny: Okay, so why isn't everyone just using neoclouds? What's the catch?
+
+Alex: Smaller region footprint. CoreWeave has a handful of regions; AWS has thirty-plus. The non-GPU tooling is less mature — networking, IAM, secrets management, all of that is rougher than what you're used to. And contract terms vary wildly. Some require multi-year commits, some are flexible.
+
+Jenny: Got it. So the picture is: you use AWS for the regions and the IAM story, you use CoreWeave when AWS runs out, and you mix the two.
+
+Alex: Right. And there are even more options in the mix. Spot capacity — AWS Spot, GCP Preemptible — gives you forty to seventy percent discounts but can be reclaimed with minutes' notice. Resellers like SF Compute aggregate capacity across providers. And if you're really at scale, on-prem in a colo gives you the best dollar-per-GPU once you've absorbed the capex.
+
+Jenny: But spot for inference seems terrifying. You're mid-request, mid-stream, and AWS yanks the GPU?
+
+Alex: Yeah, spot is really only safe for batch jobs, training runs, or stateless inference where you can fail-fast and retry on another replica within seconds. For latency-sensitive serving, spot is usually a bad fit.
+
+Jenny: Okay, let me push on the multi-cloud thing. You said control plane. That sounds expensive in engineering terms. What does that actually cost you?
+
+Alex: A lot. Identity has to span providers — your service in AWS needs to authenticate to a GPU running on CoreWeave. Networking has to span providers, which usually means VPN or private interconnect. Secrets, monitoring, deployment pipelines, observability — all of it has to work uniformly across clouds.
+
+Jenny: So it's not "flip a switch and you're multi-cloud."
+
+Alex: Not even close. Most teams start single-cloud, get to a few hundred GPUs, hit the capacity wall, and only then add a second provider. You don't do this for fun. You do it because the GPU constraint forces the issue.
+
+Jenny: Makes sense. But once you've paid that cost, you get more than just capacity, right? You get redundancy.
+
+Alex: Exactly. A regional outage at one provider doesn't kill your service. And there's a third benefit — geographic latency.
+
+Jenny: Oh, this is the speed-of-light thing.
+
+Alex: Yeah. Network latency at long distances is basically physics-limited. The rule of thumb I use: about five milliseconds of round-trip latency per timezone of distance. NY to LA is around seventy milliseconds round trip. NY to London is about seventy-five. SF to Tokyo is one-ten.
+
+Jenny: Wait, that's huge. If my TTFT budget for a streaming LLM is two hundred milliseconds, I just burned a third of it on the network before the GPU even sees the request.
+
+Alex: Right. Which is why for a global product, multi-region isn't optional. It's table stakes. You serve EU users from EU regions, US users from US regions — and "EU region" means whichever provider happens to have GPUs there. Sometimes that's AWS Frankfurt, sometimes it's CoreWeave Amsterdam.
+
+Jenny: Okay so now we're multi-cloud, multi-region. Which means we have a lot more replicas, in a lot more places, than we ever had before. That feels like it brings us to the failure question.
+
+Alex: This is the part most people get wrong. They think GPUs are reliable like CPUs. They're not. The Llama 3 paper has the number you should actually plan for — they ran sixteen thousand GPUs for fifty-four days during pretraining and had four hundred nineteen hardware interruptions.
+
+Jenny: Let me do the math on that... that's roughly one failure per fifty thousand GPU-hours.
+
+Alex: Exactly. So if you're running a steady-state thousand-GPU inference fleet, that's a hardware incident every fifty hours. Three to four a week.
+
+Jenny: Three to four hardware failures a week. That's not "occasional weird thing," that's "this is happening to you constantly."
+
+Alex: It's the steady state. Which means active-passive failover — the classic enterprise pattern where you have a hot standby waiting — is too slow. By the time you've detected and failed over, you've already missed your SLO. You need active-active across at least two zones, ideally two regions.
+
+Jenny: This is exactly the cattle-not-pets thing. A failing replica gets drained, replaced, and the in-flight request retries somewhere else.
+
+Alex: Within seconds. The whole system is designed around the assumption that any individual GPU will die, and the platform handles it transparently. If a single replica failure causes a customer-visible incident, your architecture is wrong.
+
+Jenny: And presumably this is also why multi-cloud isn't just about capacity — it's also about provider-wide outages.
+
+Alex: Yes. Provider-wide outages happen. AWS us-east-1 has had multi-hour outages that took down huge chunks of the internet. If your entire inference fleet is in one provider's one region, you are one bad day away from being a postmortem.
+
+Jenny: Okay, so the takeaway: at scale, multi-cloud and multi-region aren't optimizations. They're the baseline architecture, driven by capacity constraints, latency physics, and the actual hardware failure rate.
+
+Alex: That's the whole story. Single-cloud single-region is fine until it isn't, and the moment it isn't, you're scrambling to build a control plane during an incident.
+
+Jenny: Alright, so where does this lead us? What's next?
+
+Alex: Next we get into the stuff that lives on top of this multi-cloud, multi-region foundation — security and compliance. SOC 2, HIPAA, data residency. Because once you're routing tenants across providers and regions, the question of "which tenant's data can live where" becomes the dominant deployment constraint.
+
+Jenny: Oh, so the bin-packing problem gets harder. It's not just "which provider has GPUs," it's "which provider has GPUs in a region this customer's contract allows."
+
+Alex: Exactly. And then there's tenant isolation inside the inference path itself — per-tenant cache scoping, adapter selection, sandboxed tool execution. The multi-tenancy hazards specific to LLM serving that don't exist in normal web services.
+
+Jenny: That sounds like a whole episode.
+
+Alex: It is a whole episode. After that we'll get into observability — what to actually measure when your fleet is spread across five providers and three continents and failing four times a week.
+
+Jenny: Can't wait. Because right now I'm picturing the dashboard for that and it is terrifying.
+
+Alex: It's terrifying and it's the job. We'll see you next time.

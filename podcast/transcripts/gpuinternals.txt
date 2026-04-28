@@ -1,0 +1,121 @@
+Alex: So Jenny, last time we talked about the GPU as this big abstract slab of compute. Today I want to crack it open and show you what's actually inside — because once you see the units, every performance conversation we have later is going to click.
+
+Jenny: Good, because honestly when people say "the H100 does 989 TFLOPS" my brain just nods. I have no mental model for where those FLOPS physically come from.
+
+Alex: Right, so let's start with the unit you already half-know. The basic execution block on a GPU is called an SM — Streaming Multiprocessor. On an H100 there are 132 of them.
+
+Jenny: 132. Okay. Is an SM basically a CPU core then?
+
+Alex: That's the right first analogy. Think of each SM like a beefed-up core — it has its own scheduler, its own register file, its own shared memory, its own execution units. When you launch a kernel, each thread block gets assigned to one SM and runs there until it finishes.
+
+Jenny: Wait, hold on. 132 is a weird number. Why not 128? Or 144?
+
+Alex: Yield. The chip is fabricated with more SMs than that, but a few are always defective, so NVIDIA fuses some off and ships the rest. It's the same trick AWS plays when they sell you a c5.24xlarge — the underlying socket might have more cores, some are just disabled for binning.
+
+Jenny: Oh that's exactly the EC2 SKU game. Okay so 132 SMs, each one is like a core. What's inside one SM?
+
+Alex: Three different kinds of execution units, and this is where it gets interesting. You've got CUDA cores, Tensor Cores, and SFUs. They're not interchangeable — they're specialized.
+
+Jenny: Specialized how?
+
+Alex: CUDA cores are scalar ALUs — regular FP32 and INT32 math, one number times one number. There are 128 of those per SM, so almost 17,000 across the chip. They handle all the non-matmul stuff: activation functions, layer norm, RoPE rotations, residual adds.
+
+Jenny: So the boring math.
+
+Alex: The boring but necessary math. Then you have Tensor Cores — only four per SM, 528 total — and these are the matrix-multiply-accumulate units. They are where roughly 95% of LLM inference compute actually happens.
+
+Jenny: Wait, 95% of the work happens on 528 units, but you have almost 17,000 CUDA cores doing the other 5%? That ratio is wild.
+
+Alex: It tells you everything about what an LLM is. An LLM is mostly one operation — matrix multiply — repeated billions of times. So NVIDIA built dedicated silicon for exactly that one op and made everything else a side dish.
+
+Jenny: Okay so what does a Tensor Core actually compute? Like, at the instruction level.
+
+Alex: One instruction. D equals A times B plus C, where A, B, C, and D are small fixed-shape tiles. That's it. That's the MMA — matrix-multiply-accumulate.
+
+Jenny: Fixed-shape tiles meaning what, like a 16 by 16 block?
+
+Alex: On Hopper in FP16, exactly that — a 16 by 16 by 16 MMA per cycle. So one Tensor Core, in one clock tick, performs 4,096 multiply-adds. That's 8,192 FLOPs from a single core in a single cycle.
+
+Jenny: From one core in one cycle. Multiply that by 528 cores at 1.83 gigahertz and...
+
+Alex: You get about 989 TFLOPS in FP16. That's where the headline number comes from. It's not magic — it's 528 little tile-multipliers all firing every clock.
+
+Jenny: Okay so the whole game then is keeping those 528 things busy.
+
+Alex: That is literally the whole game. Every GEMM kernel optimization paper you'll ever read is about feeding those MMAs without stalls. If a Tensor Core is sitting idle waiting for data, you're burning silicon.
+
+Jenny: Got it. And the third unit you mentioned — SFUs?
+
+Alex: Special Function Units. Four per SM. They handle transcendentals in hardware — sine, cosine, exp, log, reciprocal, square root.
+
+Jenny: Wait, why do those need their own unit? Can't a CUDA core just do exp?
+
+Alex: It could, but it would take dozens of cycles via a polynomial approximation. SFUs do it in a couple cycles with dedicated lookup tables and approximation circuits. And here's why it matters for LLMs — softmax has an exp in the inner loop. Every attention computation hits exp, hard. GELU has an exp. If those weren't hardware-accelerated, attention would be way slower.
+
+Jenny: Oh that's neat. So softmax performance is partly bottlenecked on a hardware unit you've never heard of.
+
+Alex: Exactly. Now let's go deeper on Tensor Cores because there are two more things you have to know. First — generation matters a lot. Hopper has 4th-gen Tensor Cores. Hopper added something called wgmma, warp-group MMA, which does a 64 by 64 by 16 tile in a single instruction.
+
+Jenny: Bigger tile per instruction. Why does that help?
+
+Alex: Instruction issue overhead. Every MMA instruction costs you scheduler bandwidth, register reads, all the bookkeeping. If you can do 16x more multiply-adds per instruction, your scheduler has 16x more headroom to do other useful work — like prefetching the next tile.
+
+Jenny: So wider MMA equals less bookkeeping per FLOP. Got it. And Blackwell?
+
+Alex: Blackwell adds 5th-gen Tensor Cores with native FP4 — four-bit floats. MXFP4, NVFP4. And the throughput in FP4 is 2x of FP8.
+
+Jenny: Hold on. Every generation NVIDIA ships, the precision gets cut in half and the throughput doubles?
+
+Alex: That's the pattern. BF16 to FP8 to FP4. And this is why quantization research follows the hardware — researchers don't pick four bits because they love four bits, they pick it because that's what the next-gen Tensor Cores accelerate natively.
+
+Jenny: That's such an infrastructure-shaped insight. The software is chasing the silicon roadmap, not the other way around.
+
+Alex: Always. Now the second deep thing on Tensor Cores — sparsity.
+
+Jenny: You mean sparse models? Like MoE?
+
+Alex: No, hardware sparsity. Way more specific. It's called 2:4 structured sparsity. In every group of four consecutive weights, exactly two must be zero.
+
+Jenny: Exactly two out of four. That's such a weirdly rigid constraint.
+
+Alex: It's rigid on purpose. Because the pattern is fixed, the Tensor Core can hardwire a circuit that just skips the two zero multiplies. No branching, no metadata to interpret. So you get exactly 2x throughput.
+
+Jenny: But wait — what about random 50% sparsity? My weights are 50% zeros, half the multiplies are pointless, why doesn't that work?
+
+Alex: Because the hardware doesn't know in advance where the zeros are. To skip a multiply, the circuit has to detect the zero, gate the multiplier, route the result around — all of that costs more than just doing the multiply. The 2:4 pattern works because the location is implicit in the layout. The hardware doesn't have to look.
+
+Jenny: Oh, so it's like the difference between bin-packing arbitrary-sized objects and bin-packing fixed-size blocks. The constraint is what makes it fast.
+
+Alex: Perfect analogy. And here's the catch — when NVIDIA quotes "FP8 with sparsity, 1979 TFLOPS" on the spec sheet, that's the 2:4 number. If you didn't train your model to be 2:4 sparse, you get the dense number, half that.
+
+Jenny: So half the flashy peak number on the marketing page assumes you did sparsity-aware training. Sneaky.
+
+Alex: It's there in the footnotes. Now last concept and then we'll connect forward. Occupancy.
+
+Jenny: Occupancy — that's about how full the SM is?
+
+Alex: Right. Each SM has finite registers, finite shared memory, finite slots for thread blocks. If your kernel uses too many registers per thread, you fit fewer concurrent blocks on the SM. Lower occupancy.
+
+Jenny: And lower occupancy is bad?
+
+Alex: Usually. The reason is latency hiding. When one warp stalls waiting on memory, the SM scheduler swaps in another warp instantly. More resident warps means more options to hide stalls. Few warps, no options, the SM sits idle.
+
+Jenny: That's exactly hyperthreading logic, just at warp granularity instead of thread.
+
+Alex: It's the same idea, dialed up. But here's the nuance — higher occupancy is not automatically better. Sometimes a kernel with low occupancy but tons of registers per thread runs faster because it keeps more data in registers and avoids memory traffic entirely. FlashAttention is famously like this.
+
+Jenny: So occupancy is a metric, not a goal.
+
+Alex: Exactly. Nsight Compute reports it front and center, but a good kernel engineer knows when to ignore it.
+
+Jenny: Okay this all clicks. Where does this go next?
+
+Alex: So now you understand the inside of one SM. Next episode we zoom out to the cache hierarchy — registers, L1, L2, HBM, host RAM — and you'll see why feeding those Tensor Cores is way harder than computing on them. The bottleneck for inference is almost never compute, it's memory bandwidth, and once you see the cache tiers you'll understand why.
+
+Jenny: And then I'm guessing we go from one chip to a rack of chips?
+
+Alex: That's the episode after — NVLink, NVL72, the rack-scale domains where 72 GPUs talk to each other at NVLink speed. Once you know the SM, the cache, and the interconnect, you can reason about any inference deployment from first principles.
+
+Jenny: Love it. The chip today, the memory hierarchy next, then the rack. That's the trilogy.
+
+Alex: That's the trilogy. See you next episode.

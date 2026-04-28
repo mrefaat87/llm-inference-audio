@@ -1,0 +1,81 @@
+Alex: So Jenny, I want to start with a number that I think is going to bother you. On a fresh HTTPS connection to an LLM API, before the GPU does literally anything — before a single token gets generated — you can burn 140 milliseconds.
+
+Jenny: Wait, 140 ms of pure overhead? That's almost half of what most people consider a "fast" response budget. Where is that going?
+
+Alex: It's the handshake tax. You've got TCP — that's one round trip. Then TLS on top of that. If you're on TLS 1.3, that's another round trip. TLS 1.2, two more. So if your client is 50 ms away from the server — which is honestly pretty typical, that's like East Coast to a West Coast region — you're looking at 100 to 150 ms before your first byte even leaves the client.
+
+Jenny: Okay, hang on. I want to map this to something I know. This is basically the same problem we have with cold Lambda invocations, right? You pay this fixed setup cost every time, and it's invisible until you measure it.
+
+Alex: Exactly that. And the analogy goes even deeper, because the fix is the same too. With Lambda you keep the execution environment warm. With HTTPS, you keep the connection warm. HTTP/1.1 keep-alive, HTTP/2 multiplexing, HTTP/3 connection migration — all of those exist to amortize that handshake across many requests.
+
+Jenny: So the SDKs handle this for me? Like, if I'm using the OpenAI Python client or LiteLLM, am I getting connection reuse for free?
+
+Alex: Yes — but with a giant asterisk. The SDK reuses connections only if you reuse the client object. And this is where I see teams get burned constantly. Someone writes a helper function that does `requests.post()` per call, or they instantiate a new OpenAI client inside a loop, and suddenly every single request is paying the full handshake tax.
+
+Jenny: Oh that's brutal. So you've got an SLO of, what, 300 ms TTFT, and you've silently donated a third of it to TLS because someone wrote a clean-looking helper function.
+
+Alex: One-third gone, GPU hasn't started. And the worst part — your traces don't always make this obvious. The SDK reports the request latency, you see 280 ms, you think you're fine, but 100 of those milliseconds were handshake that you could have eliminated by hoisting the client up one scope.
+
+Jenny: Okay, so connection reuse is the highest-leverage client-side fix. Got it. But this is all assuming HTTP. What about when the response is streaming? Because LLM responses are streaming by default now, right?
+
+Alex: Right, and this is where it gets interesting. There are basically three protocols you'll see in the wild for streaming, and they each exist because they solve a different problem. The dominant one — the one OpenAI and Anthropic and basically every public LLM API uses — is Server-Sent Events. SSE.
+
+Jenny: SSE is just text events over a long-lived HTTP response, right? The server holds the connection open and pushes chunks down.
+
+Alex: Exactly. And the reason SSE won is boring but important — it's just HTTP. It works through every corporate firewall, every CDN, every load balancer that's ever been deployed. You can proxy it without thinking about it. WebSockets, by contrast, are way more finicky through proxies.
+
+Jenny: So why would you ever pick WebSocket then?
+
+Alex: Bidirectionality. SSE is server-to-client only. The server can stream tokens at you, but if the client needs to send something mid-stream — like, you're building a voice agent and the user interrupts, or you have live tool callbacks where the server is asking the client to execute something — SSE can't do that. You need a real two-way pipe.
+
+Jenny: Ah, so WebSocket is for the interactive cases. Voice, agents that need to negotiate with the client. And then gRPC is the third one?
+
+Alex: gRPC is the "you control both ends" choice. It's protobuf over HTTP/2 streams, schema-enforced, language-agnostic. It's beautiful for internal service-to-service stuff where you want strict contracts. But you almost never see it on a public LLM API, because browsers don't speak gRPC natively. You'd need a gRPC-Web shim, and at that point you might as well just use SSE.
+
+Jenny: So the rough decision tree is: SSE by default, WebSocket if you need bidirectional, gRPC if you're internal and want schema enforcement. That's clean.
+
+Alex: That's it. And here's where it gets fun — none of those three work for jobs that take minutes.
+
+Jenny: Right, because holding an HTTP connection open for ten minutes is just asking for something to break. Load balancer timeouts, client reconnects, proxy idle timeouts...
+
+Alex: All of it. Anything past about 30 seconds and you're playing connection-stability roulette. So for batch transcription, long agent loops, deep-research tasks — anything that runs for minutes or hours — you switch to a completely different shape. Async with webhooks.
+
+Jenny: Fire-and-forget. Client posts a job, gets back an ID, server does the work, server calls the client back when it's done.
+
+Alex: Exactly. And the reason this pattern wins isn't just timeout-avoidance — it's lifecycle decoupling. The client can crash, restart, deploy a new version, whatever. The job keeps running on the server, and when it's done, the result lands at whatever callback URL you registered. OpenAI's Batch API, Anthropic's Message Batches, basically every ASR provider — all variants of this.
+
+Jenny: Okay, this is starting to feel a lot like SQS plus Lambda. You drop a message, something processes it asynchronously, and you get notified on completion. We don't try to hold a synchronous connection open for a 20-minute job; that's insane.
+
+Alex: It's the same intuition. Synchronous request-response is great when the work fits in a request-response budget. Once it doesn't, you have to decouple, and webhooks are how you do it over HTTP.
+
+Jenny: So now I want to zoom out. We've got handshake tax, three streaming protocols, and webhooks for long jobs. How do these all fit into a latency budget that an actual product team is staring at?
+
+Alex: This is the punchline. End-to-end perceived latency is network RTT plus TLS overhead if cold, plus queue wait at the server, plus TTFT — time to first token — plus first-render time on the client. If your product target is "feels instant," that's about 200 ms total. Subtract network and client costs and the GPU has maybe 80 to 120 ms to play with.
+
+Jenny: 80 milliseconds. That's nothing. That basically dictates everything upstream — your model size, your batching strategy, your geographic placement.
+
+Alex: Right, and that's why two things become non-negotiable. One, geographic placement matters — you cannot serve Sydney from us-east-1 and expect "instant." That's the multi-cloud chapter. Two, streaming isn't a feature, it's a survival mechanism. Because TTFT becomes the felt metric, not end-to-end.
+
+Jenny: Oh that's a great reframing. Even a slow generator feels fast if the first token shows up quickly.
+
+Alex: That's the entire trick. Users don't perceive total generation time, they perceive the gap before something starts happening. You can generate the same 500 tokens in 8 seconds total, and if the first one shows up at 200 ms, it feels responsive. If it shows up at 2 seconds and then dumps everything at once, it feels broken — even though it was technically faster end-to-end.
+
+Jenny: That's such an infrastructure lesson. Perceived performance is not the same as measured performance, and the metric you optimize has to match what the user actually feels.
+
+Alex: And it's why every serving stack we've talked about — the batching, the KV cache, the disaggregated prefill — all of it ultimately serves TTFT.
+
+Jenny: Okay, so where does this go next? We've covered the client side and the wire. What's the natural follow-on?
+
+Alex: So now the question becomes — once you've got the protocols right and your client isn't burning handshakes, where do you actually put the servers? Because that 50 ms of network we kept assuming, that's a choice. You make it by deciding what regions to deploy in, which clouds, how to bin-pack across hyperscalers and neoclouds. That's the multi-cloud and capacity story.
+
+Jenny: And that's where things get spicy, right? Because no single provider has enough flagship GPUs at the scale anyone actually wants to run.
+
+Alex: Nobody does. Not AWS, not GCP, not Azure. If you want H100s or B200s in serious volume, you're stitching together capacity across multiple providers, including specialized neoclouds. And then you're juggling reliability — the Llama 3 paper basically said expect one GPU failure per 50,000 GPU-hours, so a 1,000-GPU fleet is seeing three or four incidents a week.
+
+Jenny: Active-active across providers becomes mandatory, not a nice-to-have.
+
+Alex: Exactly. So next time we go from "how do bytes get to the GPU" to "where do those GPUs even live, and how do you keep service up when one of them dies every few hours." It's the part of the stack that's least like traditional web serving and most like running a small data center yourself.
+
+Jenny: Can't wait. Let's pick it up there.
+
+Alex: See you next time.

@@ -1,0 +1,105 @@
+Alex: So Jenny, I want to start with a problem you've actually lived through at AWS. Imagine you're running a SaaS platform, and every customer wants their own custom-tuned version of your service. Like, not just config — actually different behavior.
+
+Jenny: Right, and the naive answer is you spin up a separate fleet per customer. Which is fine until you have, what, fifty customers? Then your capacity planning is a nightmare and your utilization tanks.
+
+Alex: Exactly. Now translate that to LLMs. Every customer wants a fine-tuned model. The naive version is full fine-tuning — you take a 70B base model and you update every single parameter on their data.
+
+Jenny: And in BF16 that's, what, 140 gigs of weights?
+
+Alex: 140 gigs of weights, plus optimizer state on top of that during training, plus you end up with a 140-gig checkpoint per customer. Now imagine storing that for every tenant. It's operationally insane.
+
+Jenny: Okay so that's the "dedicated fleet per customer" version. Expensive, doesn't scale, capacity is fragmented. What's the alternative?
+
+Alex: The alternative is LoRA. Low-Rank Adaptation. And the core idea is beautiful — instead of updating the whole weight matrix W, you freeze W entirely. You don't touch it. Then you train a tiny additive patch on the side, ΔW, and you decompose that patch into two skinny matrices, A and B.
+
+Jenny: Skinny how?
+
+Alex: So if W is d-by-k — big square-ish matrix — A is d-by-r and B is r-by-k, where r is tiny. Like 8, 16, maybe 64.
+
+Jenny: Wait. So instead of training d times k parameters, you're training d times r plus r times k. And r is, like, two orders of magnitude smaller than d.
+
+Alex: Right. The whole adapter ends up being something like 0.1 to 1 percent of the base model. Tens of megabytes instead of hundreds of gigs. Training drops from weeks to hours.
+
+Jenny: Hold on though. This feels too good. Why does this even work? You're claiming a tiny patch captures what full fine-tuning captures. There has to be a catch.
+
+Alex: That's the right question. The empirical observation behind LoRA is that when you fine-tune a pretrained model, the change in the weights — that ΔW — has low intrinsic rank. Meaning, you're not really teaching the model new directions. You're nudging it along a low-dimensional subspace of behaviors it already knows.
+
+Jenny: Oh. So the base model already contains the capability, fine-tuning is just... steering it.
+
+Alex: Exactly. It's not learning to speak French from scratch. It's learning "be more formal," or "follow this customer's product schema," or "use this support tone." Those are nudges. A rank-16 adapter captures most of what you need for typical task adaptation.
+
+Jenny: And what if it's not a nudge? What if I genuinely need new capability?
+
+Alex: Then you bump the rank up. Or, if it's something really disruptive — a totally new language, a fundamentally different style of reasoning — you go back to full fine-tuning. LoRA isn't magic, it has a regime where it works.
+
+Jenny: Got it. Okay so now let's talk about what this looks like at runtime. Because the math is one thing, but I care about how it actually executes.
+
+Alex: Good. So the forward pass becomes y equals W times x, plus alpha times A times B times x. Mathematically you can group it as y equals (W plus alpha-A-B) times x. One single matrix.
+
+Jenny: So I can just merge them ahead of time and run one matmul?
+
+Alex: You can. And if you only ever serve one adapter on a replica, that's exactly what you should do. Merge it. Zero overhead. Forward pass runs at full base-model speed. The 1 to 3 percent throughput regression from running LoRA unmerged just disappears.
+
+Jenny: But you said "if you only ever serve one." Which implies most of the time you don't.
+
+Alex: Right, this is where it gets interesting. The whole point of LoRA in production is multi-tenancy. One base model in HBM, dozens or hundreds of customer adapters layered on top, and per-request you pick which adapter to apply.
+
+Jenny: Wait wait wait. So this is like — okay let me make sure I have this right. The base 70B is the shared service binary. It's loaded once, lives in HBM. And then each tenant has their own little 50-megabyte config patch that gets layered in at request time.
+
+Alex: That's exactly it. And if you merge, you've baked in one specific tenant. You've lost the ability to swap. Multi-tenant serving has to keep the LoRA branch separate — small extra matmuls per layer, but the base stays neutral.
+
+Jenny: So you pay a small tax for the flexibility of swapping.
+
+Alex: Small, but real. And this is where the operational story gets juicy. Because now think about cost. You've got 140 gigs of base in HBM — call it 35 gigs if you're running INT4 quantized — and then adapters at maybe 50 to 500 megs each, sitting warm in HBM or host RAM.
+
+Jenny: So I can fit, what, a hundred adapters on a single replica?
+
+Alex: Easily. And vLLM, SGLang, TensorRT-LLM all support this multi-LoRA mode now. The amortization is incredible — your base model utilization stays high because every tenant's traffic goes through the same weights.
+
+Jenny: Okay so this is where I want to push. Swapping adapters isn't free, right? Like, in cache terms, if a request comes in for an adapter I don't have hot, I have to fault it in.
+
+Alex: Correct. And that's the failure mode. If the adapter is warm in HBM, swap is microseconds. If it's in host RAM, milliseconds. But if it's only on object store — S3, basically — you're looking at a hundred milliseconds plus to fetch it over the network. On the critical path of a request.
+
+Jenny: That'll wreck your P99 instantly.
+
+Alex: It will absolutely wreck your P99. And here's where it ties back to scheduling. You can't just round-robin requests across replicas anymore. Because if tenant A's adapter is warm on replica 1 and cold on replica 2, sending tenant A's request to replica 2 costs you a hundred-millisecond adapter fetch.
+
+Jenny: Oh. Oh, this is exactly tenant-aware routing. Like sticky sessions, but for model weights.
+
+Alex: That's the analogy. They call it LoRA-aware routing. You hash on adapter ID, prefer the replica that already has it loaded, and only spill to other replicas when your preferred one is over some utilization threshold.
+
+Jenny: And without that, what happens?
+
+Alex: Without it, every request potentially loads its adapter from scratch. You get adapter thrash. Replicas spend their time pulling adapters from S3 instead of doing useful work. Per-tenant tail latency explodes. Multi-LoRA serving falls apart.
+
+Jenny: So this is the part that infrastructure people miss. They think LoRA is a model decision. But you're saying it's a coordinated decision across the model, the engine, the scheduler, and the storage tier.
+
+Alex: All four. Pick any one in isolation and the others will not save you. You can have the world's best LoRA training, the best multi-LoRA engine, but if your scheduler is dumb about tenant affinity, you've lost.
+
+Jenny: Hmm. One more thing — I want to come back to QLoRA. You mentioned 4-bit. What's the deal there?
+
+Alex: QLoRA is the operational twist. You keep the base model in 4-bit quantized form — they use a format called NF4 — during both training and inference. Then you train the LoRA adapter in BF16 on top.
+
+Jenny: So the big frozen thing is tiny, and the small trainable thing is full precision.
+
+Alex: Exactly. And the result is dramatic. Training a 70B fine-tune used to mean 8 H100s. With QLoRA, single H100. That's a step-change in accessibility. Quality is essentially indistinguishable from training on the unquantized base. Most modern open-source toolchains — Unsloth, axolotl, PEFT — default to QLoRA now.
+
+Jenny: That's wild. Okay, so to bring this all home — what's next?
+
+Alex: So we've spent this episode on architecture innovations. New attention variants, state-space models, multi-token prediction, distillation, and now LoRA. All of these are about making the model itself cheaper or more flexible. But we've been hinting at something the whole time — scheduling.
+
+Jenny: Right, you keep saying things like "the scheduler has to know about this" or "LoRA-aware routing."
+
+Alex: Because these architectural choices keep pushing complexity into the request layer. Different adapters per request, different cache strategies per request, different speculation strategies per request. The scheduler is no longer a dumb load balancer. It's making semantic decisions about every inbound query.
+
+Jenny: So the next frontier isn't really a model frontier. It's an orchestration frontier.
+
+Alex: That's exactly right. The next thing we need to talk about is what happens when you have ten thousand requests per second hitting a fleet, every one of them with different adapter affinity, different cache state, different latency SLOs. How do you schedule that?
+
+Jenny: That sounds like the hardest distributed systems problem we've talked about yet.
+
+Alex: It is. And it's where everything we've covered — KV cache, prefix cache, LoRA, speculative decoding, disaggregation — comes together into one brutal optimization problem. We'll get into it next time.
+
+Jenny: Can't wait. See you then.
+
+Alex: See you then.

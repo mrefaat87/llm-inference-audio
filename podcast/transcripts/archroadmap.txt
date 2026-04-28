@@ -1,0 +1,81 @@
+Alex: So Jenny, I want to start today's episode with a question. When you think about how AWS plans EC2 capacity, you're not just thinking about "how many servers" — you're thinking about generations, right? Graviton 2 versus 3 versus 4. Each one has different economics.
+
+Jenny: Yeah, completely. And the generation matters because it's not just "more cores" — the instruction set changes, the memory bandwidth changes, sometimes entire workload categories shift to a new generation overnight.
+
+Alex: Exactly. Now hold that thought, because the NVIDIA roadmap works the same way, but with one twist that's going to bend your brain a little. Every GPU generation since Ampere has done the same two things, almost like a metronome. It adds a smaller numerical precision with native Tensor Core support, and it adds hardware for the next FlashAttention algorithm.
+
+Jenny: Wait, two things? Like, those are the headline features every single time?
+
+Alex: Every single time. Ampere in 2020 added BF16. Hopper in 2022 added FP8. Blackwell in 2024 added FP4 and these microscaling formats — MXFP4, NVFP4. And each step roughly doubles your raw TFLOPS at the new precision compared to the previous generation.
+
+Jenny: Hang on. Doubles? So if I move from H100 to B200 and switch from FP8 to FP4, I'm getting roughly 2x the throughput on the same silicon area?
+
+Alex: Roughly, yes — at the new precision. That's the whole game. The Tensor Core is the matrix multiply unit, where about 95% of your inference FLOPs happen. If you can fit your weights and activations in half the bits, you can do twice as many multiplies per cycle. The hardware just gets denser with arithmetic.
+
+Jenny: Okay but why does this require new hardware every time? Like, why can't I just take FP4 and run it on a Hopper GPU? It's just smaller numbers.
+
+Alex: Great question. Because the Tensor Core is literally wired for specific data widths. The multiply-accumulate trees inside the chip — the actual silicon — are laid out for FP16, BF16, FP8, FP4. If the hardware doesn't have FP4 paths, you can store FP4 numbers in memory all you want, but when you go to multiply them, you have to upcast to a precision the chip understands. You lose the speedup entirely.
+
+Jenny: Oh. So the precision isn't a software feature, it's a wiring decision NVIDIA made two years before the chip ships.
+
+Alex: Exactly. And here's the consequence — and this is where it gets really operationally interesting. Quantization research follows hardware. It doesn't lead it.
+
+Jenny: What do you mean follows?
+
+Alex: FP8 as a serving default didn't really exist until H100s shipped. The papers came after. MXFP4 quantization recipes only matter now because Blackwells are deploying. So when you see a new precision format trending in research, you can almost always trace it back to an NVIDIA chip that landed 6 to 12 months earlier.
+
+Jenny: Wait, that's backwards from how I'd expect it to work. I'd expect the algorithm people to figure out FP4 works fine, and then push hardware to support it.
+
+Alex: It's the other direction. Because nobody's going to publish a recipe for a precision that has no hardware to run it fast. There's no point. So the research community waits for NVIDIA to drop the silicon, then within months, the quant recipes catch up. It's almost like a supply-driven market.
+
+Jenny: Okay that's the precision half. What about the FlashAttention half?
+
+Alex: So this is the second metronome beat. Each FlashAttention generation needs specific hardware features. FA3 needed Hopper's async copy and warpgroup-MMA — these are scheduling primitives where you can overlap memory loads and matrix multiplies in a finer-grained way than before. FA4 needs Blackwell's tensor memory accelerator, which is basically a dedicated DMA engine for moving tiles in and out of the Tensor Core's scratchpad.
+
+Jenny: So FlashAttention isn't just "a clever algorithm someone wrote" — it's deeply coupled to what the chip can do.
+
+Alex: Right. And the pattern is that the FlashAttention paper lands roughly 6 months after the GPU ships. The hardware comes first, then the algorithm that knows how to milk it. And what you get out of it is longer context at lower cost — your attention kernel becomes 2 to 4x cheaper, which means a 200K context window stops being aspirational and becomes a default.
+
+Jenny: Okay. Let me try to summarize the whole roadmap in one sentence and you tell me if I'm off. Ampere brought BF16, Hopper brought FP8 plus FA3, Blackwell brought FP4 plus FA4, Rubin in 2026 brings HBM4 and a separate prefill chip, and Feynman in 2028 is still under wraps.
+
+Alex: That's it. You just compressed five years of silicon history into one breath. But I want to dig into Rubin for a second because it breaks the pattern in an interesting way.
+
+Jenny: How so?
+
+Alex: Rubin introduces a separate die called CPX — explicitly for prefill in disaggregated serving. So instead of one homogeneous GPU doing both the prefill phase and the decode phase of inference, you now have specialized silicon for each.
+
+Jenny: Oh wait. That's exactly like splitting your fleet into compute-optimized and memory-optimized instance types. You stop pretending one shape fits all workloads.
+
+Alex: That's a perfect analogy. Prefill is compute-bound — you're chewing through a giant prompt in parallel. Decode is memory-bandwidth-bound — you're generating one token at a time and your bottleneck is reading the KV cache. Putting them on the same chip means one of them is always under-utilizing some part of the silicon. CPX says, fine, we'll build different chips for different phases.
+
+Jenny: That's a huge architectural statement. NVIDIA's basically admitting that the unified GPU isn't the right shape for inference anymore.
+
+Alex: Right. And Rubin also packages an ARM CPU — Vera — on-die with NVLink-C2C between them, which means host memory becomes a usable tier of the cache hierarchy. You can spill KV cache to CPU RAM at 900 GB/s instead of going across PCIe at 64.
+
+Jenny: So now I have to ask the operational question. How does all of this hit me when I'm running a fleet?
+
+Alex: Three ways. First, capacity planning. An H100 fleet and a B200 fleet have fundamentally different economics — different supported precisions, different per-GPU TFLOPS, different memory capacity. Any reservation you made on one generation has to be re-justified when the next lands.
+
+Jenny: That sounds like a nightmare honestly. You can't just renew.
+
+Alex: You really can't. Second — and this one's a trap — engine support lag. When a new generation ships, your inference engine usually has partial support at launch. The advanced features — FP4 kernels, async tile primitives, FA4 — those trail by 3 to 9 months. So a new GPU is not the same as new GPU performance available in production.
+
+Jenny: So you might be sitting on B200s for six months that are running like fast H100s because the software can't reach the new pathways yet.
+
+Alex: Exactly. And third — model architecture co-design. The frontier labs are increasingly targeting specific generations. DeepSeek V3 was designed around H100 FP8. FLUX assumes Blackwell for video. GPT-OSS ships in MXFP4 because Blackwell is its target. If you run a Blackwell-targeted model on a Hopper, you're leaving real performance on the table — sometimes 2x or more.
+
+Jenny: That's wild. So model-hardware fit is a first-class concern now, not just a "nice to have."
+
+Alex: It's first-class. And it's why fleet diversity is actually a feature, not a bug. You want a Hopper pool for the models that quantize well to FP8, and a Blackwell pool for the ones that need FP4.
+
+Jenny: Okay so before we wrap, where does this lead next?
+
+Alex: So we've talked about the silicon roadmap as a sequence of generations. But generations aren't just chips — they're racks. Blackwell brought NVL72, where 72 GPUs all reach each other at NVLink speed inside a single rack. That changes what "a unit of capacity" even means. The next thing we want to dig into is how that rack-scale NVLink domain reshapes parallelism strategies — tensor parallel, pipeline parallel, expert parallel — and why the right answer depends on whether you're looking at 8 GPUs in a node or 72 GPUs in a rack.
+
+Jenny: So next time we're going to take this hardware story and ask, okay, given this new shape of compute, how do you actually carve a model across it?
+
+Alex: Exactly. The chip determined what's possible. The rack determines what's optimal. And the algorithms — the parallelism strategies — are what connect the two.
+
+Jenny: Looking forward to that one. See you next episode.
+
+Alex: See you then.

@@ -1,81 +1,107 @@
-Alex: So Jenny, I want you to imagine you're running two completely different workloads on the same EC2 instance. One is a CPU-intensive batch job — think video transcoding — and the other is a latency-sensitive API server that needs to respond in under fifty milliseconds. What happens?
+Alex: So Jenny, picture this. You're running a fleet at AWS, and you've got two completely different workload profiles sharing the same EC2 instances. One is this CPU-pegged batch job that runs for thirty seconds and saturates every core. The other is a latency-sensitive API server where p99 actually matters. What do you do?
 
-Jenny: I mean, that's a nightmare. The batch job steals CPU cycles, your API latency goes through the roof, your P99 looks terrible, and your on-call engineer is getting paged at 3 AM. You'd never do that in production — you'd split them into separate instance groups with their own scaling policies.
+Jenny: Oh, that's a no-brainer. You split them. Different instance groups, different scaling policies, probably different instance families even. You don't let the batch job starve your API.
 
-Alex: Exactly. And that is precisely the problem that inference serving has been dealing with, except most people don't realize it yet. When you serve an LLM, every single request has two fundamentally different phases — prefill and decode — and they're as incompatible as your batch job and your API server.
+Alex: Right. And yet, for years, that's exactly what we did with LLM inference. Prefill and decode — two fundamentally different workloads — running on the same GPUs, fighting for the same resources.
 
-Jenny: Okay, I remember prefill is when the model processes the entire input prompt, and decode is when it generates tokens one at a time. But why are they incompatible? They're both just running on a GPU.
+Jenny: Wait, hold on. I want to make sure I have the shapes right. Prefill is when you ingest the prompt, decode is when you generate tokens. Why are those so different in terms of resource profile?
 
-Alex: Right, but think about what the GPU is actually doing in each phase. Prefill is pure compute — massive matrix multiplications across every token in the prompt simultaneously. It's hammering the GPU's compute units at ninety to ninety-five percent utilization. Memory bandwidth? Only using thirty to fifty percent. Decode is the exact opposite. You're generating one token at a time, so compute utilization drops to maybe twenty to forty percent, but you're slamming memory bandwidth at ninety-five percent because you need to load the entire model's weights for every single token.
+Alex: Great question. Prefill is compute-bound. You're doing these massive matrix multiplications across the entire prompt in parallel — thousands of tokens at once. The GPU's streaming multiprocessors light up to ninety, ninety-five percent utilization. It's a beast of a compute job.
 
-Jenny: Oh wait — so it's not just that they're different workloads, they're bottlenecked on completely different hardware resources?
+Jenny: Okay, so prefill is like the batch job — pegging the cores.
 
-Alex: Exactly. Prefill is compute-bound, decode is memory-bandwidth-bound. And here's where it gets really ugly. When you run them on the same GPU — which is what most deployments do today — they interfere destructively. Picture this: you've got twenty decode requests happily streaming tokens to clients, nice smooth latency. Then a thirty-two-thousand-token prompt arrives for prefill. That prefill has to chew through all those tokens, and while it's doing that, every single one of those twenty decode requests just... stalls.
+Alex: Exactly. Now decode. Decode generates one token at a time. Every single token, you have to load the entire model's weights from HBM — high-bandwidth memory — to do one tiny matmul. The compute is trivial. The bottleneck is memory bandwidth. SM utilization on decode is twenty to forty percent. The cores are basically waiting around while bytes get pulled across the bus.
 
-Jenny: That's the noisy neighbor problem. One big prefill request is basically a resource hog that tanks everyone else's latency.
+Jenny: So prefill is compute-bound, decode is bandwidth-bound. And you're telling me we used to run these on the same instance.
 
-Alex: The team behind DistServe actually measured this — they saw decode latency inflate by two to thirty X during large prefills. Two to thirty X! Imagine your API P99 going from fifty milliseconds to one and a half seconds because someone sent a long document.
+Alex: Same instance, same GPU, same scheduler. And here's where it gets ugly. A thirty-two-thousand-token prefill comes in. That single request now occupies all the compute on that GPU for, let's say, two seconds. During those two seconds, every decode that was happily streaming tokens to a user — they all stall.
 
-Jenny: Okay but hang on — didn't we talk about chunked prefill as a solution to this? Breaking the prefill into smaller pieces so it doesn't monopolize the GPU?
+Jenny: Oh no. That's a head-of-line blocking nightmare.
 
-Alex: Good memory. Chunked prefill helps — it's like preemptive multitasking instead of cooperative multitasking. You break the prefill into chunks and interleave them with decode steps. But here's the thing — each chunk still competes for compute during its time slice. Berkeley actually did a retrospective on this and found chunked prefill closes sixty to eighty percent of the latency gap. Which is great! But for that remaining twenty to forty percent, and more importantly for scaling efficiency, you need a fundamentally different architecture.
+Alex: DistServe measured it. Decode latency inflates two to thirty times during large prefills. Your time-between-tokens — the metric that determines whether a chat feels smooth or janky — it just falls off a cliff.
 
-Jenny: So that's where disaggregation comes in — you literally split prefill and decode onto separate GPU fleets?
+Jenny: Hang on, why not just chunk the prefill? Break the big prompt into smaller pieces, interleave them with decodes?
 
-Alex: Exactly. Two separate fleets, independently scaled, independently optimized. Your prefill fleet gets GPUs with high TFLOPS — raw compute power. Your decode fleet gets GPUs with high memory bandwidth. It's the same pattern as splitting your web tier and worker tier into separate auto scaling groups.
+Alex: That's chunked prefill, and people do it. It mitigates. It doesn't eliminate. Each chunk is still competing for compute. You're smoothing the spikes but you're still mixing two workloads that want different things from the hardware.
 
-Jenny: Okay walk me through the request flow. A request comes in — then what?
+Jenny: So the cloud-engineer answer is: stop trying to make them coexist. Separate fleets.
 
-Alex: Request hits a router or scheduler first — think of it like your load balancer. The router picks a prefill worker, ideally the least loaded one, or one that already has relevant prefix cache data. The prefill worker processes the entire prompt, produces the KV cache — that's all the intermediate state the model computed — plus the first token. Then the KV cache gets transferred to a decode worker. The decode worker picks up from there, generates tokens one at a time, streams them back to the client. When generation is done, the decode worker frees the KV cache memory.
+Alex: Separate fleets. That's disaggregation. You build a prefill fleet — high-TFLOPS GPUs, optimized for compute throughput. And a decode fleet — high-HBM-bandwidth GPUs, optimized for memory throughput. Each fleet has its own autoscaling group, its own scaling signal, its own SLO.
 
-Jenny: That KV cache transfer step — how big are we talking? Because transferring state between fleets sounds like it could be a real bottleneck.
+Jenny: What scaling signals?
 
-Alex: You're asking exactly the right question because this is the Achilles' heel of the whole architecture. For a seventy-billion-parameter model with a thirty-two-thousand-token context, even with GQA compression, you're looking at roughly thirty-two gigabytes of KV cache data.
+Alex: Prefill fleet scales on TTFT — time to first token — and queue depth. Decode fleet scales on TBT — time between tokens — and KV cache utilization. A burst of long-context RAG requests comes in? Prefill fleet scales out. Decode is untouched. It's the web tier slash worker tier pattern, basically.
 
-Jenny: Thirty-two gigabytes? Per request?
+Jenny: Okay but — and this is the part that's going to bug me — if prefill happens on one machine and decode happens on another, prefill produces this big chunk of state, the KV cache. How does that get to the decode worker?
 
-Alex: Per request. Now, on InfiniBand at four hundred gigabits per second — that's fifty gigabytes per second — that transfer takes about six hundred and forty milliseconds. Systems typically spend ten to thirty percent of total request time just on this transfer.
+Alex: That is the Achilles' heel. You nailed it. The KV cache for a thirty-two-thousand-token prompt on a seventy-billion-parameter model? About thirty-two gigabytes, even with grouped-query attention and FP16.
 
-Jenny: That's like having a fast web tier and a fast worker tier but connecting them with a garden hose. What can you do about it?
+Jenny: Thirty-two gigs. Per request. You're shipping that across the network?
 
-Alex: A few things. First, layer-by-layer pipelining — this is clever. Instead of waiting until the entire KV cache is computed, you start transferring layer zero's cache to the decode worker while the prefill worker is still computing layer one. The DistServe team showed this hides most of the transfer latency behind compute. Second, you can use FP8 for your KV cache instead of FP16, which literally halves the transfer volume — sixteen gigs instead of thirty-two. Third, if you're doing intra-node disaggregation — prefill and decode on different GPUs in the same machine — you can use NVLink, which gives you nine hundred gigabytes per second. That same transfer drops from six hundred forty milliseconds to about forty-four.
+Alex: Across InfiniBand, ideally. GPUDirect RDMA, fifty gigabytes per second on a four-hundred-gig link. So roughly six hundred forty milliseconds for that transfer.
 
-Jenny: So the network topology really matters here. If you don't have InfiniBand or NVLink, you're basically stuck with TCP and the whole thing falls apart?
+Jenny: Six hundred forty milliseconds is a lot. That's longer than most people's entire tolerable TTFT budget.
 
-Alex: Pretty much. On regular datacenter TCP, that KV transfer can take anywhere from a hundred milliseconds to a full second. At that point, disaggregation might cost you more in transfer latency than it saves you in interference elimination.
+Alex: It is. So the systems get clever. DistServe does layer-by-layer pipelining — you start transferring layer zero's KV while you're still computing layer one. Overlap the transfer with the compute. FP8 KV cache halves the volume. And if you can keep it intra-node over NVLink at nine hundred gigabytes per second, that same transfer drops to forty-four milliseconds.
 
-Jenny: Interesting. So what are the major frameworks doing differently here? Because I'd imagine there's more than one way to skin this cat.
+Jenny: So the whole architecture only makes sense if you've got serious interconnect. If you're trying to do this over plain TCP —
 
-Alex: There are some really different design philosophies. DistServe, which came out of OSDI 2024, does strict physical separation — prefill GPUs and decode GPUs, period. They use NCCL for transfer and showed seven point four X more requests served while meeting SLO targets. Splitwise from ISCA 2024 is more flexible — they can actually do temporal disaggregation on the same GPU, switching between prefill and decode modes. And they explicitly call out using different GPU types for each fleet.
+Alex: You're done. TCP adds a hundred milliseconds to a full second of transfer latency. That eats every benefit. This is one of the reasons disaggregation isn't free — you need the InfiniBand or the NVLink fabric. Without it, stay colocated.
 
-Jenny: That makes sense — you'd want A100s or H100s for your prefill fleet where you need compute, and maybe something optimized for memory bandwidth for decode.
+Jenny: This is starting to feel like one of those classic infrastructure trade-offs where the fancy architecture only pays off above a certain scale. What's the threshold?
 
-Alex: Exactly. Then there's Mooncake from Moonshot AI, which is the most radical approach. They pull the KV cache out entirely into a separate storage tier — using CXL memory pools, DRAM, even NVMe. Neither fleet owns the cache. It's like going from a two-tier architecture to a three-tier architecture where the cache is its own service.
+Alex: Roughly a hundred million to a billion tokens per day. Models a hundred billion parameters or larger. And prefill-heavy workloads — long inputs, like RAG over big documents, code editing, agent loops where context keeps growing.
 
-Jenny: Oh, that's like separating your session store from both your web tier and your app tier. And I bet that solves the prefix caching problem too — if the cache is centralized, you can deduplicate across thousands of requests.
+Jenny: And below that?
 
-Alex: That's exactly the insight. And then there's NVIDIA Dynamo, which came out in 2025, which is the production-oriented framework. Rust control plane, Kubernetes-native, supports both disaggregated and colocated modes so you can start simple and disaggregate when you actually need it.
+Alex: Chunked prefill on a single fleet. Berkeley actually published a retrospective showing chunked prefill closes sixty to eighty percent of disaggregation's latency benefit at way less complexity. The real reason you disaggregate isn't per-request latency — it's independent scaling.
 
-Jenny: Okay so give me the decision framework. When do I actually need to take on this complexity?
+Jenny: That's a really important distinction. People sell it on latency, but the actual win is operational.
 
-Alex: Disaggregate when you have mixed workloads with highly variable prompt lengths — some requests are a hundred tokens, others are a hundred thousand. Disaggregate when you have strict TBT SLOs under fifty milliseconds and can't tolerate any prefill interference. Disaggregate when you're at scale — fifty-plus GPUs — and need those fleets to scale independently. And disaggregate when you're doing long context — thirty-two K tokens and above — where prefill takes literal seconds.
+Alex: Right. Now here's where it gets fun. Once you've separated the fleets, you can size them independently. There's a notation — xPyD. X prefill replicas, Y decode replicas. So 5P3D is five prefill, three decode.
 
-Jenny: And when do I stay colocated?
+Jenny: So 1P1D is the symmetric default, and you skew based on workload shape?
 
-Alex: When your workloads are uniform — similar prompt and output lengths, so there's no noisy neighbor problem. When you're small scale — under eight GPUs — because the operational complexity isn't justified. When you don't have InfiniBand or NVLink, because TCP will kill your KV transfer. And honestly, when simplicity is your priority. One fleet, one scaling policy, one thing to debug at 3 AM.
+Alex: Exactly. RAG-heavy traffic with long inputs? You go 2P1D, 3P1D — more prefill capacity. Creative writing where prompts are short and outputs are long? 1P2D, 1P3D — bias toward decode.
 
-Jenny: So the real win isn't even per-request latency — it's the independent scaling?
+Jenny: Okay this connects to something I saw earlier. You're routing every request through prefill, then over the network, then to decode. What about a tiny request? Like, a one-line prompt with a fully cached prefix? Are you really paying a hundred milliseconds of KV transfer for that?
 
-Alex: That's the key insight that Berkeley's retrospective highlighted. Chunked prefill gets you most of the per-request latency benefit. But what chunked prefill can't do is let you scale your prefill capacity independently of your decode capacity. When you get a burst of long-context requests, you scale up prefill workers without touching decode. When you have lots of concurrent generations, you scale decode without overprovisioning prefill. It's the same reason you'd put your web servers and your background workers in separate auto scaling groups — even if they could technically share instances.
+Alex: You just invented conditional disaggregation. That's the optimization. The router estimates net prefill compute — prompt length minus prefix-cache hits — and if it's below some threshold, like two thousand tokens, it keeps the request on the decode worker. No transfer, no fleet hop. The decode worker just does the small prefill locally.
 
-Jenny: That makes it really clear. It's a capacity management play, not just a latency play.
+Jenny: Right. Pay the transfer cost only when the prefill actually justifies it.
 
-Alex: Exactly. And that's what connects everything we've been talking about in this whole chapter. Scheduling decides how to order work. Routing decides where to send it. And disaggregation decides what kind of hardware should run each phase. They're all levers in the same system.
+Alex: Exactly. Naive disagg pays it every time. Conditional disagg only pays when it's worth paying.
 
-Jenny: So where does this lead next? Because it sounds like we're building toward something bigger.
+Jenny: Now I want to come back to something. You said the fleets can run different tensor parallelism degrees. TP4 prefill, TP8 decode. Why?
 
-Alex: We are. Once you have disaggregated fleets, you've essentially created a platform for inference — and now you can start thinking about multi-model serving, graceful degradation, and production hardening. How do you bin-pack multiple models onto the same fleet? What happens when a decode worker fails mid-generation — can you checkpoint and resume? How do you do admission control across two separate fleets with different capacity curves?
+Alex: Because compute-heavy and bandwidth-heavy want different things. Prefill is compute-bound, so you want low TP — fewer GPUs per replica means more replicas, more aggregate compute throughput. Decode is bandwidth-bound, so you want high TP — more GPUs per replica means more aggregate HBM bandwidth per token.
 
-Jenny: It's like we've gone from running a single monolith to building a full microservices platform, and now we need all the production infrastructure that comes with that — health checks, circuit breakers, graceful degradation.
+Jenny: But hold on — if prefill produces a KV cache sharded across four GPUs, and decode expects it sharded across eight, those layouts don't match.
 
-Alex: That's exactly the trajectory. Disaggregation gives you the right architecture, but production hardening is what makes it actually survivable at scale. And that's where things get really interesting.
+Alex: That's the catch. NVIDIA Dynamo solves it with a transpose kernel embedded in the KV transfer path. The cache gets reshaped on the fly between fleets, and the reshape is overlapped with the RDMA transfer so it's effectively free. Without that transpose, you'd be stuck running the same TP on both fleets — which kills one of the biggest reasons you disaggregated in the first place.
+
+Jenny: That's wild. So the network transfer isn't just a dumb copy, it's actually doing layout transformation in flight.
+
+Alex: It has to. And one last operational thing — when you split the fleets, your failure modes split too. Prefill queue saturation: TTFT spikes, prefill queue grows, decode workers sit idle waiting for KV deliveries. That means you're under-provisioned on prefill. Scale X up.
+
+Jenny: And the other direction?
+
+Alex: Decode-side KV cache exhaustion. Decode workers start preempting or rejecting. KV utilization pinned at a hundred percent. New requests stall after prefill completes because there's nowhere to land them. Long outputs are eating your HBM. Scale Y up, or enable KV quantization, or demote some KV to slower memory tiers.
+
+Jenny: So you've doubled your alerting surface. Two dashboards, two SLO burn-rate alerts, two capacity plans.
+
+Alex: Welcome to the cost of independent scaling. It's the price of admission.
+
+Jenny: Okay, so where does this lead? If we've separated prefill and decode, what's the next move?
+
+Alex: Two threads to pull on. One: Mooncake out of Moonshot AI took disaggregation a step further — they made the KV cache itself a separate storage tier. CXL memory pools, DRAM, NVMe. Neither fleet owns the cache. It's stateless workers around a shared cache substrate. That eliminates the locality-versus-statelessness tension entirely and lets you do prefix deduplication across thousands of concurrent requests.
+
+Jenny: That's basically the S3-for-KV pattern. Compute is ephemeral, state lives in the storage tier.
+
+Alex: Exactly. And the second thread — once you've decoupled compute from state, you start asking: what other parts of the inference pipeline could be their own fleet? Embeddings? Speculative draft models? Long-context attention? Disaggregation is the first cut. The next chapters get into how the routing layer above all this gets smart about it — prefix-cache-aware routing, load-aware routing, where the scheduler stops being a round-robin and starts being a real distributed-systems brain.
+
+Jenny: So today's episode was: stop running two workloads on one GPU. Next up: what to build above all those fleets so requests actually land in the right place.
+
+Alex: That's the arc. Disaggregation gives you the fleets. Routing decides who goes where. And once you have both, you can finally start treating LLM serving like the distributed system it actually is.
+
+Jenny: Can't wait. See you next time.

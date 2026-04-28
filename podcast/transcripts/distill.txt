@@ -1,0 +1,117 @@
+Alex: So Jenny, here's a question to kick us off. DeepSeek-R1 dropped — 671 billion parameters, top-tier reasoning model. Most people listening to this can't serve that. It needs a small data center to run. And yet, within weeks, people were running "DeepSeek-R1" on a single node. How?
+
+Jenny: Quantization? Did they squeeze it down?
+
+Alex: Nope. Different model entirely. Same name, basically. They distilled it.
+
+Jenny: Okay, distillation. I've heard this word forever and I've always nodded along like I knew what it meant. Walk me through it like I don't.
+
+Alex: Fair, and honestly that's the right instinct, because the word covers two completely different procedures and people use it interchangeably. That's where ninety percent of the confusion comes from.
+
+Jenny: Two different things, same name. Great. Go.
+
+Alex: So the classical version — Hinton, 2015 — is logit distillation. You have a big teacher model. For every training example, you run a full forward pass through the teacher and you grab the entire probability distribution it spits out over the vocabulary. Every token, every position, the full shape. Then you train the student to match that distribution using KL divergence as the loss.
+
+Jenny: So the student isn't just learning the answer, it's learning the teacher's confidence over every possible answer.
+
+Alex: Exactly. It's learning the shape of the teacher's belief, not just the winning token. The student approximates not just what the teacher said but how uncertain the teacher was.
+
+Jenny: Okay, that sounds expensive. You're running the teacher live for every batch.
+
+Alex: That's the catch. Teacher has to be online during training. Full forward pass, every step. For a 671B teacher that is brutal. So in practice, the production world doesn't really do this anymore for frontier models.
+
+Jenny: So what do they do instead?
+
+Alex: Synthetic-data distillation. Totally different mechanic. You run the teacher once, ahead of time, and you have it generate a giant corpus — millions of examples. You write those tokens to disk. Then you throw the teacher away. You take a smaller base model and you do plain old supervised fine-tuning on that corpus. Standard cross-entropy on next-token prediction. The teacher is gone.
+
+Jenny: Wait, hang on. So in this version the student never sees the teacher's distribution — it only sees the tokens the teacher chose to emit?
+
+Alex: Right. Just the surface output. The student is learning what the teacher said, not how it weighted alternatives. You lose the calibration signal. But —
+
+Jenny: But it's way cheaper.
+
+Alex: Two orders of magnitude cheaper. And operationally it's much simpler — generate dataset, fine-tune, ship. No live teacher in the training loop.
+
+Jenny: Okay so map this to my world. This is basically — you have a flagship service that's expensive to run, you record its traffic, and then you train a smaller, cheaper service to replay that behavior on its own?
+
+Alex: That is exactly the mental model. The teacher generates a workload, the student learns to handle the workload, and the teacher gets decommissioned. It's capability transfer through a recorded trace.
+
+Jenny: Got it. So back to DeepSeek-R1. Which version are they doing?
+
+Alex: Synthetic. They took R1 — the 671B reasoner — and had it generate millions of step-by-step reasoning traces on math and code problems. Then, and this is the clever part, they filtered. They checked each trace against ground-truth answers and threw out the ones where R1 got the wrong answer.
+
+Jenny: Oh, so the dataset is curated by correctness. You're not teaching the student R1's mistakes.
+
+Alex: You're distilling the best version of R1. Then they took Llama 3 70B, Qwen 2.5 32B, the 14B, the 7B — off-the-shelf open base models — and ran SFT on those filtered traces. Out comes DeepSeek-R1-Distill-Llama-70B, DeepSeek-R1-Distill-Qwen-32B, and so on.
+
+Jenny: Okay this is where I need you to slow down. The thing called "DeepSeek-R1-Distill-Llama-70B" — architecturally what is that? Is it a DeepSeek model or a Llama model?
+
+Alex: Architecturally, one hundred percent Llama 3 70B. Same layer count, same hidden size, same attention pattern, same tokenizer. Only the weight values are different. Nothing about the model's shape changed.
+
+Jenny: Oh. Oh, that's huge. Because that means —
+
+Alex: Say it.
+
+Jenny: That means the same vLLM or SGLang or TensorRT-LLM deployment that was already serving Llama 3 70B can serve the distilled reasoning model with zero engine changes. Same kernels, same KV cache layout, same parallelism plan.
+
+Alex: Zero. Changes. The engine sees a Llama 3 70B with different weights and that's it. From an inference infrastructure perspective, this is the magic. You inherit the entire serving stack.
+
+Jenny: That is wild. Because in my world, if you swap in a new service, you'd usually have to revalidate the whole deployment pipeline. Here it's a weight swap.
+
+Alex: Exactly. And that's why distill releases ship so fast. The day a frontier reasoner drops, within a week or two you have distills onto every popular open architecture, and they all just work on existing serving stacks.
+
+Jenny: Okay but devil's advocate. Why distill at all? Why not train a small reasoning model from scratch?
+
+Alex: Cost is the headline. Pretraining even a small model from scratch is millions of dollars and weeks of compute. An SFT pass on a few million synthetic examples is hours to days, and you're starting from a base that already speaks fluent English and knows how to code.
+
+Jenny: So you're paying for pretraining once, and then renting it out for every distill.
+
+Alex: That's the right framing. And it's targeted. You can distill just reasoning, or just refusal behavior, or just a coding skill, without disturbing the rest of the base model's capabilities. Surgical capability transfer.
+
+Jenny: What about safety stuff?
+
+Alex: Inherited from the base. The Llama base already went through Meta's safety training. When you distill on top of it, you keep that lineage. You only have to validate the new behavior — the reasoning — not the whole model from scratch.
+
+Jenny: That's a real lift. Re-doing safety eval on a from-scratch model is brutal.
+
+Alex: It's also why the licensing matters and people get this wrong. A distill of a Llama base inherits Llama's license. That's fine. But a distill of a closed teacher — where the teacher's terms forbid using its outputs to train competing models — that's a legal landmine, not a technical one. Some of the early "GPT-4 distill" releases were exactly this kind of problem.
+
+Jenny: Right, the lawyers care even if the engine doesn't. Okay, let me try to put distillation in a row with the other post-training things, because they all blur together. Distillation versus fine-tuning versus RL — what actually distinguishes them?
+
+Alex: Great question. They're all post-training adjustments to a base model. The difference is the supervision signal. SFT — supervised fine-tuning — you give it human-curated input-output pairs. "Here's a question, here's the right answer." Synthetic-data distillation is a special case of SFT where the pairs come from a bigger model instead of humans. Logit distillation we already covered — signal is the teacher's full distribution. RLHF or DPO — signal is preferences. "A is better than B" or a reward model score. Used when there's no clean ground truth, like "is this response polite enough."
+
+Jenny: So in the frontier post-training pipeline, do they use all of these?
+
+Alex: Almost always, in sequence. Pretrain, then SFT — often partly distilled from a stronger model — then RL on top. Each stage layers a different kind of supervision.
+
+Jenny: Okay last thing I want to nail down. From an inference engineer's seat — me, basically — what actually changes when I swap in a distilled model versus the base?
+
+Alex: Architecturally, nothing. That's the gift. But behaviorally, a lot. You have to redo evals from scratch. Reasoning depth, refusal patterns, and especially output length distribution can shift dramatically.
+
+Jenny: Output length. That's the one that bites capacity planning.
+
+Alex: Hard. Reasoning-distilled models emit thinking traces. They talk to themselves before answering. So if Llama 3 70B base gave you 200-token average outputs, the R1-Distill version might give you 2000. Your KV cache footprint and your decode time both scale with output length.
+
+Jenny: So my capacity model that was right for the base is now wrong for the distill, even though the architecture didn't change.
+
+Alex: Exactly. Same engine, same parallelism plan, same quant recipe, but you need to re-tune max_tokens, your sampling parameters, your output-length predictors, and probably your batch size targets.
+
+Jenny: Got it. Same hardware footprint per token, but more tokens per request.
+
+Alex: That's the whole story.
+
+Jenny: Okay, where does this thread lead next? What's the connect-forward?
+
+Alex: So everything we've talked about today — MLA, attention variants, Mamba, multi-token prediction, hardware co-design, LoRA, distillation — all of these are architectural and training-time tricks. The model designer's toolbox.
+
+Jenny: And next we shift to —
+
+Alex: Sampling and decoding. Now you have the model. How do you actually generate from it well? Temperature, top-k, top-p, min-p, repetition penalties, the new structured-output stuff with grammar-constrained decoding. The knobs that turn a trained model into actual usable output.
+
+Jenny: And these matter way more for distilled reasoning models specifically, right? Because reasoning models are sensitive to sampling.
+
+Alex: Hugely. The same model can look brilliant or completely broken depending on how you sample from it. And once we understand sampling, we get to speculative decoding, which is its own beautiful systems story — predicting tokens with a small draft model and verifying them with the big one. It's literally branch prediction for LLMs.
+
+Jenny: Okay now you're teasing me. Save it for next time.
+
+Alex: Next time.

@@ -1,0 +1,89 @@
+Alex: So Jenny, quick question to start. When you ship a service at AWS, what's the artifact that actually moves between teams? Like, what's the canonical thing?
+
+Jenny: Container image. OCI format, sitting in ECR. That's the source of truth — every environment pulls the same digest.
+
+Alex: Right. And the reason that works is because everyone agreed on one format. You don't have prod pulling tarballs while staging pulls something else. So today I want to talk about the equivalent question for LLMs. When DeepSeek or Meta drops a new model at midnight, what's the artifact that hits the internet? And why did the whole industry converge on one format?
+
+Jenny: Okay, I assume the answer is going to be safetensors because you've mentioned it before, but I genuinely don't know what it is. Walk me through it.
+
+Alex: So safetensors is a Hugging Face format. And the way I'd describe it — it's almost embarrassingly simple. It's a JSON header that tells you "here are the names of the tensors, their shapes, their dtypes, and the byte offset where each one lives." Then after that header, it's just raw bytes. That's it. No code, no graph, no metadata about how to run the model. Just weights.
+
+Jenny: Wait, that's it? That feels too simple. Like, where does the actual model architecture live? How does the runtime know it's a transformer with this many layers and that attention pattern?
+
+Alex: Great question. That lives in a separate `config.json` file that ships alongside it. So the release bundle is basically: safetensors with the weights, config.json with the architecture description, and a tokenizer file. Three things. The runtime — vLLM, SGLang, TensorRT-LLM — reads the config, builds the model graph in its own code, and then just streams the weights in from the safetensors file.
+
+Jenny: Hmm. Okay so that's interesting because you're decoupling the weights from the execution. The runtime owns the "how to run it" part.
+
+Alex: Exactly. And that decoupling is the whole reason safetensors won. But before I get to why it won, let me tell you what it beat. Because the original format in the PyTorch world was just `.pt` or `.bin` files.
+
+Jenny: Pickle, right? I've used those.
+
+Alex: Yeah. Python pickle. And here's the thing — pickle isn't a data format. It's a serialization of arbitrary Python objects, including code. When you load a `.pt` file, you can literally execute code. It's `eval()` with extra steps.
+
+Jenny: Oh that's horrifying. So if I download a model from some random Hugging Face account and load it...
+
+Alex: It can pop a shell. It can exfil your AWS credentials. It can do anything Python can do. There have been real malicious models found in the wild. So imagine you're running a shared model registry — like, the LLM equivalent of Docker Hub — and your default format is "arbitrary code execution on pull." That's not a serving format. That's a supply chain attack waiting to happen.
+
+Jenny: Okay so safetensors is, what, like the difference between running a binary versus running a signed container image with no shell access?
+
+Alex: That's a good way to put it. Although even simpler — it's more like the difference between loading a JPEG and loading an executable. A JPEG can't do anything except be pixels. Safetensors can't do anything except be tensors. The header is JSON, the body is raw bytes, and the parser doesn't have a code path that runs arbitrary anything. That's reason number one it won.
+
+Jenny: Okay so security is one. What's reason two?
+
+Alex: Memory-mapped loading. And this one is genuinely beautiful from a systems perspective. You know `mmap`?
+
+Jenny: Yeah, of course. You map a file into virtual memory and the kernel pages it in on demand.
+
+Alex: Right. So picture a Llama 70B checkpoint. It's about 140 gigabytes. Old way — you'd `read()` the whole thing into RAM, deserialize it, then copy to GPU. That's 140 gigs through your page cache before you even start. With safetensors, the engine `mmap`s the file. The OS maps the bytes into virtual address space, but doesn't actually read anything yet. Then the engine starts faulting in the tensors it needs first — usually layer zero — copies those to the GPU, and starts serving. The rest of the file pages in lazily as later layers are needed.
+
+Jenny: Oh wait. So you can start serving requests before the file is even fully read off disk?
+
+Alex: Exactly. Cold start drops dramatically. And it gets better — because there's no Python deserialization step, you're not allocating a giant Python object graph. You're literally pointing GPU memcpy at file-backed pages. It's about as close to zero-overhead as you can get.
+
+Jenny: Okay that's the kind of thing that matters at scale. If I'm autoscaling a fleet of inference replicas and every cold start is 90 seconds versus 15 seconds, that's the entire economics of the service.
+
+Alex: That's the whole game. And reason three is sharding. A 150 GB model doesn't ship as one file — it ships as, say, 30 shards of 5 GB each. And here's where it connects to tensor parallelism. If you're running TP-8, each rank only owns one-eighth of the weights. With sharded safetensors, each rank reads only the shards that cover its slice — in parallel, from disk or from S3. Cold start scales down with parallelism instead of being a single-threaded bottleneck.
+
+Jenny: That's basically parallel S3 multipart download but for model weights. Each worker pulls its own range.
+
+Alex: Exactly that. And critically, since the JSON header tells you exactly which byte offsets contain which tensors, you don't have to parse the whole thing to find your slice. You read the header, jump to your offsets, done.
+
+Jenny: Okay so safetensors makes sense for GPU serving. But you mentioned ONNX and GGUF. Where do those fit?
+
+Alex: So ONNX is a different beast. ONNX stores the execution graph, not just the weights. It's saying "here are the weights AND here's the computational DAG that uses them." It's maintained by the Linux Foundation, it's framework-agnostic, and it's useful when you trained in PyTorch but want to deploy somewhere that doesn't speak PyTorch.
+
+Jenny: That sounds strictly more powerful though. Why didn't ONNX win?
+
+Alex: Because the graph is the curse and the blessing. When the graph is portable, that's great — TensorRT can consume it, fuse kernels, generate an optimized engine. But the moment a model architecture does something novel, the standard ONNX op set doesn't cover it. The classic example was DeepSeek V3's Multi-head Latent Attention. The ONNX standard ops didn't have a clean way to express the latent compression, so engine teams literally had to hand-write the equivalent.
+
+Jenny: Oh. So ONNX is like a stable API surface, and frontier research keeps breaking the API.
+
+Alex: Yes, perfect framing. ONNX works great for stable, conventional architectures — vision models, older transformers, stuff that's been around long enough to standardize. But for anything cutting edge, you're fighting the spec. Whereas safetensors says "I don't care what your architecture is, I'm just bytes" — and the runtime, which is updated by humans every week, handles the novelty.
+
+Jenny: Got it. So safetensors offloads the "weird new architecture" problem to the runtime instead of the format. What about GGUF?
+
+Alex: GGUF is the llama.cpp format. It's optimized for CPU and edge inference — your laptop, your phone, Ollama, LM Studio. It bundles weights plus metadata plus quantization in the file itself, with these clever mixed-precision schemes called K-quants where different tensors get different bit widths.
+
+Jenny: But not used for production GPU serving?
+
+Alex: Not really. The bundled-quantization model means GGUF files are effectively pre-baked for one quantization recipe, and the recipe is tuned for CPU constraints. On GPU you usually want FP8 or INT4 done with something like AutoAWQ or NVIDIA's ModelOpt, and you want the runtime to control quantization. So GGUF lives in its own ecosystem — fantastic for "run a 70B on a Mac mini," not for "serve a million tokens a second behind an API."
+
+Jenny: Okay so let me play this back. Safetensors won GPU serving because it's secure, mmap-friendly, and shards cleanly. ONNX is for cross-framework portability with stable architectures. GGUF is for CPU and edge. And `.pt` is the legacy training format that everyone's trying to get away from for security reasons.
+
+Alex: That's the whole map. And here's the thing that ties it together — when a frontier model launches now, the entire ecosystem moves in hours, not weeks. The lab drops safetensors plus config plus tokenizer on Hugging Face. vLLM and SGLang and TRT-LLM open day-zero PRs adding architecture support. The quantization toolchains re-quantize to FP8 and INT4. llama.cpp converts to GGUF for the edge folks. NVIDIA publishes a NIM container with a pre-compiled TensorRT engine. All in a day.
+
+Jenny: And none of that pipeline works if the source format isn't dead simple.
+
+Alex: That's the punchline. Safetensors won because it's the boring, dumb, secure base layer that every other tool can consume identically. The whole ecosystem agreed on the lowest common denominator and built upward. It's actually kind of like how OCI images work — once everyone agreed on the manifest format, the whole tooling explosion happened on top.
+
+Jenny: Okay so where are we going from here? We've covered CUDA, kernels, fusion, graphs, formats. What's the next layer up?
+
+Alex: Next we go up to orchestration. We've spent all this time talking about a single engine running on a node — vLLM or SGLang loading a safetensors file and serving requests. But in production you don't run one engine, you run a fleet. And the fleet has different roles — some nodes doing prefill, some doing decode, some holding hot KV cache for prefix reuse. Routing requests across that fleet intelligently is its own problem.
+
+Jenny: So we're moving from "how does one box serve a model" to "how does a cluster serve a model."
+
+Alex: Right. And specifically we'll get into NVIDIA Dynamo, which is the orchestration layer that sits above the engines and treats vLLM and SGLang and TRT-LLM as interchangeable worker pools. KV-aware routing, disaggregated prefill and decode, all that. It's the part that turns engines into a service.
+
+Jenny: That's the part that maps to my world. Routing, autoscaling, capacity. Looking forward to it.
+
+Alex: Same. We'll pick it up there.

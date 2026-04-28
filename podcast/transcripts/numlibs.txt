@@ -1,0 +1,83 @@
+Alex: So last episode we ended on CUDA kernels — the actual functions that run on the GPU. Today I want to zoom out one level and talk about the library tower that sits between PyTorch and those kernels. Because nobody — and I mean nobody — is writing raw CUDA every time they need a matrix multiply.
+
+Jenny: Right, so this is the equivalent of... I'm not writing assembly every time I need to add two numbers. There's a stack of abstractions. So what's the stack look like for GPUs?
+
+Alex: Okay, picture it as a tower. At the very top you've got PyTorch, which is what model code is written in. At the very bottom you've got the GPU silicon — Tensor Cores, SMs, HBM. In between, there are like five or six libraries, and each one exists because the layer above it wasn't fast enough or flexible enough for some specific case.
+
+Jenny: That's already interesting. So this isn't a clean layered architecture, it's more like... layers that grew because somebody hit a wall.
+
+Alex: Exactly. It's evolutionary, not designed. So let's start at the most boring, most important layer — cuBLAS. NVIDIA's closed-source library of matrix multiply kernels. When you call `torch.matmul`, ninety-something percent of the time, the call lands in cuBLAS.
+
+Jenny: And cuBLAS is just... a giant catalog of precompiled kernels?
+
+Alex: Pretty much. NVIDIA has spent years tuning kernels for every combination of matrix shape and precision they care about. FP16 times FP16, BF16 times BF16, all the common shapes — transformer hidden dims, common batch sizes. When you call it, there's a heuristic that picks the best precompiled kernel for your shape and precision, and runs it.
+
+Jenny: Okay, but that sounds like it should be the end of the story. NVIDIA tunes the kernels, you call the library, you're done. Why is there anything above cuBLAS?
+
+Alex: Great question. Two reasons. First — cuBLAS only knows GEMM. Pure matrix multiply. It doesn't know about convolution, it doesn't know about attention, it doesn't know about layer norm. So NVIDIA built cuDNN on top, which is the deep-learning ops library. Convolutions, normalizations, some fused attention paths, RNNs. That's why both exist — different primitives.
+
+Jenny: Got it. So cuBLAS is for the math, cuDNN is for the ML-specific stuff. Both closed-source, both NVIDIA.
+
+Alex: Right. And here's the second reason — cuBLAS is a closed catalog. If your shape isn't in there, or your precision isn't in there, you're stuck with whatever generic fallback kernel they have, and that fallback can be three to five times slower than a custom-written one.
+
+Jenny: Wait, three to five times? That's massive. So when does that happen in practice?
+
+Alex: All the time, actually. Mixture-of-experts models have weird GEMM shapes — you're multiplying small batches by expert-sized matrices, and cuBLAS wasn't really tuned for that. Or someone ships a new precision — FP8 on Hopper, FP4 on Blackwell — and cuBLAS support lags by months. Or you want to fuse the GEMM with an activation function and an epilogue, and cuBLAS has no slot for that.
+
+Jenny: So the closed catalog is a bottleneck on innovation. New model, new precision, new fusion idea — and you're waiting for NVIDIA to ship.
+
+Alex: That's the gap. And that's what the next layer fills — CUTLASS. CUTLASS is open-source, Apache 2.0, and it's a C++ template library for writing your own GEMMs. You compose tile sizes, instruction shapes, what happens in the epilogue. It's like... if cuBLAS is a SaaS product, CUTLASS is the SDK you use to build your own.
+
+Jenny: Hang on, why not just always use CUTLASS then? If it's flexible and open?
+
+Alex: Because flexibility costs effort. cuBLAS is one function call. CUTLASS is "I will now write five hundred lines of templated C++ to define exactly how my tiles flow." You only do that when cuBLAS isn't fast enough for your case. The flow is — start with cuBLAS, profile, find the GEMMs that are dragging you down, write a CUTLASS kernel for those specific shapes, leave the rest on cuBLAS.
+
+Jenny: Okay, that's the pattern I keep hearing — general-purpose default, fall back to specialized for the hot path. Same as everywhere in infra. Like your default RDS, but you write a custom data layer for the queries that actually matter.
+
+Alex: That's exactly the right analogy. And inside CUTLASS 3.x there's now this sub-library called CuTe — "CUDA Tensors." It's a layout algebra. It lets you describe precisely how tile data moves from HBM into shared memory into registers into the Tensor Cores.
+
+Jenny: Wait, why do you need an algebra for that? Isn't a tile just a chunk of a matrix?
+
+Alex: On older GPUs, kind of yes. But on Hopper and Blackwell, the data movement got really complicated. You've got asynchronous copies, you've got the Tensor Memory Accelerator pulling data in the background, you've got these huge WGMMA instructions that consume a tile across a whole warpgroup. If you describe data layouts informally — "the tile is sixty-four by sixty-four" — you'll get it wrong and the kernel will be slow or incorrect. CuTe gives you a formal way to describe and compose those layouts.
+
+Jenny: So it's a type system for tile layouts. That's the equivalent of... we used to do schema by convention, now we have actual schemas because the system got too complex.
+
+Alex: Yeah, that's a really good way to put it. CuTe is what makes modern Hopper kernels even tractable to write. Now — that gets us NVIDIA's stack. cuBLAS, cuDNN, CUTLASS, CuTe. But there's a parallel open-source ecosystem that's grown up specifically for inference.
+
+Jenny: This is where FlashInfer and DeepGEMM come in?
+
+Alex: Exactly. FlashInfer is a library of attention kernels — paged attention, variable-length attention, sparse attention. It came out of UW and the community. vLLM's modern attention backend uses it, SGLang's RadixAttention uses it.
+
+Jenny: Why does attention need its own library? Isn't attention just a few matrix multiplies?
+
+Alex: That's what it looks like on paper. In practice, serving attention is a nightmare. Your KV cache is paged across non-contiguous memory blocks. Your batch has some sequences in prefill — long, dense — and some in decode — single token, sparse. A general GEMM library can't handle that. You need a kernel that knows about page tables, about variable lengths, about mixed batches.
+
+Jenny: Okay, so it's specialized for the actual access pattern of inference, not training. And cuBLAS doesn't know any of that.
+
+Alex: Right. cuBLAS sees a matrix multiply. FlashInfer sees "an attention computation across a paged KV cache with thirty-seven sequences of varying length." Totally different abstraction.
+
+Jenny: And DeepGEMM?
+
+Alex: DeepGEMM is wild. It's from DeepSeek, the team that did DeepSeek V3 and R1. It's like a few hundred lines of code. And it implements FP8 matrix multiply for Hopper, hyper-tuned for the exact shapes DeepSeek's models use. It often beats cuBLAS and CUTLASS on those shapes by a meaningful margin.
+
+Jenny: A few hundred lines? cuBLAS must be hundreds of thousands of lines.
+
+Alex: Exactly. And that's the point. DeepGEMM is the reference example of "what does a focused kernel achieve compared to a general library?" Because cuBLAS has to handle every shape, it can't be optimal for any specific one. DeepGEMM picks four shapes, owns them, ignores everything else.
+
+Jenny: So the lesson is — the more specific your workload, the more you want a focused kernel rather than the general library.
+
+Alex: That's the whole story of this layer. Now, the practical takeaway — when you read engine release notes, this stuff suddenly becomes legible. "vLLM added DeepGEMM support" — that means faster FP8 on H100s. "Switched attention backend to FlashInfer" — better paged plus varlen handling. "CUTLASS 3.x integration" — they can finally target Hopper's WGMMA properly.
+
+Jenny: Oh that's great. So the changelog isn't just noise, it's literally telling you which library tier moved.
+
+Alex: It reads like an architecture diagram once you know the stack. So if you take one thing from this — there's a tower from cuBLAS at the bottom of the cathedral up through specialized inference kernels at the top, and engines climb that tower opportunistically based on profiling.
+
+Jenny: Okay, so where does this take us next?
+
+Alex: Next episode we go up one more level — the compilers. Because what we just talked about is hand-written and template-written kernels. But there's a whole world of "I wrote PyTorch, now please generate me a fast kernel automatically." That's torch.compile, that's Triton, that's TorchInductor.
+
+Jenny: So compilers as the alternative to hand-written CUTLASS — let the system synthesize the kernel.
+
+Alex: And the interesting question is when synthesis is good enough, and when you still need a human to write the hot path. That's where we're going.
+
+Jenny: Love it. See you next episode.

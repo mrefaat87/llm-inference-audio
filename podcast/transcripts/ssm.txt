@@ -1,0 +1,95 @@
+Alex: So I want to start today with a thought experiment. Imagine you're running a service where every session keeps growing its in-memory state forever. No eviction. No compaction. Just append, append, append. How long before that bites you?
+
+Jenny: Oh, immediately. That's a memory leak with extra steps. You'd be paging out to disk, your tail latencies would explode, and your bin-packer would give up trying to schedule new sessions because nothing fits.
+
+Alex: Right. And that's basically what a transformer's KV cache is. Every token you process, you append keys and values for every layer, every head. The cache grows linearly with context length, and at decode time you have to read the whole thing back from HBM for every single token you generate.
+
+Jenny: Wait, every token? So if I'm at token 50,000, I'm re-reading 50,000 tokens worth of cache just to produce token 50,001?
+
+Alex: Exactly. That's why decode is memory-bandwidth-bound, not compute-bound. The GPU is mostly sitting there waiting for HBM. So now imagine someone says, "what if we just... didn't do that? What if we kept a fixed-size piece of state per session, and that's it?"
+
+Jenny: That sounds like going back to RNNs. Which I thought we collectively decided were a bad idea around 2017.
+
+Alex: You're right that the shape is RNN-like. RNNs had exactly this property — a single hidden vector that gets updated each step, constant memory regardless of context length. But they died for two reasons. One, you couldn't parallelize training because step t depends on step t-1. And two, long-range dependencies got mangled — information had to survive thousands of matrix multiplies in a row.
+
+Jenny: So the question is whether you can keep the constant-memory inference shape but fix the training and the long-range memory.
+
+Alex: That's exactly what state-space models do. The recurrence is dead simple — h_t equals A times h_{t-1} plus B times x_t, and y_t equals C times h_t. Three learned matrices, a hidden state vector, you're done.
+
+Jenny: That's just an RNN.
+
+Alex: It's just an RNN. The trick is in how you structure A. SSMs use a very particular form — diagonal-plus-low-rank, parameterized through a continuous-time analogy from control theory. And because of that structure, you can mathematically reformulate the recurrence as a long convolution during training.
+
+Jenny: Wait, hold on. Why does that matter?
+
+Alex: Because a convolution is parallelizable. During training, you don't have to walk token by token — you can process the whole sequence in parallel like a transformer. But at inference time, you flip back to the recurrent form and process one token at a time with constant state.
+
+Jenny: Okay, that's clever. Train as a parallel op, serve as a recurrent op. Same weights, two execution modes.
+
+Alex: Same weights, two execution modes. It's like having an offline batch pipeline and an online streaming pipeline that happen to compute the same function.
+
+Jenny: But there's gotta be a catch. If A, B, and C are fixed learned matrices, they can't adapt to what's actually in the input, right? Every token gets the same treatment.
+
+Alex: That is exactly the catch, and it's the thing that held SSMs back until 2023. Plain SSMs share A, B, C across all positions. They literally cannot decide "this token matters, push it into state" versus "this is filler, ignore it." Attention had that property — every token looks at every other token and decides what's relevant. Classical SSMs didn't.
+
+Jenny: So how did Mamba fix that?
+
+Alex: Mamba made A, B, and C input-dependent. The matrices themselves become functions of the current token. Now the model can selectively remember and forget based on content.
+
+Jenny: But doesn't that break the parallelization trick? If A depends on the input, you can't pre-compute the whole thing as a fixed convolution anymore.
+
+Alex: Bingo. That's the central engineering challenge. The answer is something called the selective scan — it's a custom CUDA kernel that implements an input-dependent recurrence as a parallel-prefix-sum operation.
+
+Jenny: Oh, like a parallel reduce. Where you compute partial sums in a tree and combine them.
+
+Alex: Exactly that pattern, but for the recurrence. And then Mamba-2 took it further — they reformulated the SSM kernel as a structured matrix operation that maps cleanly onto Tensor Cores. So now you're getting close to FlashAttention-level hardware utilization on the same GPUs.
+
+Jenny: Okay so let's talk serving. You said no KV cache. What does that actually mean for someone running this in production?
+
+Alex: It's a serving engineer's dream, honestly. Your memory per token in context goes from O(num_layers times num_kv_heads times d_head), growing with N, to a fixed-size hidden state per layer. O(1) in context length. The 4-tier KV hierarchy — HBM, host memory, SSD, remote — collapses. PagedAttention is irrelevant because there's no cache to page.
+
+Jenny: What about prefix caching? That's huge for chat applications where you reuse system prompts.
+
+Alex: Prefix caching becomes trivial. You just snapshot the recurrent state at the end of the shared prefix and restore it later. We're talking kilobytes per session instead of gigabytes.
+
+Jenny: Kilobytes. That's a per-customer config blob, not a memory tier. So at serving time, the decode cost shape changes too?
+
+Alex: Yeah. For a transformer, decode is O(N times d) — you read the whole KV cache. For Mamba, decode is O(d squared) — you read the state, do a matrix multiply, update the state, write the output. It's constant in context length. A million-token session decodes at the same speed as a thousand-token session.
+
+Jenny: Hang on, that's the real win. The long-context ceiling for transformers is HBM capacity. For SSMs there's no memory ceiling at all?
+
+Alex: No memory ceiling. The ceiling is quality, not capacity. Which brings us to the catch.
+
+Jenny: I knew there'd be a catch.
+
+Alex: Pure SSMs systematically underperform transformers on tasks that need exact in-context retrieval. Needle-in-haystack, copying long passages verbatim, citing a specific 50-token snippet from a 100K-token document. The fixed-size state is, by definition, a lossy compression of everything that came before.
+
+Jenny: Right, because attention's KV cache stores everything verbatim and you can look up exact matches. The SSM had to summarize.
+
+Alex: Exactly. It's the difference between keeping every log line indexed for grep, versus running a streaming aggregation that gives you summary statistics. Both are useful. They answer different questions.
+
+Jenny: So you'd never want pure SSM in production for, say, a code assistant that has to quote function signatures back exactly.
+
+Alex: Right. And that's why the production answer in 2025 and 2026 is hybrid models. Mostly SSM layers for cheap, bounded-memory compute, plus a small fraction — usually 10 to 25 percent — of attention layers for the retrieval-heavy work.
+
+Jenny: That's a really nice tiered-storage analogy actually. SSM layers are like the hot, fast, bounded cache. Attention layers are the verbatim log store you reach for when you need exact recall.
+
+Alex: That's a great way to think about it. NVIDIA's Nemotron Nano does this — Mamba-2 layers with periodic attention layers, shipped with TRT-LLM kernel support. AI21's Jamba combines mixture-of-experts FFNs with alternating Mamba and attention blocks. Zamba and Falcon-Mamba are exploring different ratios.
+
+Jenny: And the serving engines actually support these now?
+
+Alex: vLLM has hybrid-mamba support. TRT-LLM has Nemotron support. They're treated as a special case on top of the standard transformer fast paths. You get most of the memory benefits of SSMs and most of the recall quality of transformers.
+
+Jenny: Okay so let me preview where I think this goes. We've now seen attention compressed, attention replaced, and attention partially swapped out. What's left?
+
+Alex: A lot, actually. Next we'll get into multi-token prediction — instead of decoding one token at a time, what if you trained the model to predict several future tokens in parallel? It's basically speculative execution baked into the architecture.
+
+Jenny: Oh, that's a CPU pipelining analogy waiting to happen.
+
+Alex: It really is. And then we'll get into hardware co-design — how the next generation of models is being shaped by the GPU memory hierarchy, not the other way around. The architecture is becoming an artifact of the silicon.
+
+Jenny: That's the part that should feel familiar to anyone who's worked on Graviton or Nitro. You design the workload around the infrastructure constraints, not the abstract algorithm.
+
+Alex: Exactly. The frontier is getting more infrastructure-aware, not less. Which is good news for people who think in those terms.
+
+Jenny: Alright, see you next episode.

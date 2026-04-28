@@ -1,0 +1,101 @@
+Alex: So last episode we talked about agentic patterns at the architecture level — the loop, the orchestrator, all of that. Today I want to go one level down. What actually happens inside the inference engine when a request shows up with a tools array attached?
+
+Jenny: Okay, because in my head a tool call is basically the model saying "hey, run this function for me." But that's the API contract. What I don't have a picture of is what the engine is actually doing differently.
+
+Alex: Right, and the answer is — kind of a lot. So here's the thing. The model has been fine-tuned to emit a very specific token sequence when it wants to call a tool. And every model family does it differently. Hermes and Qwen wrap it in tool_call XML tags. Llama 3.1 uses a JSON envelope with special tokens. Mistral does TOOL_CALLS followed by JSON. DeepSeek-V3 has its own delimiter tokens. Llama 4 went pythonic — like, it literally emits get_weather(city="NYC") as if it were Python code.
+
+Jenny: Wait, so there's no standard at all? Each model family has its own dialect?
+
+Alex: Completely its own dialect. And the engine has to know which dialect the model is speaking. That's why vLLM has this flag, --tool-call-parser, with a registry — hermes, mistral, llama3_json, llama4_pythonic, deepseek_v3, kimi_k2, glm45, the list keeps growing.
+
+Jenny: Okay so this is basically a per-model-family protocol decoder. Like, at the API layer when you have a content-type header and you pick the right deserializer based on whether it's JSON or protobuf or whatever.
+
+Alex: That's exactly it. And here's the failure mode that bites people. If you point your engine at a Mistral model but configure it with the Llama parser — the model is producing perfectly valid tool-call tokens, but the parser doesn't recognize them. So the engine just streams them through as plain text content to the client.
+
+Jenny: Oh that's brutal. So from the user's perspective tool calling is just broken, but the model is doing the right thing.
+
+Alex: Completely. And it's silent. There's no error. Your client gets back a string that looks like tool-call XML and now your application has to decide whether to try to parse it itself or just give up.
+
+Jenny: Okay so the engine is watching the decode stream, looking for these markers. What does it do when it sees one?
+
+Alex: It stops decoding, parses out the JSON or Python args, sets finish_reason to tool_calls in the OpenAI shape — or stop_reason to tool_use in the Anthropic shape — and returns control to the orchestrator. Orchestrator runs the tool, appends the result to the conversation, fires a new request.
+
+Jenny: And that's the loop. Okay so now I have a question. Every turn of that loop, the prompt is growing, right? Because each new turn carries the whole history.
+
+Alex: Yes. And this is where it gets operationally interesting. The conversation prefix grows monotonically. Turn one is system plus user. Turn two is system plus user plus assistant tool call plus tool result plus the next user turn. And on and on.
+
+Jenny: So if I'm at turn ten of an agent loop and I don't have prefix caching, I'm re-prefilling the entire history from scratch every single turn?
+
+Alex: Every single turn. Total work is O(N²) over N turns. With prefix caching you reuse the KV from prior turns and you only prefill the new tokens. That makes it O(N).
+
+Jenny: That's huge. And it means session affinity at the gateway is suddenly load-bearing.
+
+Alex: It is the single most important thing for agent traffic. If your gateway routes turn eight of a ten-turn loop to a replica that didn't see turns one through seven, that replica has zero cached KV. It pays a full re-prefill. You're looking at maybe two seconds of TTFT instead of fifty milliseconds.
+
+Jenny: Right and meanwhile the original replica that had the cache is sitting there with the data still warm in HBM. So you've literally paid for the prefill twice — once on the cold replica, and you wasted the work on the warm one.
+
+Alex: Exactly. So the operational answer is cache-aware routing. Consistent hashing on the prompt prefix. Same conversation, same replica.
+
+Jenny: That's just sticky sessions. We've been doing that in load balancers forever.
+
+Alex: It is sticky sessions, but the stickiness key is the prompt prefix instead of a session cookie. Same idea, different signal.
+
+Jenny: Okay. Pivot — reasoning models. Where do those fit?
+
+Alex: So reasoning models — DeepSeek-R1, QwQ, Qwen3, Claude with extended thinking, the o1 and o3 family — they emit a reasoning segment before the actual answer. R1 wraps it in think tags. The parser splits the stream into reasoning_content versus content and surfaces them as separate fields.
+
+Jenny: Why does the engine need to know the difference? Why not just stream all the tokens out and let the client deal with it?
+
+Alex: Three reasons, and they all matter operationally. First, you bill the customer differently for them, or you hide them entirely from the UI. Second, the parser path needs to know where reasoning ends and answer begins so it can hand off to the tool-call parser cleanly. And third — this is the bug — if the parser is misconfigured, the think tokens leak into content. Now your downstream JSON parser is choking on chain-of-thought, and you're leaking the model's internal reasoning to end users who weren't supposed to see it.
+
+Jenny: Ouch. Okay so reasoning leakage is a real category of bug.
+
+Alex: Real category of bug. And there's a budget primitive too — a thinking_token_budget that can force-close reasoning by injecting the end-of-thinking token. Because R1 will routinely emit two to ten thousand reasoning tokens per request.
+
+Jenny: Wait, ten thousand? Per request?
+
+Alex: Per request. And those are real decode steps. Real KV pressure. Real cost. A request that returns two hundred visible tokens to the user after eight thousand reasoning tokens — you paid for eighty-two hundred tokens of compute.
+
+Jenny: So this is like background jobs running on the same instance as your serving traffic. Hidden compute that's still drawing from the same budget.
+
+Alex: Yes. And it's firmly decode-bound. Throughput on reasoning workloads is gated by memory bandwidth and KV size, not FLOPs. MLA — multi-head latent attention — and MTP are direct architectural responses to that. Shrink the KV footprint per token because you're going to be emitting a lot of tokens.
+
+Jenny: Okay I want to come back to tool calls for a second. What if I want to force the model to emit a tool call? Like, tool_choice required?
+
+Alex: Now we're in constrained decoding territory. If tool_choice is auto, the model can emit prose or a tool call, and the parser disambiguates. If it's required, or a specific tool is named, the engine switches modes. It compiles the tool's JSON schema into a token-level finite-state machine. xgrammar is the vLLM default. Outlines, lm-format-enforcer, SGLang's compressed FSM are the other big ones.
+
+Jenny: Compiled FSM. Okay. And what does the FSM actually do at decode time?
+
+Alex: At every decode step, before sampling, the engine computes which tokens would keep you in a valid state in the grammar. Any token that would violate the schema gets its logit masked to negative infinity. The model literally cannot sample an invalid token.
+
+Jenny: Wait, so the output is provably valid by construction?
+
+Alex: Provably valid. No parse-retry loop. No "let me regenerate because the JSON was malformed." The cost is a one-time FSM compile per schema — which gets cached — plus a per-token mask op.
+
+Jenny: That's elegant. And SGLang does something even smarter, you said?
+
+Alex: SGLang has compressed FSM. The observation is that in a JSON schema there are deterministic spans. Like once the model commits to emitting a field, the literal characters quote-name-quote-colon are forced. There's no choice. So instead of running the model for each of those tokens, SGLang collapses the chain and emits multiple tokens in a single step. LMSYS reports up to two times lower latency and two and a half times higher throughput on JSON workloads.
+
+Jenny: So you're skipping decode steps entirely when the grammar leaves no choice. That's just... free latency.
+
+Alex: Free latency. The model only runs when there's actually an information-theoretic decision to make.
+
+Jenny: Okay. Before we wrap, what are the operator failure modes here? Like, what's going to page me at 3am?
+
+Alex: Four big ones. Parser drift — the model vendor bumps a minor version and changes the tool-call template, your named parser silently starts returning content instead of tool calls. Partial JSON on stream cutoff — client disconnects mid-tool-call, you have an unclosed brace, your extractor needs to surface a clean error not silent truncation. KV blow-up on long agent histories — fifty-turn coding agent with a ten-thousand-token system prompt blows the per-session KV budget, the prefix cache thrashes, and you lose the win. And schema versus parser disagreement — constrained decoding validates the content stream, the tool-call parser validates the extracted JSON, and they can disagree on edge cases like unicode escapes.
+
+Jenny: That last one is sneaky. You'd think if the FSM says it's valid JSON it's valid JSON.
+
+Alex: They're operating on different layers and they don't always agree. So — what's next?
+
+Jenny: Yeah, where do we go from here?
+
+Alex: Next we go up a layer. We've been talking about what one inference engine does. The next conversation is about Dynamo — the orchestration layer above the engines. KV-aware routing across replicas, tiered KV memory, prefill-decode autoscaling. Basically the Kubernetes for inference.
+
+Jenny: So we move from inside-the-engine to the control plane that schedules across many engines.
+
+Alex: Exactly. And once you understand how a single engine handles tool calls and prefix caching, you'll see why the orchestrator on top has to be cache-aware, not load-aware. Routing on least-loaded is the wrong objective when your replicas have radically different cached state.
+
+Jenny: That's a tease I'll bite on. See you next time.
+
+Alex: See you next time.

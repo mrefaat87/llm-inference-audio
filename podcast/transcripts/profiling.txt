@@ -1,0 +1,89 @@
+Alex: So Jenny, imagine you get paged. Latency on your inference fleet just spiked, p99 doubled, and the first thing your on-call does is open nvidia-smi and stare at the GPU-Util column. It says 100%. What do they conclude?
+
+Jenny: That the GPUs are saturated, obviously. We're CPU-starved or we need more capacity. Right?
+
+Alex: That's exactly the trap. And it's the trap that's burned more inference teams than I can count. Because that 100% number — it doesn't mean what you think it means.
+
+Jenny: Wait, hold on. 100% utilization doesn't mean the GPU is 100% utilized?
+
+Alex: Not in any sense you'd recognize from CPU-land. nvidia-smi's GPU-Util column is binary. It samples at some interval, and if any kernel — literally any kernel, even a tiny one touching one streaming multiprocessor out of a hundred-plus — was running during that sample, it counts that interval as "busy."
+
+Jenny: Oh that's awful. So it's basically — did the GPU do anything at all in the last however-many milliseconds? Yes? Cool, 100%.
+
+Alex: Exactly. Picture an EC2 host where the CPU-Util metric flips to 100% the moment a single core does anything. You'd never ship that. But that's the GPU equivalent we've been operating on for a decade.
+
+Jenny: Okay so what do I actually want? If I'm running an inference fleet and I want a real "is this thing working hard" number, what's the metric?
+
+Alex: Two metrics, depending on what you care about. SM activity — that's streaming multiprocessor activity, basically what fraction of your compute units are actually doing work. And HBM bandwidth utilization — what fraction of your memory bandwidth you're consuming. For inference, especially the decode phase, you almost always want the second one, because decode is memory-bound.
+
+Jenny: Right, because you're shoveling KV cache through HBM faster than you're doing math. Okay so where do those metrics come from?
+
+Alex: Two places, depending on whether you're in production or you're debugging. In production, you want DCGM — Data Center GPU Manager. It's NVIDIA's telemetry exporter. Continuous, lightweight, exports SM occupancy, HBM bandwidth, NVLink traffic, tensor core utilization, all of it, straight into Prometheus, Grafana, whatever you've got.
+
+Jenny: So DCGM is basically node_exporter for GPUs.
+
+Alex: That's the cleanest one-liner for it, yeah. Same role in the stack. You run it on every GPU host, it scrapes the GPU's internal counters, and now your observability platform actually knows what your fleet is doing instead of squinting at nvidia-smi.
+
+Jenny: Okay, that's the production answer. What about when DCGM flags something weird and I need to actually dig?
+
+Alex: Now we get to the interesting part. NVIDIA gives you three profiling tools, and the mistake people make is reaching for the wrong one. They sit at three different altitudes. PyTorch Profiler, Nsight Systems, and Nsight Compute.
+
+Jenny: Three altitudes — give me the analogy. What's the cloud equivalent?
+
+Alex: Think of it like this. PyTorch Profiler is your application-level APM — like, you've instrumented your service and you can see "this request spent 200 milliseconds in the auth middleware, 400 in the database call." Nsight Systems is distributed tracing across the whole box — every CPU thread, every CUDA stream, every NCCL collective, every PCIe transfer, all on one timeline. And Nsight Compute is a flame graph for one specific function, except the function is a single GPU kernel and you're seeing what every clock cycle of every SM is doing.
+
+Jenny: Oh, so it really is — APM, distributed tracing, single-service flame graph. That maps cleanly. Okay so when do I use which?
+
+Alex: Top-down. Always top-down. Start with PyTorch Profiler. It tells you which op family is eating your time. Attention, the FFN, layer norm, embedding lookup. If 70% of your time is in attention, you now know where to dig. You haven't fixed anything, but you've localized the problem from "the model is slow" to "the attention path is slow."
+
+Jenny: Okay but — quick question. Why not start with Nsight Systems? It sees more, right? Why bother with the framework-level view first?
+
+Alex: Because Nsight Systems gives you a wall of kernel launches with cryptic names. You'll see "ampere_sgemm_128x128" three thousand times and have no idea which of those was the attention projection versus the FFN up-projection. PyTorch Profiler keeps you anchored in the abstractions you actually wrote — it knows that this group of kernels was a `nn.Linear` inside the attention block. You need that map before the timeline is useful.
+
+Jenny: Got it. So PyTorch Profiler tells you the *what*. Then I drop to Nsight Systems for the *when*?
+
+Alex: For the *when* and the *why-is-there-a-gap*. This is where Nsight Systems shines. You pull up the timeline and you see — oh, between kernel launches there's a 50-microsecond gap where the GPU is just idle while the CPU is preparing the next launch. That's host-side overhead. That's the smoking gun for CUDA Graphs.
+
+Jenny: Right — pre-record the launch DAG, replay it in one shot, skip the per-kernel CPU round trip.
+
+Alex: Exactly. Or you see your tensor parallel all-reduce blocking compute instead of overlapping with it — that tells you your TP overlap strategy is broken. Or you see one CUDA stream pegged while three others are idle — that's load imbalance. None of that is visible from PyTorch Profiler.
+
+Jenny: So Nsight Systems is for the "the GPUs are running but something feels off" class of problem.
+
+Alex: That's the perfect framing. It's the gap-hunter. You're looking for the spaces between the kernels, not the kernels themselves.
+
+Jenny: And Nsight Compute is when you've pinned it down to one specific kernel?
+
+Alex: Right. By the time you're in Nsight Compute, you've already done the diagnostic work. You know that 40% of your time is in this one fused attention kernel and you need to know — is it compute-bound? Is it memory-bound? Is it stalled on instruction issue? Is it waiting on a barrier?
+
+Jenny: This is where roofline analysis comes in, right? Arithmetic intensity, peak bandwidth, distance from the speed of light?
+
+Alex: That's literally what ncu reports. It tells you: this kernel achieved 800 gigabytes per second of HBM bandwidth, the theoretical peak is 3 terabytes per second, you're at 27% of SOL. Now you know — there's headroom, the kernel is not memory-bound at peak, something else is limiting you. Maybe occupancy is too low because of register pressure. Maybe you're hitting bank conflicts in shared memory. Ncu will tell you which.
+
+Jenny: Hang on though — why is this tool so heavy? Why can't I just run it across my whole workload?
+
+Alex: Because it instruments every single SM cycle. Running one kernel under ncu can be ten, twenty, fifty times slower than baseline. It replays the kernel multiple times to gather different counter sets. You absolutely cannot run it on a live workload. It's the surgical tool — you isolate the patient first, then you cut.
+
+Jenny: Whereas Nsight Systems is much lighter touch, just sampling the timeline?
+
+Alex: Right, you can run nsys against a real workload for a few seconds and get useful data. Ncu, you're profiling one kernel in isolation.
+
+Jenny: Okay so the escalation path is — DCGM is always on, it pages you. PyTorch Profiler tells you which op family. Nsight Systems tells you whether it's a kernel problem or a gap problem. Nsight Compute tells you why a specific kernel is slow.
+
+Alex: That's the playbook. And the discipline matters. People want to skip to ncu because it has the most detailed numbers. But if you ncu the wrong kernel, you've spent four hours optimizing something that wasn't the bottleneck. Top-down or you waste your week.
+
+Jenny: This actually maps so cleanly to how we debug latency on distributed services. You don't open up a single-host CPU profiler before you've checked which service is slow.
+
+Alex: Same instinct, same discipline. The infrastructure people get this faster than the ML people, honestly, because you've already been burned by the equivalent mistake at the service level.
+
+Jenny: So where does this lead us next? We've got the tools, we know how to look at the system. What do we do with what we see?
+
+Alex: That's the perfect handoff. Because once you've profiled, you're going to find that the same handful of patterns show up over and over — kernel launch overhead, memory-bound decode kernels, collective ops not overlapping, register spills hurting occupancy. And the next layer up is the optimization toolkit: kernel fusion to collapse memory-bound chains, CUDA Graphs to kill launch overhead, picking the right kernel library for your shape — cuBLAS versus CUTLASS versus FlashInfer.
+
+Jenny: So profiling tells us where the pain is, and the next chapter is the toolkit for actually fixing it.
+
+Alex: Exactly. And here's the teaser — most of those fixes are not "write a better kernel from scratch." They're "pick the right pre-built thing and wire it up correctly." The ecosystem has done most of the hard work. You just need to know what tool to reach for, which is what comes next.
+
+Jenny: Love it. See you in the next one.
+
+Alex: See you then.

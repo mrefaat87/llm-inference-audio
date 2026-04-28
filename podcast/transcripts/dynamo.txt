@@ -1,0 +1,93 @@
+Alex: So if I told you there's basically a Kubernetes for inference engines now, what would you guess it does?
+
+Jenny: I mean, immediately I'd guess scheduling, autoscaling, service discovery, health checks — the usual orchestration plane stuff. But applied to what exactly? Pods running vLLM?
+
+Alex: Almost exactly that. NVIDIA Dynamo. Announced at GTC 2025, hit 1.0 the same year. It sits one layer above engines like vLLM, TensorRT-LLM, and SGLang. It does not own kernels, it doesn't implement attention, it doesn't replace any of those. It's the orchestration plane.
+
+Jenny: Okay, so vLLM is the container runtime in this analogy, and Dynamo is the scheduler plus the service mesh plus the autoscaler.
+
+Alex: That's the right shape. And the reason it has to exist at all is that one engine instance is fundamentally not enough for the workloads that matter now. Frontier MoEs, reasoning models with these huge thinking traces, agent fleets running thousands of concurrent sessions. You're forced into multi-node, and the moment you're multi-node, you need someone to make global decisions.
+
+Jenny: Hang on though — we already have Kubernetes. We have KServe, we have Ray Serve. Why do we need a special one?
+
+Alex: That's exactly the right pushback. The differentiator is KV-cache awareness end to end. A generic orchestrator looks at CPU, memory, maybe GPU utilization. It has no idea that worker number seven already has the first 8000 tokens of your system prompt sitting in its HBM as a prefix cache.
+
+Jenny: Oh. Oh, that's a problem. Because if the load balancer round-robins me to worker three instead, worker three has to re-prefill the whole prompt from scratch.
+
+Alex: Right. And you just threw away the entire point of prefix caching. So the first big component is what they call the Smart Router. It tracks every cached KV block across the whole worker fleet using a radix tree — they call it the Flash Indexer, runs around 170 million ops per second.
+
+Jenny: 170 million? That's not a control-plane number, that's a data-plane number.
+
+Alex: Exactly why ~55% of Dynamo is written in Rust. The control plane has to be on the hot path of every request, so it cannot be the bottleneck. The router routes you to the worker with the highest prefix overlap, not the least loaded one. NVIDIA reports 2x faster time-to-first-token on Qwen3-Coder 480B from that single change.
+
+Jenny: 2x just from routing differently. That's wild. Okay, what's next?
+
+Alex: Disaggregated prefill and decode. This is the one that's the most interesting architecturally. Prefill and decode have completely opposite resource shapes. Prefill is compute-bound — short-lived, big matmuls, you're saturating tensor cores. Decode is memory-bandwidth-bound — long-lived, you're reading the KV cache token by token.
+
+Jenny: Wait, so you're saying if I run them on the same GPU, one of them is always wasting the resource the other one needs.
+
+Alex: Yes. And worse, they interfere with each other. A long prefill blocks decode tokens from being generated, and now your inter-token latency spikes for everyone on that worker. So Dynamo splits them. Separate worker pools. Different parallelism strategies. NVIDIA's reference burst ratio is something like 2 prefill workers at TP2 for every 1 decode worker at TP4.
+
+Jenny: That's interesting — so it's not symmetric. Which makes sense, prefill is bursty and decode is steady-state. It's almost like reads versus writes hitting different replicas in a database.
+
+Alex: That's a great way to think about it. But here's the thing — once you split them, the prefill worker has to hand the KV cache to the decode worker. That's gigabytes of state moving between GPUs.
+
+Jenny: Right, and now the network is the bottleneck. If you're going over standard Ethernet, you've just made things worse, not better.
+
+Alex: That's exactly why NIXL exists. NVIDIA Inference Xfer Library. It's the transport layer for moving KV blocks. Backends are UCX over RDMA — InfiniBand or NVLink — GPUDirect Storage, S3 for cold tiers. Without RDMA, the prefill-to-decode handoff becomes the slowest hop in your stack and the whole architectural premise just breaks.
+
+Jenny: So NIXL is the bus that makes the disaggregation actually pay off. Like, you can't have one without the other.
+
+Alex: Exactly. And once you have a fast bus for moving KV around, you start thinking — why does the KV cache have to live in HBM at all? That's the next component. KVBM. KV Block Manager.
+
+Jenny: Okay, hit me.
+
+Alex: Tiered memory for KV cache. HBM, then CPU DDR, then local SSD, then remote storage or S3. Hot blocks stay on GPU. Cold blocks spill out. When a session comes back, you pull the blocks back instead of re-prefilling 50,000 tokens of context.
+
+Jenny: Wait, that's exactly the EBS-versus-instance-store-versus-S3 pattern. Just applied to conversation state.
+
+Alex: That's literally the analogy. It's the same memory hierarchy lesson — you pay more for faster, you keep less of the expensive stuff, you tier based on access patterns. The reason this matters is that long-context sessions are murder on HBM. If you tried to keep every active session resident in 80GB of HBM, you'd be limited to like a dozen concurrent users on a frontier model.
+
+Jenny: So tiering is the only way you actually get to thousands of concurrent agent sessions without buying a GPU per user.
+
+Alex: Right. And remember — the only reason this is feasible is NIXL. Because pulling a cold block back from CPU memory or SSD has to happen in milliseconds, not seconds, or your TTFT falls off a cliff.
+
+Jenny: Everything keeps connecting back to that bus. Okay — what's the last big piece?
+
+Alex: The Planner. SLA-driven autoscaler. But — and this is the key — it understands prefill and decode separately. It watches TTFT and inter-token-latency. Then it decides: do I need more prefill workers? More decode workers? Or should I fall back to aggregated mode because the disaggregation overhead isn't worth it right now?
+
+Jenny: That last decision is interesting. It can go back to non-disaggregated.
+
+Alex: Yeah, because at low load the handoff cost dominates. Disaggregation is a high-throughput optimization, not a low-load one.
+
+Jenny: That's actually really subtle. A normal autoscaler just adds and removes capacity. This one is changing topology based on traffic shape.
+
+Alex: That's why it's interesting. Alibaba's APSARA team published a result — 80% fewer SLA breaches at 5% lower TCO running Planner over a static replica set. That's a big number. That's not a tuning win, that's an architectural win.
+
+Jenny: Okay, let me see if I can put it all together. Frontend gets the request. Smart Router checks the radix tree, sends it to whoever has the best prefix overlap. That worker is part of a decode pool. If it's a fresh request, a prefill worker handles the prompt and ships the KV across NIXL. KVBM is managing the tiering underneath all of this. And Planner is up top watching SLOs and resizing the pools.
+
+Alex: That's the whole stack. And the interesting thing is — every piece only works because the others exist. Smart Router only matters if you have prefix caching, which only scales because of KVBM, which only works because NIXL is fast, which only matters because you've disaggregated, which is only worth it because Planner can size the pools correctly.
+
+Jenny: It's a tightly coupled system pretending to be modular.
+
+Alex: That's a good line. And the tradeoff is real. You're running etcd plus NATS or a Kubernetes Grove operator, an RDMA fabric, KVBM storage tiers, and an autoscaler whose decisions you have to trust. If your workload is short, uncached, uniform-shape requests, a single well-tuned vLLM behind a plain load balancer beats this every time.
+
+Jenny: Right — Dynamo only pays off when you have long shared prefixes or long contexts. Agents, RAG, reasoning models. Otherwise you're paying complexity tax for no gain.
+
+Alex: Exactly. So the question to sit with is — when does your workload actually need this?
+
+Jenny: Okay, so where does this go next? What should people be watching?
+
+Alex: Two things. First, the boundary between engine and orchestrator is going to keep blurring. Right now Dynamo says "I don't own kernels." But the more KV-aware the routing gets, the more the engine and orchestrator have to share state. You're going to see tighter coupling — and probably more proprietary equivalents from the big labs that just bake this into their engine directly.
+
+Jenny: And the second thing?
+
+Alex: The cold-start problem. We mentioned ModelExpress in passing — 7x faster cold start on DeepSeek-V3 via GPU-to-GPU weight streaming. That's a hint. As models get bigger and traffic gets spikier, the time it takes to actually bring a worker online becomes the dominant cost. The next frontier of orchestration isn't routing requests to warm workers — it's making cold workers warm fast enough that elasticity is real.
+
+Jenny: That's the AWS Auto Scaling problem all over again. Warm pools, pre-pulled images, the whole thing.
+
+Alex: Same problem, ten thousand times harder, because your "image" is a 670-billion-parameter model. That's where this is heading.
+
+Jenny: Alright. I'm going to go re-read the KVBM section.
+
+Alex: Catch you next time.

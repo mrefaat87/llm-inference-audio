@@ -1,0 +1,113 @@
+Alex: So Jenny, I want to start today with a number that I think is going to reframe how you think about GPU performance. Forty-two milliseconds.
+
+Jenny: Okay, forty-two milliseconds of what?
+
+Alex: That's the absolute floor — the physical minimum — for one decode step on a 70 billion parameter model running on an H100. And it has nothing to do with how clever your kernel is. It's purely how long it takes to read the model weights out of HBM.
+
+Jenny: Wait, hold on. You're telling me the bottleneck isn't compute? It's just... reading bytes?
+
+Alex: Exactly. And that's the whole story of the GPU memory hierarchy. Every optimization people get excited about — FlashAttention, PagedAttention, continuous batching — they're all really memory engineering dressed up as ML.
+
+Jenny: Okay, I need you to ground this for me. When you say "memory hierarchy" on a GPU, walk me through the tiers. Because in my head, GPU memory is just... HBM. The 80 gigs of fast stuff.
+
+Alex: Right, that's where most people stop. But there are actually five tiers, and they look surprisingly like the cache hierarchy on a CPU, just at totally different scales. At the very top, you've got registers — about 256 kilobytes per SM, and an SM is basically one GPU core, like a CPU core. H100 has 132 of them.
+
+Jenny: Per-thread storage, fastest possible, lives right next to the math units.
+
+Alex: Exactly. Then below that, L1 — also called shared memory or SRAM. Another 256 KB per SM, but this one is per-block, meaning all the threads in a thread block can see it. Bandwidth is roughly 20 terabytes per second.
+
+Jenny: Twenty terabytes. Per second. Per SM.
+
+Alex: Per SM. Then you drop down to L2 — that's chip-wide, all the SMs share it. 50 megabytes total, about 7 TB/s. Then HBM — 80 gigs, 3.35 TB/s. And finally host RAM over PCIe at 64 GB/s.
+
+Jenny: So roughly each tier is what, 10x slower and 10x bigger than the one above it?
+
+Alex: That's the rule of thumb, yeah. Same shape as the L1-L2-L3-DRAM hierarchy on your laptop CPU, just way more extreme at the bottom because HBM is so fast and PCIe is so slow relative to it.
+
+Jenny: Okay so this is where I want to push you. On the CPU side, I mostly don't think about cache hierarchy because the hardware handles it for me. The prefetcher figures it out. Why is GPU memory hierarchy something ML engineers obsess over?
+
+Alex: Because on a GPU, you have to manage it explicitly. There's no transparent prefetcher figuring out "oh, this thread is going to need this data next." You, the kernel author, decide what gets staged into SRAM, when it moves, and when it gets evicted. The hierarchy isn't automatic — it's a programming model.
+
+Jenny: Oh. So FlashAttention isn't a math trick. It's a memory placement trick.
+
+Alex: That's exactly right. Let me show you why. Classic attention computes an N-by-N score matrix where N is your sequence length. At 8K context, that's 64 million entries. If you materialize that whole matrix in HBM, you write it out, you read it back to softmax it, you read it again to multiply by V — you've just hammered HBM three times for one attention layer.
+
+Jenny: And HBM bandwidth is the bottleneck, so each pass costs you real wall time.
+
+Alex: Right. FlashAttention says: I'm going to tile the computation so that each tile of the score matrix lives entirely in SRAM. It never touches HBM. The N-by-N matrix is logically there, but physically it only ever exists 256 KB at a time, on-chip.
+
+Jenny: So the trick is sized to fit SRAM specifically.
+
+Alex: Sized to fit SRAM specifically. Which is why FlashAttention literally could not exist if the SM didn't have shared memory of that size. The algorithm is co-designed with the cache tier.
+
+Jenny: That's wild. Okay so SRAM enables FlashAttention. What does L2 enable?
+
+Alex: L2 is where KV cache reuse lives. So when you're decoding token by token for a sequence, every step you have to read that sequence's KV cache to attend over the past. If that KV cache is sitting in L2 — 50 megabytes is enough to hold the recent pages of a few active sequences — you get 7 TB/s instead of 3.35.
+
+Jenny: Wait. So continuous batching, where you're juggling multiple sequences in the same forward pass — those active sequences are essentially fighting for L2 residency?
+
+Alex: Exactly. The hot ones stay warm in L2 between decode steps. The cold ones get evicted back to HBM. And PagedAttention — vLLM's block layout — is partly tuned so that recently-touched blocks line up nicely with L2 cache lines.
+
+Jenny: Oh that's exactly like a working-set problem. Like if you've got too many active EC2 instances on a host and your page cache thrashes.
+
+Alex: That's a perfect analogy. And just like with page cache thrashing, when your batch size grows past what L2 can hold warm, your tokens-per-second per sequence drops because you're hitting HBM more often.
+
+Jenny: Okay so SRAM enables FlashAttention, L2 enables KV reuse. Now HBM — you said 42 milliseconds. Why is that the floor?
+
+Alex: Because every decode step, you have to read the entire model weights at least once. Every layer, every attention head, every MLP — the whole thing flows from HBM through the SMs. A 70B model in FP16 is 140 gigabytes. At 3.35 TB/s, that's 42 milliseconds of pure read time. No kernel cleverness gets you under that.
+
+Jenny: Hang on. Why do you have to read all the weights? Couldn't you cache the hot ones?
+
+Alex: Because every weight is used exactly once per token. There's no temporal locality to exploit — you stream through the whole network linearly. Caching helps when data is reused, but model weights in single-sequence decode are basically a one-shot streaming read.
+
+Jenny: Oh. So the only way to amortize that read is to make it count for more tokens.
+
+Alex: Now you're thinking like an inference engineer. That's literally what batching does. If you read the weights once and apply them to 32 sequences in parallel, you've turned a 42 ms-per-token cost into a 42 ms-per-32-tokens cost. The HBM read is fixed; you're just spreading it over more useful work.
+
+Jenny: So decode throughput is fundamentally a memory bandwidth game, and batch size is the lever.
+
+Alex: That's the whole reason inference looks the way it does. And it's why the H200 is interesting.
+
+Jenny: Right, you mentioned H200. What changed?
+
+Alex: Same compute as H100. Same 989 teraflops of FP16. Same SMs, same Tensor Cores. The only thing that changed is the memory: HBM3e instead of HBM3, bandwidth from 3.35 to about 4.8 TB/s, capacity from 80 to 141 gigs.
+
+Jenny: And that gives you what, like 40% more throughput?
+
+Alex: About 40% faster decode per GPU. Entirely from feeding the same Tensor Cores faster. NVIDIA basically shipped a new SKU that's just "the H100 with more bandwidth," and for decode-bound workloads, that's a generational leap.
+
+Jenny: That is such a clean validation of "decode is memory-bound." Like, if compute was the bottleneck, more bandwidth would do nothing. The fact that it gives you 40% means you were starving the cores all along.
+
+Alex: That's the whole thesis. And it's why the last tier matters too — host RAM over PCIe.
+
+Jenny: 64 GB/s. The cliff.
+
+Alex: The cliff. 50x slower than HBM. So when you offload KV cache to host RAM — what people call G2 in the four-tier hierarchy — you're saying "I'd rather pay a 50x bandwidth penalty on this sequence than evict it entirely." It's a swap tier.
+
+Jenny: That's exactly like swapping to disk in OS land. You only do it for the cold stuff.
+
+Alex: For the cold stuff, or for preemption — you swap a sequence out, run something more urgent, swap it back. Same pattern as VM live migration where you'd rather pause and resume than restart from scratch.
+
+Jenny: Okay so let me try to summarize the whole arc. Each tier enables a specific class of optimization. SRAM gives you FlashAttention because the N-by-N matrix has to live somewhere small and fast. L2 gives you continuous batching because active KV pages stay warm. HBM bandwidth defines your decode floor. PCIe gives you spillover at a steep cost.
+
+Alex: That's it. And the punchline is that everything in modern LLM serving is engineered against this hierarchy. PagedAttention, FlashAttention, prefix caching, KV offload — every one of them is a response to a specific tier's bandwidth and capacity.
+
+Jenny: So where does this lead us next? Because I feel like understanding the hierarchy is the foundation, but it's pointing somewhere.
+
+Alex: It points two directions, and we're going to spend the next couple episodes on both. Direction one: if HBM bandwidth is the cap and weights are the load, what if you make the weights smaller? That's quantization. Going from FP16 to FP8 to FP4 — every halving cuts your HBM read in half and roughly doubles your decode throughput.
+
+Jenny: Oh, so quantization isn't really about saving memory, it's about saving bandwidth.
+
+Alex: That's the real reason. Memory savings are the side effect. The headline is bandwidth.
+
+Jenny: And direction two?
+
+Alex: Direction two is: what if one GPU's HBM isn't enough? Then you go to tensor parallelism, you split weights across GPUs, and now NVLink bandwidth between GPUs becomes the new tier in the hierarchy. Which is why rack-scale NVLink domains like NVL72 are such a big deal — they extend the fast tier across 72 GPUs.
+
+Jenny: So the hierarchy doesn't end at one chip. It keeps going up.
+
+Alex: It keeps going up, and every tier you add — NVLink, InfiniBand, Ethernet — has its own bandwidth, latency, and optimization that lives on it. Today we covered the on-chip story. Next time, we go off-chip, and you're going to see the same pattern repeat at rack scale.
+
+Jenny: Cliffhanger. I'm in.
+
+Alex: See you next episode.

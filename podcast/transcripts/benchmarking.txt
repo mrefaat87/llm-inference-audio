@@ -1,121 +1,105 @@
-Alex: So Jenny, I want to talk about something that I think is going to feel very familiar to you, but with a twist that trips up almost everyone coming from traditional infrastructure.
+Alex: So Jenny, I want to start with a number that should make you uncomfortable. Imagine I tell you my inference engine has a P99 latency of 200 milliseconds. Sounds great, right?
 
-Jenny: Okay, I'm intrigued. What are we getting into?
+Jenny: Yeah, that's a fine number. I'd ship that.
 
-Alex: Benchmarking. Load testing your inference endpoint. And I know what you're thinking — "I've been load testing services for years, I know how this works." And that's exactly the problem.
+Alex: Now what if I told you I measured it with fifty concurrent clients in a closed loop, and the same engine, under the same actual request rate from real users, has a P99 of two seconds?
 
-Jenny: Oh no. What am I doing wrong?
+Jenny: Wait, ten times worse? Same hardware, same engine, same QPS?
 
-Alex: Okay, let me set this up. When you load test, say, an API Gateway backed by some Lambda functions, what do you typically do?
+Alex: Same everything. The only thing that changed is how I generated the load. And this is the thing nobody warns you about when you start benchmarking LLMs — the methodology is the result. The number you report is more about how you measured than what you measured.
 
-Jenny: Pretty standard. I spin up a bunch of concurrent clients, each one sends a request, waits for the response, then sends the next one. Measure latency, find the breaking point.
+Jenny: Okay, you have to unpack that. Closed loop versus what?
 
-Alex: Right. And that approach has a name in the benchmarking world — it's called closed-loop testing. You have N clients, always exactly N requests in flight. And here's the thing that's subtle but devastating: when the system slows down, your request rate automatically drops.
+Alex: Open loop. Closed loop is: I have N worker threads, each one sends a request, waits for the full response, sends the next. So there are always exactly N requests in flight. Ever.
 
-Jenny: Well, yeah. If my client is waiting for a response and the response takes longer, it can't send the next one yet. That's just... how it works.
+Jenny: Right, that's how every load test I've ever written for an internal service works. JMeter, locust with users — same pattern.
 
-Alex: Exactly. And for a lot of traditional services, that's fine because your clients actually do wait. But think about inference in production. When a user sends a chat message to an LLM endpoint, are they waiting for someone else's request to finish before their request goes in?
+Alex: Exactly. And here's the problem. When the system slows down, what happens to your offered load?
 
-Jenny: No, of course not. Users show up whenever they show up. It's like... oh. It's like real traffic hitting an auto scaling group. Users don't coordinate. They don't say "oh, the server's busy, I'll come back later."
+Jenny: It... drops. Because each thread is stuck waiting longer before it sends the next one. Oh. Oh, that's bad.
 
-Alex: Exactly right. Real traffic is what we call open-loop — requests arrive at a fixed rate following a Poisson process, completely independent of how fast the system is processing them. And here's the number that should scare you: I've seen systems that benchmark at 200 milliseconds P99 under closed-loop testing with 50 concurrent clients, and then you hit them with the equivalent open-loop request rate and the P99 is 2000 milliseconds. Ten times worse.
+Alex: That's catastrophically bad for capacity planning. Real users don't behave that way. If your service goes from 50 milliseconds to 5 seconds, your users don't politely stop sending requests. They keep clicking. New users keep arriving. The Poisson process of arrivals doesn't care that your GPU is on fire.
 
-Jenny: Ten times? Where does that extra latency come from?
+Jenny: So closed-loop is basically a thermostat. The hotter it gets, the less load you apply. Which means you literally cannot measure overload behavior.
 
-Alex: Queueing. When you test closed-loop and the system gets slow, you're automatically easing off the gas. Fewer requests arrive, so the queue stays short. Open-loop? You keep slamming requests in at the same rate. The queue builds. And queue wait time is real latency that your users feel.
+Alex: You cannot measure it. By construction. And there's a worse version of this called coordinated omission. Picture this: closed loop, one request takes five seconds instead of fifty milliseconds. During those five seconds, your benchmark records exactly one measurement — the slow one.
 
-Jenny: So closed-loop testing is basically lying to you about your capacity.
+Jenny: But in production, during those same five seconds, a hundred more requests would have arrived, and every single one of them would also see multi-second latency.
 
-Alex: That's a strong way to put it, but yeah. It's hiding the overload behavior. It's like — imagine you're testing an auto scaling group, but your load generator automatically backs off whenever the target group gets stressed. You'd never see the scaling event. You'd never see the queue depth spike. You'd walk away thinking "great, my system handles this load fine," and then real traffic hits and everything falls over.
+Alex: And none of those hundred measurements exist in your dataset. Your P99 is computed over a sample that systematically excludes the worst cases. Gil Tene has been screaming about this for fifteen years and people still don't get it.
 
-Jenny: Okay, so open-loop, always. But there's something else lurking here, isn't there? I've heard you mention coordinated omission before and I never fully got what that was.
+Jenny: So the fix is open loop. Fixed arrival rate, Poisson-distributed, send requests on schedule no matter what.
 
-Alex: Oh, this is the really insidious one. So let's say you're running a closed-loop benchmark and one request gets stuck — takes 5 seconds instead of the usual 50 milliseconds.
+Alex: Right. vLLM's benchmark_serving in Poisson mode does this correctly. MLPerf's server scenario does this correctly. If your tool doesn't, throw it out.
 
-Jenny: That happens. Some requests just get unlucky.
+Jenny: Okay so I've got the load generation right. Now what am I actually measuring? Because TTFT, TPOT, ITL, TBT, E2E — there's like seven acronyms and I lose track.
 
-Alex: Right. Now, during those 5 seconds, your client is blocked. It's not sending new requests. So you record one measurement: 5 seconds. One data point. But in reality, how many users would have shown up during those 5 seconds?
+Alex: Yeah, let's anchor it. Three numbers tell the story. TTFT — time to first token — is your prefill latency. That's the "did the page load" feeling. TPOT — time per output token — is your steady-state decode speed. That's "is it still typing." And E2E is the whole request.
 
-Jenny: At, say, 20 requests per second... that's about 100 users.
+Jenny: And percentiles for all of them.
 
-Alex: And every single one of those 100 users would have experienced multi-second latency because they'd be stuck behind that same backlog. But your benchmark only recorded one bad measurement instead of a hundred. Your P99 looks fine. Your real P99 is catastrophic.
+Alex: Always percentiles. Never the mean. LLM latency distributions are violently right-skewed — most requests cluster around the median, then there's this long tail of slow ones. The mean is dragged up by the tail and tells you nothing about typical experience. The median tells you nothing about the tail.
 
-Jenny: That's... that's terrifying actually. You're systematically undercounting exactly the moments when things are worst. It's like if your CloudWatch metrics stopped reporting during an outage.
+Jenny: So you need both. P50 for the typical user, P95 and P99 for the SLO.
 
-Alex: That's a perfect analogy. The observations disappear precisely when they'd be most alarming. The fix is simple in principle — use open-loop benchmarking. vLLM's benchmark_serving.py has a Poisson mode that avoids this by design. Requests arrive on a schedule regardless of what the system is doing. You can also apply a statistical correction called HdrHistogram, developed by Gil Tene, but honestly, just go open-loop.
+Alex: And here's the rule that catches people: if your P95 is five times your P50, you have a queueing problem or a batching problem. That ratio is diagnostic. Healthy systems have tight distributions. If it's five-x, you're either thrashing the scheduler or your batches are getting stuck behind a long-decode prisoner.
 
-Jenny: Okay. So we know how to test. What exactly are we measuring? Because inference isn't just "request in, response out" like a normal API call.
+Jenny: That's a great heuristic. Like watching a CloudWatch dashboard where the P50 and P99 are walking together versus diverging — divergence means something's queued up.
 
-Alex: No, and this is where it gets interesting. There are really two distinct phases in generating a response. The prefill phase — that's where the model processes your entire input prompt — and the decode phase, where it generates tokens one at a time. And each phase has its own latency characteristic.
+Alex: Exactly. Now there's one more metric that matters more than any of these, and it's the one nobody reports. Goodput.
 
-Jenny: So what's the headline metric for each?
+Jenny: Goodput as in — throughput minus the ones that violated SLO?
 
-Alex: For prefill, it's TTFT — Time to First Token. That's your responsiveness metric. How long does the user stare at a blank screen before they see anything? Think of it like Time to First Byte in web performance.
+Alex: Yes. Requests-meeting-SLO over total requests, times the throughput. Because Goodhart's Law is real — the moment you make raw tokens-per-second your target, your engineers will optimize tokens-per-second. They'll crank batch size, latency goes to hell, P99 doubles, but the dashboard goes up and to the right.
 
-Jenny: Okay, and for decode?
+Jenny: And you ship a regression because the metric was a target. Same thing happens when teams optimize for CPU utilization without watching latency — you can pin a fleet at 95% CPU and call it efficient, and customers are timing out.
 
-Alex: TBT — Time Between Tokens, sometimes called Inter-Token Latency. That's how smooth the streaming experience feels. If TBT spikes, the text stutters. And then there's the total picture — end-to-end latency, and output throughput measured in tokens per second across all concurrent requests.
+Alex: Goodput bakes the SLO into the metric. You can't game it without actually being faster for users. That's the antidote.
 
-Jenny: And I assume we're reporting percentiles, not averages?
+Jenny: Okay, methodology, metrics. How do I run the test? Just pick a rate and go?
 
-Alex: Thank you for saying that. Yes. Always P50, P95, P99. A system that averages 50 milliseconds but has a 5-second P99 is dramatically worse than one averaging 80 milliseconds with a 120-millisecond P99. The average hides the pain.
+Alex: No. Graduated ramp. Start low — five requests per second — hold for two minutes, step up by five, hold, step up, hold. Plot latency against throughput at every step.
 
-Jenny: Preaching to the choir. We learned that the hard way in auto scaling — average CPU utilization is meaningless when you've got hot spots.
+Jenny: Oh, this is exactly a step-scaling stress test. You're finding the knee of the curve.
 
-Alex: But here's the metric I really want you to remember: goodput. Not throughput — goodput. That's the number of requests that actually meet your SLO divided by total requests. Because you could have amazing throughput numbers while half your users are getting responses too slow to be useful.
+Alex: That's the whole point. You'll see three regions. Linear region — latency flat, lots of headroom. The knee — latency starts climbing, this is your real capacity. And the overload region — latency explodes, throughput sometimes actually decreases because the scheduler is thrashing.
 
-Jenny: Oh, I like that. It's like... it's the difference between "how many requests per second can we process" and "how many requests per second can we process well." That's the metric an engineering manager would actually care about.
+Jenny: Right, you'd never set target tracking on auto scaling without first knowing what offered load corresponds to your target utilization. The ramp gives you the load-to-utilization curve. Without it you're just guessing.
 
-Alex: Exactly. It's the one that maps to customer experience.
+Alex: And every benchmark report should publish that curve, not a single number.
 
-Jenny: Alright, so I've got open-loop testing, I've got the right metrics. How do I actually design the load test? Do I just pick a request rate and let it rip?
+Jenny: Okay, what trips people up?
 
-Alex: No! And this is another classic mistake. Don't benchmark at a single flat rate. Use a graduated ramp. Start at, say, 5 requests per second. Increase by 5 every two minutes. Plot latency against throughput at each step.
+Alex: Cold cache is the classic. First fifty requests are always slow — CUDA kernel compilation, KV blocks getting allocated, the autotuner picking GEMM shapes. Discard those. Synthetic prompts are the next one — "write a 500-word essay" produces really uniform output lengths, which is nothing like real traffic.
 
-Jenny: Oh, that's literally a step-scaling stress test. We do this all the time to characterize auto scaling groups.
+Jenny: Real traffic is heavy-tailed on output length too?
 
-Alex: It's the exact same idea. And what you'll see is three distinct regions. First, a linear region where latency is flat and stable — the system has headroom. Then you hit the knee — latency starts climbing, that's saturation beginning. That's your real practical capacity. And then the overload region where latency explodes and throughput might actually decrease.
+Alex: Wildly. You'll have a thousand requests that generate 50 tokens and then one that generates 8000. And that one request sits in the batch for the entire duration, blocking slots, and it absolutely dominates the tail. If your benchmark has fixed max_tokens, you've erased that entire failure mode.
 
-Jenny: Throughput can decrease? How?
+Jenny: So real prompts, real length distribution. Which is why people use ShareGPT.
 
-Alex: When the system is totally overwhelmed, it spends so much time managing the queue and swapping memory that it's doing less actual useful work. Same thing happens when an EC2 instance starts thrashing swap — the CPU is busy, but it's not making progress.
+Alex: ShareGPT is the floor. The ceiling is shadow traffic. Mirror real production requests at your candidate config, throw away the response, compare the metrics. That's the only benchmark that actually transfers to production.
 
-Jenny: So the knee in that curve — that's the number I take to capacity planning. Not the peak throughput, but the point right before things start degrading.
+Jenny: Because it preserves everything — the input length distribution, the output length distribution, the parameter mix, the tenant mix, the temporal bursts.
 
-Alex: Right. You wouldn't set target tracking to 80% CPU without knowing what load corresponds to 80%. The graduated ramp gives you that load-to-utilization curve.
+Alex: All five dimensions. The mean ISL doesn't matter — the histogram matters. A workload that's 50% short prompts and 50% giant ones behaves nothing like a uniform workload at the same average length. The scheduler sees a totally different shape.
 
-Jenny: Okay, before we wrap the methodology piece — what are the gotchas? The things that make your benchmark results garbage without you realizing it?
+Jenny: This is why I always pushed back when people would say "we tested with average request size." Average is a lie when the distribution is bimodal.
 
-Alex: Oh, I've got a list. Number one: cold cache. The first batch of requests is always slower — CUDA kernels need to compile, KV cache blocks need to be allocated for the first time. Send at least 50 warmup requests and throw those measurements away.
+Alex: And one more thing — please don't conflate benchmarks with evals. Benchmarks tell you how fast and cheap. Evals tell you how good the outputs are. Quantization can make your benchmark look amazing and silently tank your accuracy on math problems. You always pair a serving change with at least a smoke eval.
 
-Jenny: Like warming up a JVM. You don't benchmark during class loading.
+Jenny: Otherwise you ship a faster engine that's also dumber and you don't find out until customer complaints.
 
-Alex: Exactly. Number two: synthetic prompts. If every request is "write a 500-word essay," every response is roughly the same length. But real traffic has a heavy-tailed distribution — some responses are 10 tokens, some are 2000. Use real conversation datasets like ShareGPT, or replay production logs.
+Alex: Exactly. Speed without quality held constant is not a win.
 
-Jenny: Because uniform request sizes hide all the scheduling edge cases.
+Jenny: Okay so where does this lead us? We've got methodology, we've got metrics, we've got the ramp.
 
-Alex: Yes. Number three, and this is one people forget — GPU thermal throttling. GPUs get hot under sustained load and they will clock down. A 30-minute benchmark might show steadily decreasing throughput, and it's not your software, it's physics. Monitor the temperature.
+Alex: Next we connect this to money. Because the whole point of benchmarking is figuring out what a token costs you, and what an SLO-compliant token costs you, and whether the engine choice you just made actually penciled out at your traffic mix.
 
-Jenny: Ha, we don't usually worry about CPU thermal throttling in the cloud because AWS manages that. But when you're running your own GPU workloads...
+Jenny: Cost economics. Cost per token is the new cost per request.
 
-Alex: You're closer to the metal than you're used to. And number four: network contamination. If you're benchmarking a remote API, your TTFT includes network round-trip time. That's fine if you want user-perceived latency, but if you're evaluating the engine itself, benchmark locally.
+Alex: And once you have goodput at a target SLO, you can finally divide dollars per GPU-hour by SLO-compliant tokens per second and get a number that means something. That's where we're going next — turning these latency curves into a unit economics model. Because eventually somebody from finance is going to ask why the inference bill doubled, and "we improved tokens per second by 40%" is not the answer they want.
 
-Jenny: So two benchmarks: one local for engine performance, one remote for the experience your users actually get.
+Jenny: They want dollars per million tokens. At P99. On real traffic.
 
-Alex: Exactly. And quick note on tools — vLLM's benchmark_serving.py is the community standard. Open-loop Poisson mode, ShareGPT dataset support, reports all the metrics we talked about. NVIDIA has GenAI-Perf which auto-generates those latency-throughput curves. And MLPerf Inference added LLM scenarios in v4.0 with built-in SLO compliance — it's basically addressing coordinated omission by design.
-
-Jenny: So where does this all lead? We've got this rigorous benchmarking methodology — what do we actually do with the results?
-
-Alex: This is the foundation for everything that comes next. Once you have a real load-to-latency curve, you can make informed decisions about cost economics — cost per token at different utilization levels. You can compare engines like vLLM versus TensorRT-LLM on your actual workload, not synthetic numbers from a blog post. And you can set scaling policies that are grounded in measured behavior, not guesswork.
-
-Jenny: So it's like — you can't do capacity planning without a load test, and you definitely can't do inference capacity planning without one that accounts for all these inference-specific gotchas.
-
-Alex: That's the takeaway. The tools exist, the methodology is well-understood. The mistake is reaching for the tools before understanding what they're actually measuring and what they're hiding from you. Get the methodology right, and everything downstream — engine selection, cost optimization, scaling policy design — gets dramatically better.
-
-Jenny: I love it. Measure right, then optimize. Same as always, just with some new traps to avoid.
-
-Alex: Some very expensive new traps.
-
-Jenny: Fair point. Alright, next time we're diving into the economics side — what inference actually costs, why cost-per-token is the new cost-per-request, and how all this benchmarking data feeds into real financial decisions. You're going to want those graduated ramp results handy.
-
-Alex: Bring a spreadsheet.
+Alex: That's the only number that matters in the end. We'll get there next episode.

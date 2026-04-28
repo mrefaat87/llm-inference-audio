@@ -1,0 +1,117 @@
+Alex: So we've been talking about MLA — DeepSeek compressing the KV cache by projecting keys and values into a low-rank latent space. And I want to zoom out, because MLA is just one branch of a much bigger family tree.
+
+Jenny: Wait, family tree? I've been treating "attention" as one thing. Like, the thing from the original transformer paper.
+
+Alex: Yeah, that's the trap. In 2026, "attention" isn't an algorithm anymore — it's a category. There are at least six branches of the family, and frontier models mix and match them per layer.
+
+Jenny: Okay, six branches feels like a lot. Why did this fragment? Like, what was wrong with vanilla multi-head attention that everyone went off and built variants?
+
+Alex: One word. Quadratic.
+
+Jenny: O of N squared.
+
+Alex: Right. Every token attends to every other token. So if your context grows from 4K to 32K, your attention compute goes up 64x, not 8x. And the KV cache grows linearly with context times layers times heads. At long context, the KV cache eats more memory than the model weights themselves.
+
+Jenny: Okay so this is basically the same problem we have in distributed caching. You can't keep everything hot forever — you need an eviction policy, or compression, or sharding.
+
+Alex: That is exactly the right frame. Each branch of the attention family is a different cache policy for a different workload shape. Think of it like — you wouldn't use LRU for every workload at AWS, right? Sometimes you want ARC, sometimes you want a sliding window, sometimes you want a bloom filter on top.
+
+Jenny: Sure. So map them for me. What are the branches?
+
+Alex: Start with the most boring one — dense classical. MHA, MQA, GQA. These all just play with how many K/V heads you have. MHA gives every query head its own K/V. MQA collapses to one shared K/V head across all queries. GQA — grouped query — is the compromise. Llama 70B uses GQA.
+
+Jenny: And the reason to collapse heads is just KV cache size?
+
+Alex: Almost entirely. Fewer K/V heads, smaller cache, faster decode. The quality hit from MQA was real, which is why GQA — small group of K/V heads shared across query heads — became the default.
+
+Jenny: Got it. So that's one axis: how many copies of K/V do I keep. What's next?
+
+Alex: Latent compression. That's MLA, the DeepSeek thing. Instead of fewer heads, you keep all the heads but project K and V down into a low-rank latent vector, store only the latent, decompress at attention time. Like compressing session state before you write it to your distributed cache.
+
+Jenny: And we covered that. So skip ahead — what's the branch I haven't heard about?
+
+Alex: Sparse and windowed. This is the most-deployed sparse variant in production right now. Sliding-window attention. SWA. Mistral 7B uses it, Gemma 2 uses it, Cohere Command-R-plus uses it.
+
+Jenny: Sliding window — okay, that one's literally a cache eviction policy I already know.
+
+Alex: Yes. Each token only attends to the most recent W tokens. Mistral picked W equals 4096. So your KV cache is bounded — it's W times layers times heads times d-head, regardless of how long the conversation is.
+
+Jenny: Hold on. Bounded? So if I have a 200K context, the cache size doesn't grow past 4K worth of tokens?
+
+Alex: Per layer, yes. The cache stops growing.
+
+Jenny: That seems too good. What's the catch?
+
+Alex: The catch is the model literally cannot directly attend to anything beyond W tokens. If you ask a question about something 50K tokens ago, the only way that information reaches the current token is by propagating through layers — token at position 50K influenced position 46K, which influenced 42K, and so on up the stack.
+
+Jenny: Telephone game.
+
+Alex: Exactly telephone game. And recall on very long-range dependencies degrades. Which is why nobody ships pure SWA anymore. Gemma 2 alternates — one SWA layer, one full-attention layer, one SWA, one full. So you get bounded cost on average and the full layers give you the long-range signal.
+
+Jenny: Oh, that's clever. That's like — you have a hot cache and a cold cache, and you check the hot cache most requests, but every Nth request you do a full lookup.
+
+Alex: Almost. It's not request-level alternation, it's layer-level. Every other layer in the stack is full attention. But the intuition's right — you're amortizing the expensive operation.
+
+Jenny: Okay. What else? You said six branches.
+
+Alex: Gated attention. This is RWKV, RetNet, some of the newer hybrid blocks. You add a learned sigmoid gate that modulates how much of the past is remembered before it's added back to the residual stream.
+
+Jenny: A sigmoid gate. So like — a soft mask that says "this attention output, scale it by point-three before you mix it back in."
+
+Alex: Yes. And the reason it matters architecturally is that gating is the same mechanism LSTMs use. So gated attention is attention drifting toward recurrence. It's saying "the past is summarized in this gated state, not in a full keys-and-values lookup table."
+
+Jenny: Wait, why would you want that? Recurrence was the thing transformers replaced.
+
+Alex: Because recurrence has a constant-size state. No KV cache. The state is just — the state. Bounded forever, regardless of context length.
+
+Jenny: Oh. So gated attention is sneaking recurrence back in to get rid of the cache problem entirely.
+
+Alex: Exactly. And the most extreme version of that is the next branch — linear attention. Performer, FAVOR-plus, that family. The math trick is — softmax of Q K-transpose is approximately phi-of-Q times phi-of-K-transpose, for some kernel feature map phi. Once you have that approximation, you can change the order of operations.
+
+Jenny: Order of operations how?
+
+Alex: Normally you compute Q times K-transpose first — that's the N-by-N score matrix, that's where O of N squared comes from. With the kernel rewrite, you compute phi-of-K-transpose times V first. That's a small d-by-d matrix, regardless of how big N is. Then multiply by phi-of-Q.
+
+Jenny: Wait, so the cost becomes — what, N times d squared instead of N squared times d?
+
+Alex: Right. Linear in N.
+
+Jenny: Then why isn't every model doing this? That sounds like a free win.
+
+Alex: Two reasons. One — the approximation quality isn't as good as real softmax. At typical scales, like d equals 4K to 8K and N equals 4K to 32K, the constant factors favor real attention, especially with FlashAttention's kernel.
+
+Jenny: So the asymptotic win doesn't matter at the sizes people actually run.
+
+Alex: Right. Linear attention shines at extreme context — millions of tokens. For normal serving, FlashAttention 3 on real softmax wins.
+
+Jenny: And the second reason?
+
+Alex: It's the conceptual ancestor of state-space models — Mamba, that whole family. Once you've made attention linear, you're three steps away from giving up on attention entirely and just doing a learned linear recurrence. Which is the next section's topic.
+
+Jenny: Okay so let me check my map. Dense classical plays with head count. Latent compression squashes K/V into a smaller subspace. Sliding-window bounds the cache by recency. Gated and linear are both moving toward recurrence — gated softly, linear fully. And state-space goes all the way.
+
+Alex: Perfect summary. And the production answer is — you don't pick one. Gemma 2 alternates SWA and full. Jamba mixes Mamba blocks with attention blocks. Llama 4 reasoning models mix MoE feedforwards with hybrid attention. Cohere uses SWA plus global attention sinks — a few "always visible" anchor tokens that every position can see.
+
+Jenny: That's the bin-packing instinct. Different layers have different cost-quality profiles, so you stack them in the ratio that hits your target.
+
+Alex: Yeah. And here's the operational consequence that I think actually matters most for you — every variant needs its own attention kernel in your serving engine. FlashAttention 3 covers MHA, GQA, MLA, SWA. Gated and linear need specialized kernels. So when a new model launches with a novel attention variant, vLLM and TensorRT-LLM ship engine-side support patches on day zero. The model release and the kernel release are coupled.
+
+Jenny: That's a real distributed-systems story. The protocol and the runtime have to ship together or nothing serves.
+
+Alex: Exactly. So that's where this is going. We've been climbing a ladder — fewer K/V heads, then compressed K/V, then bounded windows, then gated, then linear. Each step reduces dependence on the explicit attention computation.
+
+Jenny: And the next rung is — no attention at all?
+
+Alex: That's the next section. State-space models. Mamba. The pitch is — replace attention entirely with a learned linear recurrence with a selective state mechanism. Constant-size state, linear time, no KV cache.
+
+Jenny: So the cache problem just — goes away.
+
+Alex: Goes away. The question is whether quality holds up, and whether you can still do in-context learning the way transformers can. That's the debate Jamba and Nemotron Nano are trying to answer by hybridizing — a few attention layers for the parts you really need attention for, Mamba blocks for everything else.
+
+Jenny: Hybrid is winning everywhere in this space, huh.
+
+Alex: It's the production answer to almost every architectural tradeoff right now. Pick the cheap thing for most layers, pay for the expensive thing where it actually matters. That's the meta-lesson of this whole chapter.
+
+Jenny: Alright, state-space models next. I want to see how the cache disappears.
+
+Alex: That's the whole story.

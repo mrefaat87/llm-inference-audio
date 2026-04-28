@@ -1,0 +1,83 @@
+Alex: So Jenny, I want to start somewhere weird today. Imagine you're running a fleet of EC2 instances, and every single request that comes in shares the first 2,000 bytes of its payload with a thousand other requests. Same header, same boilerplate, same everything — and your system is recomputing it from scratch every time.
+
+Jenny: That would be insane. I'd be screaming at someone to put a cache in front of it. Why are we recomputing the same prefix a thousand times?
+
+Alex: Right. And that's basically the situation most LLM inference engines were in until SGLang showed up. Today's episode is about SGLang — it came out of LMSYS and UC Berkeley, and it's the engine that bet hard on one observation. Modern LLM workloads — agents, RAG, multi-turn chat, function calling — share enormous prefixes. System prompts, few-shot exemplars, tool schemas, conversation history. And if your KV cache can't see that, you're just lighting GPU cycles on fire.
+
+Jenny: Okay, but vLLM has prefix caching. So what's actually different here?
+
+Alex: The difference is the data structure. Standard prefix caches use a flat hash — model plus prompt — and look up an exact match. SGLang stores every active KV entry in a radix tree keyed by token sequence. That's what RadixAttention is.
+
+Jenny: Wait, like a trie? An actual prefix tree of tokens?
+
+Alex: Exactly an actual prefix tree of tokens. So if you have a system prompt, then ten different users with ten different questions, the system prompt is one path in the tree, and each question is a branch off the end of that path. The KV cache for the shared prefix exists exactly once in GPU memory. Every branch references it.
+
+Jenny: Oh — so this is like content-addressed storage, but the addressing is structural. The tree itself is the index.
+
+Alex: That's the right mental model. And here's where it really pays off. Imagine an agent doing tree-of-thought, where you fan out from one prompt into eight parallel completions to see which reasoning path works best. With a flat hash, you'd either miss seven of those siblings, or you'd duplicate the prefix eight times in memory.
+
+Jenny: Because the hash key changes the moment the completions diverge.
+
+Alex: Right. With a radix tree, the divergence point is just a tree split. The eight siblings literally share their ancestor's KV state. You get parallel sampling for almost free.
+
+Jenny: Hmm, okay, but I have to push on something. Trees have bookkeeping overhead. Inserts, lookups, eviction. At GPU latencies you're talking nanoseconds matter. How does this not become the bottleneck?
+
+Alex: Great question. Operations are O(prefix length) — same complexity class as a hash, basically — and eviction is LRU with reference counting. The reference counting is the subtle part. An in-flight request holds a ref on every node along its path, so the cache literally cannot evict KV state that a live decode step is about to read.
+
+Jenny: That's nice. So you don't get the "cache thrash kills the request you're currently serving" failure mode.
+
+Alex: Exactly. And the numbers from the SGLang paper — they benchmarked on nine workloads, MMLU, HellaSwag, ReAct agents, tree-of-thought, JSON generation, multi-turn chat, DSPy RAG, LLaVA — up to 5x throughput versus vLLM, up to 6.4x versus prior state of the art across the suite.
+
+Jenny: That's not "10% better." That's a different category of system.
+
+Alex: Right. But — and this is important — only on prefix-heavy workloads. If you're running plain high-QPS chat, single prompt, no sharing, vLLM and TensorRT-LLM are at parity or better. The tree pays bookkeeping that it can't amortize without prefix sharing.
+
+Jenny: Okay, that tracks. Use the right tool. So this is the RadixAttention story. You said there were two big bets — what's the second?
+
+Alex: Structured output. Compressed FSM and jump-forward decoding. So — when you constrain a model to produce JSON matching a schema, or text matching a regex, the standard approach is logit masking. At every token step, you compute the full distribution over the vocabulary, then zero out the tokens the grammar doesn't allow.
+
+Jenny: Right, that's how Outlines works, that's how Guidance works.
+
+Alex: Yeah. But here's the insight. In a JSON schema, big chunks of the output are deterministic. The literal string `"name":` — every character of that is forced. There's no ambiguity, no choice for the model to make.
+
+Jenny: So you're still running a full forward pass through the model just to produce a token whose value was already decided by the grammar?
+
+Alex: Exactly. That's pure waste. So SGLang's compressed FSM detects those deterministic spans, collapses the chain of singular FSM transitions, and emits the whole forced string in one step — without invoking the model at all.
+
+Jenny: Wait wait wait. It's just... skipping the GPU? For those tokens?
+
+Alex: For those tokens, yes. The model is bypassed entirely for the forced span. Then re-tokenization handles the boundary where the forced text doesn't align cleanly with the model's tokenizer, and you hand back to the model when there's an actual choice to make again.
+
+Jenny: That's a beautiful optimization. It's like — okay let me try this. It's like in a deployment pipeline, if a stage is fully deterministic given the input, you don't run it, you just inline the output.
+
+Alex: Exactly that. And the numbers — 2x lower latency, 2.5x higher throughput on JSON-constrained decoding versus Outlines plus vLLM. And here's the kicker — it composes with RadixAttention. So the constrained part of your prefix is still cache-shared across requests.
+
+Jenny: Oh, that's the function-calling story, isn't it. Every agent request has the same tool schema in the prompt — that's a giant shared prefix — and then the response has to match a JSON schema with lots of forced spans.
+
+Alex: You just described the bread and butter of agent infra. You get the prefix-cache win and the FSM-skip win in the same request. That's why agent platforms have been migrating to SGLang.
+
+Jenny: Okay, I want to zoom out. What does SGLang share with everyone else? What's not unique?
+
+Alex: Most of the modern playbook. Continuous batching, paged attention, chunked prefill, speculative decoding with EAGLE and MTP heads, prefill-decode disaggregation, tensor and pipeline and expert and data parallelism, multi-LoRA batching, the full quantization menu — FP8, FP4, INT4, AWQ, GPTQ. The MoE handling is particularly well tuned for DeepSeek V3 and R1 — DeepSeek themselves recommend SGLang for production deployment.
+
+Jenny: That's a hell of an endorsement. Okay so when do I not pick SGLang?
+
+Alex: Two cases. One — peak single-stream latency on a pure NVIDIA stack. TensorRT-LLM still wins there because the CUDA kernels are hand-tuned to within an inch of their life, and the FP8 attention kernels are the most mature on NVIDIA hardware. Two — if you're already deep in the NVIDIA Triton inference stack and you want the tightest integration, TRT-LLM's productionization story there is hard to beat.
+
+Jenny: Got it. So picking an engine is like picking ECS versus EKS versus Lambda — each one made different tradeoffs for different workload shapes.
+
+Alex: That's the exact right framing. And SGLang's tradeoff is "I'm going to be best-in-class for prefix-heavy and structured workloads, and I'll be at parity for the rest." Given where the industry is going — agents everywhere, function calling everywhere, RAG everywhere — that bet is paying off. Their docs claim over 400,000 GPUs running SGLang in production, trillions of tokens a day.
+
+Jenny: That's not a research project anymore. That's infrastructure. Okay — so what should I be thinking about next?
+
+Alex: So we've talked about engines today. But picking an engine is only step one. The next question is — how do you actually know if it's working? How do you load-test an inference endpoint in a way that doesn't lie to you? Because LLM benchmarking is full of traps — your time-to-first-token looks great on a single request and falls apart at concurrency 50, your throughput numbers depend entirely on prompt length distribution, and the metric your dashboard shows might have nothing to do with user experience.
+
+Jenny: Yeah, this is the "p99 latency under realistic load" problem we know from web services, but with extra dimensions.
+
+Alex: With many extra dimensions. And after benchmarking, the conversation gets even more interesting — cost economics. Cost-per-token is the new cost-per-request, and the math of it determines whether your product is viable. Then we get into MFU — Model FLOPs Utilization — which is basically CPU utilization for matrix math, except it's brutally hard to max out, and the reasons why are deeply tied to everything we talked about today. Memory bandwidth, batching, the whole stack.
+
+Jenny: That's a great arc. Engines, then how to measure them, then what they cost, then why they're never as fast as they should be on paper.
+
+Alex: Exactly. Stick with us — that's where this gets really practical for anyone running this stuff at scale.
+
+Jenny: Looking forward to it.

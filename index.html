@@ -5037,7 +5037,316 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
 <div class="prev-next"><a class="pn-link pn-prev" onclick="show('sglang-dd')">&#8592; SGLang DeepDive</a><a class="pn-link pn-next" onclick="show('moe-dd')">MoE Inference &#8594;</a></div>
 </div>
 
-__MOE_DD_SECTION__
+<div id="sec-moe-dd" class="hidden">
+<div class="breadcrumb">DeepDives &rsaquo; MoE Inference</div>
+<h2>MoE Inference at Scale — a NotebookLM-style deep dive <span class="new-badge">new</span></h2>
+  <p class="subtitle">A six-segment deep dive that merges the research view (ExFlow → ScMoE → Aurora → Occult) with the production view (DeepSeek-V3, the LMSYS 96-H100 reproduction, NVIDIA's wide-EP on GB200 NVL72). Roughly 45–60 minutes of audio. Written for an AWS engineering manager preparing for a NIM Factory interview.</p>
+
+  <div class="info"><strong>How to read this section.</strong> Every concrete claim is attributed inline. Source tags: <code>[scmoe]</code> (Cai et al., arXiv 2404.05019), <code>[exflow]</code> (Yao et al., arXiv 2401.08383, OSU/MVAPICH), <code>[aurora]</code> (Li et al., arXiv 2410.17043, MPI-SWS, Oct 2024), <code>[occult]</code> (Luo et al., arXiv 2505.13345, UNC/UCLA, ICML 2025), <code>[ds-v3]</code> (DeepSeek-V3 Technical Report, arXiv 2412.19437), <code>[deepseek-readme]</code> (deepseek-ai/DeepSeek-V3 GitHub README), <code>[lmsys-ep]</code> (LMSYS large-scale EP blog, May 2025), <code>[nv-wide-ep]</code> (NVIDIA developer blog "Scaling Large MoE Models with Wide-EP on NVL72"), <code>[trt-blog1]</code> (TensorRT-LLM tech blog 1, DeepSeek-R1 on B200), <code>[trt-blog14]</code> (TensorRT-LLM tech blog 14, Scaling EP Part 3), <code>[trt-index]</code> (TensorRT-LLM doc-home blog index). Where a number is workload- or version-specific, the source's qualifier is preserved. Segment 6's NIM-Factory framing is clearly marked as editorial because none of the cited sources discuss NIM internals.</div>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 1 — Why MoE inference is a systems problem (~5 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 1 — Why MoE inference is a systems problem</div>
+  <p>MoE inference inverts the assumption every dense-model serving system was built around. In a dense model, every token follows the same path through the network — every weight is touched, every parameter is part of the per-token compute budget. In MoE, parameters and compute are decoupled: DeepSeek-V3 has <strong>671B total parameters but only 37B activated per token</strong> <code>[ds-v3]</code>, and the whole game is making that sparsity efficient at serving time without losing the quality that came from training the full 671B.</p>
+  <p>Three systems-level pain points fall out of that decoupling immediately, and they shape every paper and every production stack we will discuss.</p>
+  <p><strong>Pain point one: parameters and compute are decoupled, but parameters still have to fit somewhere.</strong> Even at FP8, 671B parameters is on the order of 700 GB of weights — too large for a single H100 node, too large for a single H200 node. DeepSeek's own production deployment uses 4 nodes (32 GPUs) for the prefill stage and 40 nodes (320 GPUs) for the decoding stage <code>[ds-v3]</code>. There is no single-machine option for a frontier MoE; every deployment is a multi-node aggregation problem before any other optimization starts.</p>
+  <p><strong>Pain point two: expert parallelism (EP) distributes experts across GPUs, which forces all-to-all communication on every MoE layer.</strong> Aurora's preliminary section diagrams this as a four-step layer: gate → first all-to-all (dispatch tokens to expert GPUs) → FFN (the expert) → second all-to-all (combine results back) → aggregation <code>[aurora]</code>. Two all-to-alls per MoE layer, and a modern MoE has dozens of MoE layers. DeepSeek-V3 has <strong>3 dense layers + 58 MoE layers</strong> <code>[trt-blog1]</code> — that is 116 all-to-alls on the forward pass alone.</p>
+  <p><strong>Pain point three: routing is dynamic, which means GPU utilization is uneven and load is not predictable.</strong> Aurora's framing: "the dynamic selection of experts results in an uneven distribution of experts among GPUs, leading to some GPUs being heavily loaded while others remain idle" <code>[aurora]</code>. The gate output is a function of the token, recomputed every layer; you cannot pre-allocate.</p>
+  <p>A useful frame for an infrastructure audience: in a dense model the tokens travel a single highway, every car taking the same lanes in the same order. In MoE, every token gets routed to a different specialist on a different GPU — the routing itself is part of the workload, and the routing table is recomputed every layer. The all-to-all is the network shuffle phase of map-reduce, except it executes twice per layer, synchronously, with payload sizes that vary per rank. That is why MoE serving is a systems problem and not just a kernel problem.</p>
+
+  <div class="viz-flow">
+    <div class="viz-box accent"><strong>Tokens (per GPU)</strong>local batch slice</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box green"><strong>Gate</strong>top-k expert selection<br>per token</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box orange"><strong>All-to-All #1</strong>dispatch tokens to<br>expert-owning GPUs</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box accent"><strong>Expert FFN</strong>compute on remote GPU</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box orange"><strong>All-to-All #2</strong>combine results back<br>to origin GPUs</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box green"><strong>Aggregate</strong>weighted sum</div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 2 — The all-to-all bottleneck (~8 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 2 — The all-to-all bottleneck</div>
+  <p>Pin down how bad the all-to-all actually is, because this single bottleneck shapes every research solution and every production design choice in the rest of this section.</p>
+
+  <div class="sec-h" style="font-size:14px;">How much of runtime does all-to-all actually consume?</div>
+  <p>The numbers depend on cluster shape and model. The Aurora paper cites an internal study showing all-to-all "can constitute over 60% of inference time when using four GPUs, and the overhead increases substantially with more GPUs" <code>[aurora]</code>. Occult's abstract is blunter, putting the figure at "consuming over 40% runtime in large-scale training" for modern MoE LLMs <code>[occult]</code>. The exact percentage is workload-dependent — what is consistent across the cited papers is that all-to-all is the dominant cost, not a marginal one.</p>
+
+  <div class="sec-h" style="font-size:14px;">Why two all-to-alls per layer, not one</div>
+  <p>Aurora's preliminary section is explicit <code>[aurora]</code>: "Two all-to-all communications occur during the communication phase. These two all-to-all communications are opposite in terms of data flows." The first dispatches tokens to expert-owning GPUs after the gate decides routing; the second exchanges expert outputs back so the original sequence is reassembled before the next layer's attention runs. The data sizes match — what dispatched must combine.</p>
+
+  <div class="sec-h" style="font-size:14px;">Three structural reasons all-to-all is bad</div>
+  <p>Aurora isolates three properties that make MoE all-to-all worse than a generic shuffle <code>[aurora]</code>:</p>
+  <ul>
+    <li><strong>Synchronous all-to-all communications</strong> — "all-to-all communication is synchronous, meaning that computation (including FFN and aggregation) can only begin once every GPU has completed data transmission. This leads to the GPU computation resource idleness."</li>
+    <li><strong>Reversed all-to-all communications</strong> — both directions move the same volume per pair, with no way to batch or amortize across the two phases.</li>
+    <li><strong>Non-overlapping communication and computation</strong> — "communication and computation processes do not overlap; each step can only commence after the previous one is completed."</li>
+  </ul>
+  <p>Then add dynamic routing on top. Token volume per pair is <em>per-batch</em> data: which GPU sends how many tokens to which other GPU is the gate's decision, made anew every layer. So the all-to-all is synchronous, two-phased, non-overlapping with compute, and has unpredictable per-pair payload sizes. The synchronous-blocking nature is what turns dynamic routing skew into idle GPU time — the slowest expert pins everyone to its tail latency.</p>
+
+  <div class="sec-h" style="font-size:14px;">Heterogeneous GPU clusters make this worse</div>
+  <p>Aurora explicitly motivates the heterogeneous case: production GPU clusters accumulate generations over time, and "GPU heterogeneity, which is common due to incremental deployments, adds further complexity to MoE model deployment" <code>[aurora]</code>. A faster GPU finishing its experts early gains nothing if it has to wait for the slowest peer to complete the synchronous all-to-all. An Alibaba GPU cluster study cited by Aurora reports "less than 10% of GPUs reach 80% utilization" <code>[aurora]</code>.</p>
+
+  <div class="viz-timeline">
+    <div class="viz-row"><span class="viz-label">GPU 1 (fast)</span><div class="viz-bar decode" style="width:80px;">Expert</div><div class="viz-bar idle" style="width:140px;">idle, blocked on barrier</div><div class="viz-bar tool" style="width:40px;">A2A</div></div>
+    <div class="viz-row"><span class="viz-label">GPU 2 (med)</span><div class="viz-bar decode" style="width:140px;">Expert (heavier)</div><div class="viz-bar idle" style="width:80px;">idle</div><div class="viz-bar tool" style="width:40px;">A2A</div></div>
+    <div class="viz-row"><span class="viz-label">GPU 3 (slow)</span><div class="viz-bar decode" style="width:220px;">Expert (popular, slow)</div><div class="viz-bar tool" style="width:40px;">A2A</div></div>
+    <div class="viz-legend">
+      <div class="viz-legend-item"><div class="viz-legend-dot" style="background:#059669;"></div>Expert FFN compute</div>
+      <div class="viz-legend-item"><div class="viz-legend-dot" style="background:#dc2626;"></div>Idle (synchronous-blocking)</div>
+      <div class="viz-legend-item"><div class="viz-legend-dot" style="background:#6b21a8;"></div>All-to-all barrier</div>
+      <div class="viz-legend-item" style="color:#94a3b8;">Dynamic routing → uneven load → fast GPUs wait for the popular-expert tail <code>[aurora]</code></div>
+    </div>
+  </div>
+
+  <p>Three of the four research papers in the next segment are direct attacks on properties on this list — non-overlapping, dynamic-skew, heterogeneity. The fourth (Occult) attacks the communication pattern itself by re-thinking what gets sent.</p>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 3 — The research wave (~12 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 3 — The research wave: ExFlow → ScMoE → Aurora → Occult</div>
+  <p>Read these four papers as a progression, not as alternatives. Each one attacks a different property of the all-to-all bottleneck. Together they map out the option space that the production stacks (Segments 4–5) draw from.</p>
+
+  <div class="sec-h" style="font-size:14px;">ExFlow — exploit a static property: inter-layer expert affinity</div>
+  <p>ExFlow's authors are Yao et al. (Ohio State / NOWLAB / MVAPICH lineage) <code>[exflow]</code>. The core insight: in a pre-trained MoE, tokens that get routed to expert <em>i</em> in layer L tend to get routed to a small set of experts in layer L+1 — there is hidden inter-layer expert affinity. Because that affinity is a static property of the trained weights, ExFlow can plan placement and routing such that <strong>only one all-to-all per layer is needed instead of two</strong>, by exploiting "context-coherent expert parallelism" with no fine-tuning required <code>[exflow]</code>.</p>
+  <p>Reported numbers from the abstract <code>[exflow]</code>: <strong>"up to 67% cross-GPU routing latency"</strong> reduction via the expert-placement optimization, and <strong>"up to 2.2× improvement in inference throughput"</strong> on MoEs with 8 to 64 experts, with <em>no fine-tuning and no accuracy loss</em>. The "no fine-tuning" qualifier is what makes ExFlow deployable on existing checkpoints rather than a research-only result.</p>
+
+  <div class="sec-h" style="font-size:14px;">ScMoE — change the architecture: shortcut-connected expert parallelism</div>
+  <p>ScMoE comes from Cai et al. <code>[scmoe]</code>. The core insight: change the architecture itself so that all-to-all communication can overlap with expert computation. The shortcut-connection mechanism breaks the dependency that forces "compute-then-communicate-then-compute" into a serial chain — the layer is rewritten so that the next computation can start as soon as <em>partial</em> communication completes.</p>
+  <p>Reported numbers <code>[scmoe]</code>: <strong>1.49× training speedup and 1.82× inference speedup</strong> versus a top-2 MoE baseline. The cost is that this is no longer the same architecture — it is an architectural change, so it has to be trained from scratch (or at minimum continue-pretrained), which is why the technique lives in the research literature rather than as a drop-in optimization for existing checkpoints.</p>
+
+  <div class="sec-h" style="font-size:14px;">Aurora — schedule better: combine deployment with all-to-all scheduling</div>
+  <p>Aurora is Li et al., MPI-SWS, October 2024 <code>[aurora]</code>. The core insight: take the MoE model deployment problem (which expert lives on which GPU) and the all-to-all scheduling problem (which GPU sends to which other GPU in what order) and solve them <em>jointly</em>. The mechanism is "strategically ordering token transmissions in all-to-all communications" to minimize bandwidth contention, plus "colocating experts from different models on the same device" to fight synchronous-blocking idle time — this exact piece is what attacks the heterogeneity problem.</p>
+  <p>Aurora is also the most theoretically rigorous of the four. The paper analyzes four cluster settings — exclusive vs. colocated experts, homogeneous vs. heterogeneous GPUs — and provides "optimal solutions for three cases" <code>[aurora]</code>. The fourth case (NP-hard: colocating experts on heterogeneous GPUs) gets a polynomial-time approximation <strong>"with only a 1.07× degradation from the optimal"</strong> <code>[aurora]</code>.</p>
+  <p>Reported numbers <code>[aurora]</code>: <strong>up to 2.38× speedup in homogeneous clusters and up to 3.54× in heterogeneous environments. GPU utilization up to 1.5×.</strong> The heterogeneous-cluster speedup is the headline result — that is the production-realistic case.</p>
+
+  <div class="sec-h" style="font-size:14px;">Occult — re-think the communication pattern: collaborative communication</div>
+  <p>Occult is Luo, Li, Peng et al. (UNC Chapel Hill, UCLA, U Minnesota Twin Cities, CUHK), ICML 2025 <code>[occult]</code>. The core insight: the unit of communication should be the <em>collaboration</em> — pairs of experts co-activated by one token — not the individual token-to-expert message. The paper splits collaborations into two cases:</p>
+  <ul>
+    <li><strong>Intra-collaboration:</strong> the co-activated expert pair sits on the same device. Communication is local — effectively free.</li>
+    <li><strong>Inter-collaboration:</strong> the co-activated experts sit on different devices. Communication crosses the network.</li>
+  </ul>
+  <p>The optimization target then becomes: <strong>maximize intra-collaboration, minimize inter-collaboration</strong>, by choosing where to place experts and how to route tokens through them <code>[occult]</code>. Occult formalizes a metric C_T (the per-token average number of replicas required) and shows it correlates linearly with wall-clock runtime. The classical MoE workflow has C_T = 2; Occult-without-pruning achieves C_T = 1.5; Occult-with-collaborative-pruning reaches the theoretical minimum C_T = 1 <code>[occult]</code>.</p>
+  <p>Reported numbers <code>[occult]</code>: <strong>"more than 1.5× speed up across multiple tasks and models"</strong> over popular state-of-the-art inference and training frameworks, with comparable or superior quality to standard fine-tuning. Code at github.com/UNITES-Lab/Occult <code>[occult]</code>.</p>
+
+  <div class="sec-h" style="font-size:14px;">The four papers, side-by-side</div>
+  <table>
+    <tr><th>Paper</th><th>Bottleneck attacked</th><th>Core insight</th><th>Reported speedup</th><th>Deployment cost</th></tr>
+    <tr><td>ExFlow <code>[exflow]</code></td><td>2× all-to-all per layer</td><td>Static inter-layer expert affinity → 1 all-to-all suffices</td><td>up to 2.2× throughput; up to 67% routing-latency cut</td><td>None (no fine-tuning, drop-in)</td></tr>
+    <tr><td>ScMoE <code>[scmoe]</code></td><td>Non-overlapping comm/compute</td><td>Shortcut connection enables comm/compute overlap</td><td>1.49× training, 1.82× inference</td><td>Architectural change (re-train)</td></tr>
+    <tr><td>Aurora <code>[aurora]</code></td><td>Synchronous-blocking + heterogeneity</td><td>Jointly schedule deployment + transmission order; colocate experts from different models</td><td>2.38× (homo), 3.54× (hetero); 1.5× GPU util.</td><td>Scheduler change (no model change)</td></tr>
+    <tr><td>Occult <code>[occult]</code></td><td>Communication pattern itself</td><td>Co-activated expert pairs as the unit; maximize intra-, minimize inter-collaboration</td><td>&gt;1.5× across tasks/models; quality preserved</td><td>Placement + (optional) collaboration-pruning fine-tune</td></tr>
+  </table>
+
+  <div class="viz-flow">
+    <div class="viz-box accent"><strong>ExFlow</strong>Static property:<br>cut 2 A2As → 1</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box green"><strong>ScMoE</strong>Architecture:<br>overlap comm/compute</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box orange"><strong>Aurora</strong>Schedule:<br>order transmissions,<br>handle heterogeneity</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box purple"><strong>Occult</strong>Pattern:<br>collaborative<br>communication unit</div>
+  </div>
+
+  <p>The progression is the point. ExFlow shows you can save half the messages without changing anything. ScMoE shows you can hide the messages by changing the architecture. Aurora shows you can order the messages to remove the synchronous tail. Occult shows you can change <em>what counts as a message</em>. Production stacks borrow from all four — the next two segments are about which ideas survived contact with real deployments.</p>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 4 — What DeepSeek actually shipped (~10 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 4 — What DeepSeek actually shipped (DeepSeek-V3 technical report)</div>
+  <p>DeepSeek-V3 is the most fully-documented production MoE deployment in the public record. The technical report describes both the training-side parallelism strategy and the inference deployment topology, and it is the gold standard reference for "how a frontier lab actually runs an MoE in production" <code>[ds-v3]</code>.</p>
+
+  <div class="sec-h" style="font-size:14px;">Model and training infrastructure</div>
+  <p>DeepSeek-V3 is <strong>671B total parameters with 37B activated per token</strong>, trained on <strong>14.8T tokens</strong> at a total cost of <strong>2.788M H800 GPU hours</strong>, with no loss spikes or rollbacks reported across the entire training run <code>[ds-v3]</code>. The architecture stack: Multi-head Latent Attention (MLA), DeepSeekMoE, an auxiliary-loss-free load-balancing strategy, and a Multi-Token Prediction (MTP) training objective <code>[ds-v3]</code>.</p>
+  <p>The training-time parallelism strategy <code>[ds-v3]</code>:</p>
+  <ul>
+    <li><strong>16-way Pipeline Parallelism</strong> — splits layers across 16 stages.</li>
+    <li><strong>64-way Expert Parallelism spanning 8 nodes</strong> — splits experts across 64 GPUs.</li>
+    <li><strong>ZeRO-1 Data Parallelism</strong> — for the rest.</li>
+    <li><strong>No Tensor Parallelism</strong> during training. Memory optimizations enabled this — TP would have hurt NVLink bandwidth utilization, and the training stack was designed to avoid it.</li>
+  </ul>
+  <p>The "no TP at training, TP allowed at inference" split is itself worth pausing on: training optimizes for end-to-end throughput where memory bandwidth is the dominant cost; inference (especially decode) optimizes for latency, where TP can shrink per-token wall-clock at the cost of bandwidth. Same model, different parallelism, depending on phase.</p>
+
+  <div class="sec-h" style="font-size:14px;">DualPipe — overlap attention, MoE compute, and MoE communication</div>
+  <p>DualPipe is DeepSeek's pipeline-parallelism algorithm <code>[ds-v3]</code>. The technical report describes it as a method that "overlaps the computation and communication within a pair of individual forward and backward chunks," reducing pipeline bubbles compared to existing approaches like 1F1B and ZeroBubble. The conceptual lineage to ScMoE is direct — ScMoE proved that comm/compute overlap was achievable via architectural change; DualPipe achieves it via scheduling within a fixed architecture.</p>
+
+  <div class="sec-h" style="font-size:14px;">DeepEP — the all-to-all kernel for the H800 cluster</div>
+  <p>DeepSeek's H800 cluster topology <code>[ds-v3]</code>: 8 GPUs per node connected by NVLink/NVSwitch; cross-node by InfiniBand. The custom all-to-all kernels DeepEP allocate <strong>20 SMs to cross-node communication</strong>, route each token to <strong>at most 4 nodes</strong>, and exploit the bandwidth difference between layers — <strong>NVLink at 160 GB/s</strong> intra-node and <strong>InfiniBand at 50 GB/s</strong> inter-node. The strategy "fully overlaps" IB and NVLink transfers so the slower fabric is hidden behind the faster one.</p>
+
+  <div class="sec-h" style="font-size:14px;">MLA — why the KV cache fits</div>
+  <p>Multi-head Latent Attention compresses K and V jointly into a small latent vector and stores only "the blue-boxed vectors" — the compressed latent plus a decoupled key — rather than full per-head K and V tensors <code>[ds-v3]</code>. The blog 1 post on B200 inference puts numbers on the cost side: in TRT-LLM's MLA implementation, the attention modules use BF16 (not FP8), because "low-precision attention computation doesn't help with performance" <code>[trt-blog1]</code>. So MLA shrinks the KV cache by ~10× at the cost of a tiny up-projection on every read; that tradeoff is the only reason DeepSeek can fit context this large at this throughput.</p>
+
+  <div class="sec-h" style="font-size:14px;">Auxiliary-loss-free load balancing and MTP</div>
+  <p>Auxiliary-loss-free LB <code>[ds-v3]</code> replaces the standard auxiliary loss (which encourages expert balance but degrades model quality) with a learned routing bias. The result: balanced expert utilization without the model-quality hit. MTP at training time predicts multiple future tokens; at inference time, the MTP module(s) can be repurposed as a built-in speculative drafter <code>[ds-v3]</code><code>[trt-blog1]</code>. TRT-LLM's blog 1 reports stacking MTP from 1 layer to 3 layers with an autoregressive design, achieving a <strong>2.82× acceptance rate</strong> for the speculative branch on DeepSeek-R1 / B200 <code>[trt-blog1]</code> — the speedup contribution is one of the larger wins in their min-latency stack.</p>
+
+  <div class="sec-h" style="font-size:14px;">Inference deployment: the two-stage topology</div>
+  <p>DeepSeek's deployed inference topology splits prefill and decode onto different parallelism configurations <code>[ds-v3]</code>:</p>
+  <table>
+    <tr><th>Stage</th><th>Minimum unit</th><th>Parallelism</th><th>Redundant experts</th></tr>
+    <tr><td>Prefill</td><td>4 nodes / 32 GPUs</td><td>TP4 with Sequence Parallelism + DP8 + EP32</td><td>32 redundant experts deployed</td></tr>
+    <tr><td>Decoding</td><td>40 nodes / 320 GPUs</td><td>TP4 with SP + DP80 + EP320</td><td>(see report)</td></tr>
+  </table>
+  <p>Two things to absorb. First, the parallelism strategies are different between prefill and decode — same model, completely different EP rank (EP32 vs EP320). Disaggregated serving for MoE is not just "split the phases on different GPUs"; the EP rank itself is part of the split. Second, <strong>32 redundant experts are deployed at prefill</strong> — these are duplicates of popular experts so the dispatch step has options. This is the production answer to dynamic routing skew.</p>
+
+  <div class="viz-grid viz-grid-2">
+    <div class="viz-card" style="border-color:#3b82f6;">
+      <div class="viz-card-title" style="color:#93c5fd;">Prefill — 32 GPUs</div>
+      <p style="font-size:12px;color:#cbd5e1;margin:0 0 6px;">4 nodes, TP4 + SP, DP8, <strong>EP32</strong>, 32 redundant experts</p>
+      <p style="font-size:12px;color:#cbd5e1;margin:0 0 6px;">Wide compute sweep over the full prompt; redundancy absorbs popular-expert pressure.</p>
+      <p style="font-size:11px;color:#64748b;margin:0;">Source: <code>[ds-v3]</code></p>
+    </div>
+    <div class="viz-card" style="border-color:#059669;">
+      <div class="viz-card-title" style="color:#34d399;">Decode — 320 GPUs</div>
+      <p style="font-size:12px;color:#cbd5e1;margin:0 0 6px;">40 nodes, TP4 + SP, DP80, <strong>EP320</strong></p>
+      <p style="font-size:12px;color:#cbd5e1;margin:0 0 6px;">Per-step single-token compute with a much wider expert pool — each GPU holds fewer experts, larger memory budget for KV.</p>
+      <p style="font-size:11px;color:#64748b;margin:0;">Source: <code>[ds-v3]</code></p>
+    </div>
+  </div>
+
+  <div class="sec-h" style="font-size:14px;">No token dropping at inference</div>
+  <p>This is one of the most important production decisions in the whole report. At training, MoE systems often use a "capacity factor" that drops tokens routed to over-full experts — accepting some quality loss in exchange for predictable per-expert compute. <strong>At inference, DeepSeek does not drop tokens</strong> <code>[ds-v3]</code>. That decision rules out the easy answer to expert overflow and forces the deployment to use redundant experts and dynamic balancing instead. It is the reason 32 redundant experts at prefill exist.</p>
+
+  <div class="sec-h" style="font-size:14px;">What the README adds</div>
+  <p>The DeepSeek-V3 README lists six recommended inference frameworks <code>[deepseek-readme]</code>: SGLang, LMDeploy, TensorRT-LLM, vLLM, LightLLM, and DeepSeek-Infer Demo. SGLang and TensorRT-LLM both ship FP8 native weight support; the README confirms FP8 is the native checkpoint format with BF16 conversion available <code>[deepseek-readme]</code>. The framework matrix is the rough shape of what a production deployment can choose from today.</p>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 5 — NVIDIA's production answer (~10 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 5 — NVIDIA's production answer: wide expert parallelism on GB200 NVL72</div>
+  <p>If DeepSeek shows what a frontier lab does with H800s, NVIDIA's wide-EP work is the answer to "what do you do when the rack is the unit of deployment." The two main public sources here are NVIDIA's developer-blog "Scaling Large MoE Models with Wide-EP on NVL72" <code>[nv-wide-ep]</code> and the TensorRT-LLM tech blogs Part 1, Part 2, Part 3 plus blog 1 on DeepSeek-R1 on B200 <code>[trt-blog14]</code><code>[trt-blog1]</code><code>[trt-index]</code>.</p>
+
+  <div class="sec-h" style="font-size:14px;">What "wide-EP" means</div>
+  <p>Wide-EP is the strategy of distributing experts across many GPUs — EP32, EP64, even EP320 in DeepSeek's case — when the total parameter count is large enough that no smaller EP rank fits well in memory <code>[nv-wide-ep]</code>. The dev blog's headline result: <strong>"Large-scale Expert Parallelism (EP) rank 32 delivers up to 1.8× higher output token throughput per GPU compared to small EP rank 8 at 100 tokens/sec per user"</strong> <code>[nv-wide-ep]</code>. Per-GPU throughput is the right unit: at EP8 each GPU holds many experts, so weight-loading dominates; at EP32 each GPU holds fewer, leaving headroom for KV cache and larger effective per-expert batches.</p>
+
+  <div class="sec-h" style="font-size:14px;">Why GB200 NVL72 is the right hardware for wide-EP</div>
+  <p>The NVL72 fabric provides <strong>"130 TB/s of aggregate bandwidth"</strong> across the 72-GPU coherent NVLink domain <code>[nv-wide-ep]</code>. That bandwidth is what makes wide-EP actually work — at EP32, every all-to-all crosses 32 GPUs, and the cross-rank traffic is what would otherwise dominate. NVL72's NVLink-everywhere fabric collapses the cross-node penalty down to NVLink speed for everything inside the rack.</p>
+  <p>The dev blog lists three concrete benefits of wide-EP on the NVL72 fabric <code>[nv-wide-ep]</code>:</p>
+  <ul>
+    <li><strong>Less weight-loading pressure</strong> — smaller set of expert weights per GPU.</li>
+    <li><strong>Easier weight reuse by the GroupGEMM kernel</strong> — higher arithmetic intensity, more FLOPs per byte of weight loaded.</li>
+    <li><strong>More memory headroom for KV cache</strong> per GPU because experts take less.</li>
+  </ul>
+
+  <div class="sec-h" style="font-size:14px;">EPLB — the expert-parallel load balancer</div>
+  <p>The dev blog describes EPLB as operating in two modes <code>[nv-wide-ep]</code>: a <em>static</em> mode for warmup and benchmarking, and an <em>online</em> mode that adapts to real traffic. The blog frames wide-EP plus disaggregated serving as <strong>"two key pillars"</strong> of the production stack <code>[nv-wide-ep]</code>.</p>
+
+  <div class="sec-h" style="font-size:14px;">Custom EP communication kernels</div>
+  <p>The dev blog mentions <strong>"custom NCCL kernels for non-static data sizes across large-scale EP"</strong> <code>[nv-wide-ep]</code> — the standard NCCL all-to-all is built around static payload sizes, which is exactly the wrong fit for MoE. The TRT-LLM Part 3 blog goes further with kernel-level details: FP4 wo-GEMM quantization for attention output layers, low-precision NVFP4 AlltoAll communication during the combine phase, FP8 context FMHA, MTP LM-head tensor parallelism, and a "separate qkv" format that eliminates Q/K/V concat copies in the context phase <code>[trt-blog14]</code>.</p>
+
+  <div class="sec-h" style="font-size:14px;">One-Sided AlltoAll over NVLink (and DWDP)</div>
+  <p>The TRT-LLM doc-home blog index lists two forward-looking pieces <code>[trt-index]</code>: <strong>"Optimizing MoE Communication with One-Sided AlltoAll Over NVLink"</strong> and <strong>"DWDP: Distributed Weight Data Parallelism for High-Performance LLM Inference on NVL72."</strong> The cited sources do not give us deep implementation detail on either beyond the titles and the framing — one-sided semantics over NVLink (receiver does not stall waiting for a matched send, like RDMA one-sided put/get vs MPI Send/Recv) is the natural follow-on to the custom NCCL kernels in the dev blog. <em>If a deeper claim is needed in the interview, it should attribute these as listed-but-not-yet-fully-detailed in the public sources.</em></p>
+
+  <div class="sec-h" style="font-size:14px;">DeepSeek-R1 on B200: the kernel-level wins</div>
+  <p>The TRT-LLM tech blog 1 traces a min-latency progression for DeepSeek-R1 on B200 <code>[trt-blog1]</code>:</p>
+  <table>
+    <tr><th>Stage</th><th>Throughput (TPS)</th><th>Speedup vs baseline</th></tr>
+    <tr><td>Baseline (CUDA Graph + EP8/TP8)</td><td>67</td><td>1.0×</td></tr>
+    <tr><td>Pre-GTC 2025</td><td>253</td><td>3.7×</td></tr>
+    <tr><td>Current (blog publication)</td><td>368</td><td>5.5×</td></tr>
+  </table>
+  <p>Workload: 1k input / 2k output, batch size 1 (min-latency constraint), 64 attention modules across 3 dense + 58 MoE layers <code>[trt-blog1]</code>. The customized MLA attention kernel alone moves from 80 TPS to 84 TPS in the same lineage. Attention modules are kept at BF16 precision; FP4 quantization is applied only to dense FFN and MoE layers <code>[trt-blog1]</code>. The MTP-1-to-3-layer expansion contributes a 2.82× acceptance-rate speculative draft <code>[trt-blog1]</code>.</p>
+
+  <div class="viz-timeline">
+    <div class="viz-row"><span class="viz-label">Baseline</span><div class="viz-bar idle" style="width:60px;">67 TPS</div></div>
+    <div class="viz-row"><span class="viz-label">Pre-GTC 2025</span><div class="viz-bar tool" style="width:230px;">253 TPS (3.7×)</div></div>
+    <div class="viz-row"><span class="viz-label">Current</span><div class="viz-bar decode" style="width:340px;">368 TPS (5.5×)</div></div>
+    <div class="viz-legend">
+      <div class="viz-legend-item" style="color:#94a3b8;">DeepSeek-R1 min-latency on B200, 1k/2k I/O, batch 1 — TRT-LLM blog 1 <code>[trt-blog1]</code></div>
+    </div>
+  </div>
+
+  <div class="sec-h" style="font-size:14px;">How wide-EP composes with disaggregation and MTP</div>
+  <p>The dev blog explicitly composes wide-EP with multi-token prediction "for speculative decoding with MTP to boost per-user token throughput" <code>[nv-wide-ep]</code> and frames disaggregated serving plus wide-EP as the two pillars. The TRT-LLM blog 1 stacking on B200 reaches the 5.5× number by combining all of: wide-EP, MLA kernel surgery, MTP speculative decoding, and FP4/FP8 mixed precision <code>[trt-blog1]</code>. None of these is the win on its own.</p>
+
+  <p><em>Source caveat:</em> the dev blog as published does <strong>not</strong> contain a "7× throughput on GB200 NVL72 with disaggregated serving + wide-EP" claim. The explicit claim it makes is the EP32-vs-EP8 1.8× per-GPU at 100 tok/sec/user number <code>[nv-wide-ep]</code>. If a 7× number surfaces in interview prep elsewhere, it is from a different, uncited source — flag it.</p>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 6 — Production realities the papers don't cover (~7 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 6 — Production realities the papers don't cover</div>
+  <p>The four papers in Segment 3 attack the all-to-all bottleneck. The DeepSeek and NVIDIA stacks in Segments 4–5 turn those ideas into shipped systems. Everything in <em>this</em> segment is the third tier — things that do not appear in the research literature but show up the moment you actually try to run a 671B MoE in production. The most important public source here is the LMSYS 96-H100 reproduction <code>[lmsys-ep]</code>.</p>
+
+  <div class="sec-h" style="font-size:14px;">The LMSYS reproduction at 96 H100s</div>
+  <p>LMSYS reproduced DeepSeek's deployment shape on a public 12-node × 8-H100 cluster (96 GPUs total) with prefill-decode disaggregation and large-scale EP <code>[lmsys-ep]</code>. The reported results are the most credible third-party numbers we have for a DeepSeek-class MoE on commodity Hopper hardware:</p>
+  <ul>
+    <li><strong>Throughput:</strong> 52.3k input tokens/sec/node (prefill) and 22.3k output tokens/sec/node (decode) for 2k input sequences <code>[lmsys-ep]</code>.</li>
+    <li><strong>Prefill detail:</strong> 4 nodes at EP32 — 57,674 tok/sec at 1k, 54,543 at 2k, 50,302 at 4k <code>[lmsys-ep]</code>.</li>
+    <li><strong>Decode detail:</strong> 9 nodes at EP72 — 22,282 tok/sec (batch 256, 2k input); 17,373 with simulated MTP and slow attention at 4k input <code>[lmsys-ep]</code>.</li>
+    <li><strong>Match to DeepSeek's profile:</strong> SGLang prefill within 5.6% of the official DeepSeek profile; decode within 6.6% under simulated MTP <code>[lmsys-ep]</code>.</li>
+    <li><strong>Latency:</strong> TTFT 2–5 seconds, ITL ~100 ms — throughput-optimized, not latency-optimized <code>[lmsys-ep]</code>.</li>
+  </ul>
+  <p>These are the public-record numbers an interview answer can stand on.</p>
+
+  <div class="sec-h" style="font-size:14px;">The honest limitations LMSYS calls out</div>
+  <ul>
+    <li><strong>Sequence length is constrained by the 96-GPU envelope.</strong> Longer sequences need a bigger cluster <code>[lmsys-ep]</code>.</li>
+    <li><strong>MTP integration with DP attention is incomplete.</strong> "SGLang supports MTP but lacks full integration with DP attention, reducing efficiency in mixed parallelism configurations" <code>[lmsys-ep]</code>.</li>
+    <li><strong>EPLB was tuned on in-distribution data</strong> and "may not reflect real-world variability" <code>[lmsys-ep]</code>. Same caveat repeated: production traffic is not in-distribution.</li>
+    <li><strong>TP flexibility is limited</strong> — only pure TP or DP, the memory-optimal mid-range (TP 2–6) is unavailable <code>[lmsys-ep]</code>.</li>
+    <li><strong>Hopper-only at the time of writing.</strong> Blackwell support pending <code>[lmsys-ep]</code>.</li>
+  </ul>
+
+  <div class="sec-h" style="font-size:14px;">Why prefill/decode disaggregation for MoE is harder than for dense</div>
+  <p>For a dense model, prefill and decode stress the same weights — the disaggregation choice is purely about batch shape. For MoE, prefill and decode stress <em>different experts</em>: prefill is a wide compute sweep over many tokens with broad expert coverage, decode is per-token expert selection driven by what the user is actually generating. DeepSeek's two-stage topology (Segment 4) with EP32 at prefill and EP320 at decode is the production answer to that asymmetry — the EP rank itself is part of the disaggregation, not just the GPU pool <code>[ds-v3]</code>.</p>
+
+  <div class="sec-h" style="font-size:14px;">Memory pressure and the cold-start problem</div>
+  <p>Even at FP8, 671B parameters is on the order of 700 GB — too large for any single 8×H100 node. Every deployment is a multi-node aggregation problem before any optimization starts <code>[ds-v3]</code><code>[deepseek-readme]</code>. <em>Cold-start</em>: loading 700 GB of MoE weights and pre-compiling expert routing tables is slow. The cited sources do not give specific cold-start numbers, but the MoE-specific component is real — capturing CUDA graphs for variable-batch MoE is harder than for dense, because the batch shape inside each expert depends on the gate's runtime decisions.</p>
+
+  <div class="sec-h" style="font-size:14px;">Batch-composition skew, heterogeneous traffic, fault tolerance, quantization</div>
+  <ul>
+    <li><strong>Batch composition:</strong> with small batches, many experts sit idle. EPLB handles popularity skew at the placement level but cannot manufacture batch density that the traffic does not have.</li>
+    <li><strong>Heterogeneous traffic:</strong> prefill-heavy workloads (RAG, long context) and decode-heavy workloads (chat) want different EP topologies. The DeepSeek topology (32 GPU prefill / 320 GPU decode) is one fixed answer; production fleets need to flex.</li>
+    <li><strong>Fault tolerance for all-to-all:</strong> when one expert worker dies, the entire synchronous all-to-all collective hangs until it is replaced. This is a real consequence of the synchronous-blocking property in Segment 2 — and the public sources do not yet describe a complete answer.</li>
+    <li><strong>Quantization sensitivity:</strong> experts are individually smaller than dense weights, so per-expert quantization error compounds differently. TRT-LLM's blog 1 keeps attention at BF16 but quantizes dense FFN and MoE layers to FP4 — that mixed-precision recipe is the cited production choice for B200, not a general rule <code>[trt-blog1]</code>.</li>
+  </ul>
+
+  <p>None of these realities show up in the four research papers. They show up the moment a deployment is more than one experiment.</p>
+
+  <div class="sec-h" style="font-size:14px;">Editorial postscript — beyond the cited sources</div>
+  <div class="warn"><strong>None of the cited sources discuss NVIDIA NIM, Dynamo, NIXL, KVBM, ModelExpress, or JumpStart in implementation detail.</strong> The framing below maps what the cited sources <em>do</em> say onto the NIM-Factory interview question. Treat it as the listener's exercise, not a claim grounded in the resource pack. Anything that requires speculation about NIM internals is flagged.</div>
+  <p>What the cited sources let you say with confidence: MoE serving is a multi-axis combinatorial problem — model (DeepSeek-V3, R1, Qwen3 235B, Llama 4) × hardware (H100, H200, B200, GB200 NVL72) × parallelism strategy (EP rank, TP rank, PP rank, DP for attention) × precision (FP8, NVFP4, INT4) × deployment topology (aggregated, disaggregated). The DeepSeek topology is one cell in that matrix; the LMSYS reproduction is another; NVIDIA's wide-EP-on-NVL72 dev-blog config is a third. Each cell has its own validation surface.</p>
+  <p>What the sources <em>do not</em> let you say is anything specific about NIM Factory's internal validation harness, KVBM tiering, NIXL transports, or JumpStart day-zero pipelines. Those are NVIDIA-internal details the public sources do not document — the right interview move is to talk about what the cited literature demonstrably shows (the four research vectors, DeepSeek's published topology, LMSYS's third-party reproduction, NVIDIA's own dev-blog claims for NVL72), and let the interviewer surface the NIM-internal pieces.</p>
+
+  <div class="sec-h" style="font-size:14px;">A short list of things you can defend from the cited sources</div>
+  <ul>
+    <li>All-to-all is over 40% of large-scale MoE training runtime <code>[occult]</code>; can exceed 60% of inference time on small clusters <code>[aurora]</code>.</li>
+    <li>ExFlow: up to 67% routing-latency cut, up to 2.2× inference throughput, no fine-tuning needed <code>[exflow]</code>.</li>
+    <li>ScMoE: 1.49× training, 1.82× inference vs top-2 <code>[scmoe]</code>.</li>
+    <li>Aurora: 2.38× homogeneous, 3.54× heterogeneous, 1.5× GPU utilization, 1.07× degradation from optimal in the NP-hard case <code>[aurora]</code>.</li>
+    <li>Occult: &gt;1.5× speedup; C_T progression 2 → 1.5 → 1 <code>[occult]</code>.</li>
+    <li>DeepSeek-V3: 671B/37B, 14.8T tokens, 2.788M H800 GPU hours; 16-PP × 64-EP × ZeRO-1 DP, no TP at training; DeepEP with 20 SMs cross-node, ≤4-node token reach, NVLink 160 GB/s + IB 50 GB/s; prefill EP32 with 32 redundant experts, decode EP320; no token dropping at inference <code>[ds-v3]</code>.</li>
+    <li>LMSYS 96-H100: 52.3k input / 22.3k output tok/sec/node; TTFT 2–5 s, ITL ~100 ms; within 5.6%/6.6% of DeepSeek's profile; MTP+DP-attention incomplete; EPLB tuned on in-distribution traffic <code>[lmsys-ep]</code>.</li>
+    <li>NVIDIA wide-EP NVL72: EP32 vs EP8 → 1.8× per-GPU at 100 tok/sec/user; 130 TB/s NVLink domain; EPLB static + online; wide-EP and disaggregated serving as "two key pillars" <code>[nv-wide-ep]</code>.</li>
+    <li>TRT-LLM DeepSeek-R1 / B200: 67 → 253 → 368 TPS (5.5×); BF16 attention + FP4 dense/MoE; MTP 1→3 layers, 2.82× acceptance <code>[trt-blog1]</code>.</li>
+  </ul>
+
+  <div class="resource-bar">
+    📖 <a href="https://arxiv.org/pdf/2401.08383" target="_blank">ExFlow (Yao et al., 2024)</a>
+    <a href="https://arxiv.org/pdf/2404.05019" target="_blank">ScMoE (Cai et al., 2024)</a>
+    <a href="https://arxiv.org/pdf/2410.17043" target="_blank">Aurora (Li et al., MPI-SWS, 2024)</a>
+    <a href="https://arxiv.org/pdf/2505.13345" target="_blank">Occult (Luo et al., ICML 2025)</a>
+    <a href="https://arxiv.org/html/2412.19437v1" target="_blank">DeepSeek-V3 Technical Report</a>
+    <a href="https://github.com/deepseek-ai/DeepSeek-V3" target="_blank">deepseek-ai/DeepSeek-V3 on GitHub</a>
+    <a href="https://www.lmsys.org/blog/2025-05-05-large-scale-ep/" target="_blank">LMSYS 96-H100 large-scale EP blog</a>
+    <a href="https://developer.nvidia.com/blog/scaling-large-moe-models-with-wide-expert-parallelism-on-nvl72-rack-scale-systems/" target="_blank">NVIDIA dev blog — wide-EP on NVL72</a>
+    <a href="https://nvidia.github.io/TensorRT-LLM/blogs/tech_blog/blog1_Pushing_Latency_Boundaries_Optimizing_DeepSeek-R1_Performance_on_NVIDIA_B200_GPUs.html" target="_blank">TRT-LLM blog 1 — DeepSeek-R1 on B200</a>
+    <a href="https://nvidia.github.io/TensorRT-LLM/blogs/tech_blog/blog14_Scaling_Expert_Parallelism_in_TensorRT-LLM_part3.html" target="_blank">TRT-LLM blog 14 — Scaling EP Part 3</a>
+    <a href="https://nvidia.github.io/TensorRT-LLM/" target="_blank">TRT-LLM doc-home blog index</a>
+  </div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('trtllm-dd')">&#8592; TensorRT-LLM DeepDive</a></div>
+</div>
 
 </div>
 </div><!-- /flex column wrapper -->

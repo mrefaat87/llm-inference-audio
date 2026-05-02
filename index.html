@@ -413,12 +413,23 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     </button>
     <div class="ch-topics">
       <button class="nav-item" data-sec="containers" onclick="show('containers')">Containers & Cold Starts <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="coldstart" onclick="show('coldstart')">Cold Start Bottlenecks <span class="new-badge">new</span></button>
       <button class="nav-item" data-sec="autoscaling" onclick="show('autoscaling')">Autoscaling & Routing <span class="new-badge">new</span></button>
       <button class="nav-item" data-sec="multicloud" onclick="show('multicloud')">Multi-Cloud & Reliability <span class="new-badge">new</span></button>
       <button class="nav-item" data-sec="security" onclick="show('security')">Security & Compliance <span class="new-badge">new</span></button>
       <button class="nav-item" data-sec="observability" onclick="show('observability')">Observability & Deployment <span class="new-badge">new</span></button>
       <button class="nav-item" data-sec="clientside" onclick="show('clientside')">Client-Side & Streaming <span class="new-badge">new</span></button>
       <button class="nav-item" data-sec="quiz-ch9" onclick="show('quiz-ch9')">Chapter 9 Quiz</button>
+    </div>
+  </div>
+  <div class="ch-group" data-ch="ch10">
+    <button class="ch-header" onclick="toggleChapter('ch10')">
+      <span class="ch-arrow">&#9656;</span>
+      <span class="ch-title">DeepDives</span>
+      <span class="ch-count" id="count-ch10">0/1</span>
+    </button>
+    <div class="ch-topics">
+      <button class="nav-item" data-sec="sglang-dd" onclick="show('sglang-dd')">SGLang <span class="new-badge">new</span></button>
     </div>
   </div>
 </div>
@@ -4120,7 +4131,112 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   <p><strong>NVIDIA Inference Microservices (NIM)</strong> are containers where stages 2–4 are mostly pre-done: pre-quantized weights, pre-compiled TRT-LLM engine, autotuned for the target GPU. Pull, run, serve — no compile, no quantization. Trade-off is reduced flexibility (you serve what NVIDIA shipped, not your custom checkpoint), but for standard model deployments it cuts cold start to under a minute and removes the engineering work of building all of the above yourself.</p>
 
   <div class="resource-bar">📖 <a href="https://docs.nvidia.com/nim/" target="_blank">NVIDIA NIM</a><a href="https://github.com/awslabs/mountpoint-s3" target="_blank">Mountpoint-S3 for in-region weight cache</a></div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('quiz-ch8')">&#8592; Chapter 8 Quiz</a><a class="pn-link pn-next" onclick="show('autoscaling')">Autoscaling & Routing &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('quiz-ch8')">&#8592; Chapter 8 Quiz</a><a class="pn-link pn-next" onclick="show('coldstart')">Cold Start Bottlenecks &#8594;</a></div>
+</div>
+
+<div id="sec-coldstart" class="hidden">
+<div class="breadcrumb">Production &rsaquo; Cold Start Bottlenecks</div>
+<h2>Cold start bottlenecks <span class="new-badge">new</span></h2>
+  <p class="subtitle">A bottleneck-by-bottleneck breakdown of where the 1–5 minutes actually go, and the most-used techniques to claw seconds back from each one</p>
+
+  <div class="sec-h">What "cold start" actually means</div>
+  <p>"Cold start" is shorthand for the wall-clock time between <em>"a new replica is requested"</em> and <em>"that replica can serve its first token under SLO."</em> For a typical 7B–70B model on a modern GPU, that interval is dominated by five stacked bottlenecks, each of which can be attacked independently:</p>
+  <ul>
+    <li><strong>GPU procurement.</strong> Cloud scheduler placing a pod on a node with a free GPU, optionally provisioning a brand-new node from the cloud capacity pool.</li>
+    <li><strong>Container image pull.</strong> Fetching a 5–30 GB image from a registry, decompressing it, and unpacking the layers onto the node's filesystem.</li>
+    <li><strong>Weight load.</strong> Streaming model weights (often hundreds of GB) from object storage through host memory and into HBM.</li>
+    <li><strong>Engine warmup.</strong> CUDA context init, kernel-library JITs (FlashInfer, Triton, TVM-FFI, FlashAttention CUTE DSL), torch.compile, and CUDA graph capture.</li>
+    <li><strong>Multi-model swap.</strong> When the replica must change <em>which</em> model is hot — e.g., per-tenant routing — without a full restart.</li>
+  </ul>
+  <p>Three things are worth noticing before diving in. First: these stages are stacked, not parallel — every second saved earlier still pays. Second: the relative cost mix varies wildly with model size, image size, and instance type. A 7B vLLM image on a g4dn (T4) spends a different fraction of its budget in each phase than a 405B SGLang image on a B200. Third: the "lazy-load tax" is real — even after image pull "completes," many bytes only get faulted in when the engine first reads them, so the cost can leak across stages and look like engine warmup when it's really still image I/O.</p>
+  <div class="info">A useful rule of thumb measured on production setups: a vanilla cold start is in the 3–10 minute range; a well-optimized one without snapshots is in the 30–90 second range; a snapshot-restore path is sub-10 seconds. The biggest single jump in that ladder is GPU memory snapshots.</div>
+
+  <div class="sec-h">Bottleneck 1 — GPU procurement</div>
+  <p>The replica can't start until it has a GPU to start <em>on</em>. Two sub-costs hide here. The first is scheduling latency: the K8s scheduler matching a pod to an existing node with a free GPU, which is usually milliseconds. The second is node provisioning: when no node has a free GPU, the cluster autoscaler (Karpenter, Cluster Autoscaler, or EKS Auto Mode) calls the cloud provider to spin up a fresh GPU instance. New-node procurement is typically <strong>60–180 seconds</strong>, longer for constrained SKUs (H100 SXM, GB200) where you may queue against capacity pressure.</p>
+  <p><strong>Most-used techniques:</strong></p>
+  <ul>
+    <li><strong>Warm pools / standby nodes.</strong> Keep N idle GPU nodes pre-provisioned. Karpenter doesn't natively support warm pools, so the common workaround is a NodePool with a <code>minNodes</code> floor of small idle instances. You pay always-on capacity in exchange for cutting node-provision time to zero.</li>
+    <li><strong>min-replicas ≥ 1.</strong> Force one fully-warm pod per critical path. This is the cheapest way to never pay procurement cost on the first request — the autoscaler only sees the <em>second</em> burst.</li>
+    <li><strong>Capacity reservations.</strong> AWS Capacity Blocks for ML, GCP committed-use, Azure reserved instances. Doesn't reduce procurement <em>latency</em>, but eliminates Spot-style interruptions that would force re-procurement under load.</li>
+    <li><strong>Pre-warmed AMIs.</strong> Bake the GPU driver, container runtime, and the most-used base image into the AMI so a fresh node is "ready to pull the inference image" within ~30 s of EC2 boot, instead of 90+ s of post-boot bootstrap.</li>
+  </ul>
+  <div class="warn">Knative-style "scale to zero" doesn't reduce procurement cost — it just <em>defers</em> it to the first user. If your cold start is 4 minutes, scale-to-zero is unusable for any interactive workload. Pair it with a fast-restore primitive (snapshots, sleep mode) or skip it.</div>
+
+  <div class="sec-h">Bottleneck 2 — Container image pull</div>
+  <p>Modern LLM serving images are large and lazy-readable. A vLLM or SGLang image with CUDA, cuDNN, torch, flash-attn, xformers, and the engine itself easily lands in the 8–15 GB range; some TRT-LLM images push past 25 GB. The unpack step (gunzip + tar onto the node's gp3-style EBS volume) is usually <em>more</em> expensive than the network fetch — disk write throughput, not bandwidth, is the wall.</p>
+  <p>Worse, the engine doesn't read all those bytes at startup. Many imports are touched only on first request, so the cost of "image pull" leaks into "engine warmup" as page-faults pull blocks on demand. This <em>lazy-load tax</em> is what makes naive lazy-pull snapshotters (SOCI, Nydus, eStargz) underperform on inference workloads — vLLM imports a wide enough swath of its dependency tree at startup that lazy loaders save little.</p>
+  <p><strong>Most-used techniques:</strong></p>
+  <ul>
+    <li><strong>In-region registry mirror.</strong> Pull from your cloud's regional registry (ECR, Artifact Registry, ACR), not Docker Hub. Bandwidth jumps from ~100 MB/s to multi-GB/s. Single biggest one-line fix.</li>
+    <li><strong>Slim multi-stage images.</strong> Strip dev tools, compilers, test deps, and unused PyTorch wheels. A well-built vLLM runtime image is 4–6 GB instead of 15+. Doesn't beat caching, but compounds with everything else.</li>
+    <li><strong>EBS Fast Snapshot Restore (FSR).</strong> Pre-warm the gp3 blocks the image lives on so first-touch reads don't block on lazy hydration. Measured impact on a 9.5 GB vLLM image: cold start 588 s → 242 s (-59%). The trick is that FSR pre-warms the entire underlying volume, including blocks that will hold the unpacked image.</li>
+    <li><strong>Pre-baked AMIs.</strong> Embed the inference image into a custom AMI via packer. Skip the pull entirely. Costs an AMI build per image change; pairs well with FSR.</li>
+    <li><strong>NVMe instance store as image cache.</strong> g4dn / g6 / p4d come with local NVMe. Populate it from S3 once per node and serve image pulls from local 3–4 GB/s storage. Ephemeral, so you re-populate per node, but per-pod pulls are near-instant.</li>
+    <li><strong>Lazy-pull snapshotters (Nydus, eStargz, SOCI).</strong> Mount the image as a FUSE filesystem and fetch chunks on first read. Wins for "wide-fanout, narrow-readset" images; <em>loses</em> for vLLM-style workloads that touch most of the dependency tree at startup. Reach for these only on multi-image / multi-model nodes.</li>
+    <li><strong>Image streaming (Baseten BDN-style).</strong> Begin model load before image pull completes by overlapping the two stages. Not yet a standard primitive on EKS, but the pattern is on the production roadmap of every major inference platform.</li>
+  </ul>
+
+  <div class="sec-h">Bottleneck 3 — Weight load (S3 → host → GPU)</div>
+  <p>For anything bigger than a 7B, weight load is the single biggest contributor to cold start. There are three sub-stages and any of them can be the wall:</p>
+  <ul>
+    <li><strong>S3 (or equivalent) → host disk.</strong> 100–700 MB/s on a single thread; multi-GB/s if you parallelize. A 140 GB Llama-70B checkpoint over a single connection is multiple minutes.</li>
+    <li><strong>Host disk → host RAM.</strong> Bottlenecked by disk read throughput. gp3 caps around 1 GB/s tuned; NVMe instance store does 3–4 GB/s; FSR-warmed gp3 hits page cache at near-DRAM speed.</li>
+    <li><strong>Host RAM → GPU HBM.</strong> Bound by PCIe generation. Gen3 (T4) is ~16 GB/s peak; Gen4 (A100) ~32 GB/s; Gen5 (H100/B200) ~64 GB/s. For a 14 GB 7B model, this leg alone is ~1–5 s depending on PCIe gen.</li>
+  </ul>
+  <p>The default HuggingFace safetensors loader is serial across files, so on cold pods the engine often spends most of its weight-load budget waiting on a single stream. The fix is to parallelize all three legs aggressively.</p>
+  <p><strong>Most-used techniques:</strong></p>
+  <ul>
+    <li><strong>Run:AI Model Streamer</strong> (vLLM <code>--load-format runai_streamer</code>). Concurrent multi-stream reader that pulls safetensors shards from S3 or local disk into pinned host buffers, then async-copies to GPU. Reported ~2× faster weight load (Llama-3-8B on A10G: S3 → ready in ~23 s vs ~50 s with HF loader). One flag, vLLM-native, low risk. Highest-ROI Phase-5 lever for most teams.</li>
+    <li><strong>CoreWeave Tensorizer.</strong> Custom serialization format with a streaming loader. Pre-2024 SOTA; today Run:AI Streamer is generally faster and doesn't require re-serialization.</li>
+    <li><strong>NVMe instance store for the model cache.</strong> Mount local NVMe via initContainer, copy weights from S3 into it on first pod-on-node, point the engine's <code>--download-dir</code> at it. ~30–40 s shaved off when combined with Run:AI Streamer. Conflicts with FSR thinking — pick one.</li>
+    <li><strong>In-cluster distributed weight cache (Fluid, Alluxio, JuiceFS, Baseten BDN).</strong> Read-only cache of weights spread across cluster nodes; new pods pull peer-to-peer instead of from S3. Alibaba reported a 17 GB model load 90 s → 20 s. Pays for itself once you have many replicas pulling the same model.</li>
+    <li><strong>Tensor R-Fork (LMSYS, Dec 2025).</strong> GPU-Direct RDMA between a running and a new SGLang instance — the new pod's GPU pulls weights peer-to-peer from a warm pod's HBM. "Several minutes → mere seconds" for DeepSeek-R1. Requires RDMA fabric (InfiniBand or AWS EFA). Useless for first-pod-up; only helps scale-out from N to N+1.</li>
+    <li><strong>Mountpoint-S3 / CSI drivers.</strong> Mount the bucket as a filesystem and let the loader stream. Works, but a naive single-stream mount is no faster than <code>aws s3 cp</code> — combine with Run:AI Streamer for parallelism.</li>
+  </ul>
+
+  <div class="sec-h">Bottleneck 4 — Engine warmup</div>
+  <p>Once the weights are in HBM, the engine still isn't ready. There's a stack of one-time costs that all happen before the first token:</p>
+  <ul>
+    <li><strong>CUDA context creation</strong> — 1–3 s.</li>
+    <li><strong>Library imports + module init</strong> — torch, transformers, the engine. 5–15 s on a slow disk.</li>
+    <li><strong>torch.compile / torchinductor</strong> — fuses the forward pass into Triton kernels. 30–120 s the first time; cached on disk, so subsequent runs read from cache.</li>
+    <li><strong>FlashInfer / FlashAttention / TVM-FFI JITs</strong> — separate kernel libraries with separate caches. Even with torch.compile cache warm, these run on first request and cost real seconds. Doubleword's SGLang dissection showed this is the bucket Round-1 inventories typically miss.</li>
+    <li><strong>CUDA graph capture</strong> — vLLM and SGLang capture ~67 graphs covering decode batch shapes. ~10 s on T4-class, less on H100/B200. Skipping it costs 10–20% steady-state throughput forever, so almost no one skips.</li>
+  </ul>
+  <p><strong>Most-used techniques:</strong></p>
+  <ul>
+    <li><strong>Persist all JIT/AOT caches.</strong> Mount <code>~/.cache/vllm/torch_compile_cache</code> (and FlashInfer/Triton/TVM caches) on a PVC, bake into the AMI, or pull from S3 at startup. Tensorfuse measured 294 s → 82 s (-72%) by caching compile + weights together. The cache must match GPU + CUDA + PyTorch + engine version exactly — invalidate on any change.</li>
+    <li><strong>Pin to a recent vLLM release.</strong> The Q1 2026 vLLM tracking shows cold-start as a first-class metric and adds caching paths for kernel libraries beyond torch.compile. v0.19 will under-represent achievable savings; ≥0.7.x is the floor for serious cold-start work.</li>
+    <li><strong>vLLM compilation level knobs (<code>-O0</code> … <code>-O3</code>).</strong> Trades compile time for runtime perf. <code>-O0</code> is fastest start, slowest decode; <code>-O1</code> = piecewise CUDA graphs only. Useful for one-shot batch jobs where you'll never amortize the compile.</li>
+    <li><strong>Avoid <code>--enforce-eager</code> in steady state.</strong> Saves ~10 s now in exchange for 10–20% throughput loss forever — bad trade for production, fine for development.</li>
+    <li><strong>Torch Memory Saver (TMS) daemon.</strong> Pre-allocates 2 MB transparent hugepages and pipelines <code>cudaHostRegister</code> with H2D copy instead of doing them serially. Reported 38 GB/s effective on PCIe Gen5. SGLang-integrated; vLLM integration is rougher. Bounded by PCIe gen — at Gen3 the ceiling is ~2.4 GB/s, so the win shrinks on T4-class hardware.</li>
+    <li><strong>NVIDIA NIM.</strong> Pre-baked containers where stages 2–4 are mostly pre-done — quantized weights, compiled TRT-LLM engine, autotuned kernels. Cuts cold start to under a minute at the cost of using NVIDIA-shipped checkpoints rather than your own.</li>
+  </ul>
+  <div class="warn">TRT-LLM's compile path is ~28 minutes per (model, config). Strict no for any iterative dev flow. The shipped engine plan loads fast (~10 s), but you eat the compile cost any time you change model, batch shape ranges, or quantization. Reconsider only when shipping a frozen model at fleet scale.</div>
+
+  <div class="sec-h">Bottleneck 5 — The "and now serve a different model" problem</div>
+  <p>Multi-tenant inference platforms hit a sixth bottleneck that doesn't fit the four-phase model: <em>swapping which model is hot on a warm GPU.</em> A full restart through bottlenecks 1–4 is unacceptable for tenant routing where the request itself selects the model. Two families of techniques target this directly, and they are the most active research area in 2025–2026 cold-start work.</p>
+  <p><strong>vLLM Sleep Mode.</strong> Keep the vLLM process alive, free GPU memory by either offloading weights to CPU RAM (Level 1) or discarding them entirely (Level 2). On wake, reload from CPU/disk. Reported 18–200× faster than full restart, and 61–88% faster <em>first inference</em> than a true cold start. Drop-in for vLLM 0.19+. The right primary strategy for "warm process per node, hot-swap models per request" patterns.</p>
+  <p><strong>GPU memory snapshots (Modal-style, CRIUgpu, vLLM RFC #34303).</strong> Boot vLLM once, run full warmup (compile, graph capture, weight load), then snapshot the entire CUDA process state — VRAM contents, kernel modules, captured graphs, host memory — to disk. On cold start, restore the snapshot instead of re-running init. Modal's published Qwen2.5 example: <strong>45 s → 5 s (9×).</strong> Mistral 3 case study: 10×. CRIUgpu (CRIU 4.0 + NVIDIA's <code>cuda-checkpoint</code> userspace tool) is the open-source primitive that all of these stack on; it's now production at Modal and MemVerge, and Podman ships native support.</p>
+  <p>The trade-offs are real. Snapshot images are large (model weights × ~1.05). The technique is per-driver-version brittle — cuda-checkpoint requires display driver 570+, with 580+ for full device migration. NCCL communicators don't survive suspend, so multi-GPU restore needs reinit and tensor-parallel vLLM (TP > 1) is fragile today. Single-GPU is the safe path for now.</p>
+  <p>The vLLM RFC for native suspend/resume HTTP endpoints (#34303) was opened Feb 2026 and hasn't moved toward merge. Until it lands, you either pay Modal for the managed snapshot service or build the orchestration yourself on top of CRIUgpu. Both are credible paths in 2026; the choice is build-effort vs monthly bill.</p>
+
+  <div class="sec-h">A stack-up that actually works</div>
+  <p>Putting the levers together for a typical 7B vLLM workload on EBS-backed gp3, baseline ~600 s cold start:</p>
+  <ul>
+    <li>In-region registry + slim image: ~600 → ~450 s.</li>
+    <li>+ Pre-baked AMI + EBS FSR: ~450 → ~240 s. (Phase 4.1 measurement.)</li>
+    <li>+ Run:AI Model Streamer: ~240 → ~200 s.</li>
+    <li>+ Multi-compiler cache persistence (torch.compile + FlashInfer + Triton): ~200 → ~170 s.</li>
+    <li>+ NVMe instance store for weights: ~170 → ~140 s.</li>
+    <li>+ GPU memory snapshots (Modal or CRIUgpu): ~140 → ~5–10 s.</li>
+  </ul>
+  <p>The order matters — early items pay for themselves no matter what comes next, while snapshots subsume most of the earlier work and turn the cold-start problem into "how big is the snapshot artifact and how fast can you read it from the snapshot store." Snapshots are the only technique that takes a 7B+ replica to <em>truly sub-second</em> from a fully cold state; everything else is shaving seconds off a multi-stage pipeline.</p>
+
+  <div class="info">A useful triage rule: don't optimize anything below your dominant bottleneck. If you're spending 4 minutes in image pull because Docker Hub is throttling you, no amount of Run:AI Streamer or torch.compile caching matters. Measure each phase first, then attack the largest one.</div>
+
+  <div class="resource-bar">📖 <a href="https://modal.com/blog/gpu-mem-snapshots" target="_blank">Modal GPU Memory Snapshots</a><a href="https://developer.nvidia.com/blog/reducing-cold-start-latency-for-llm-inference-with-nvidia-runai-model-streamer/" target="_blank">Run:AI Model Streamer</a><a href="https://blog.doubleword.ai/fast-sglang-starts" target="_blank">Doubleword: Fast SGLang Starts</a><a href="https://vllm.ai/blog/sleep-mode" target="_blank">vLLM Sleep Mode</a><a href="https://github.com/vllm-project/vllm/issues/34303" target="_blank">vLLM RFC #34303 — CUDA checkpoint/restore</a><a href="https://arxiv.org/abs/2502.16631" target="_blank">CRIUgpu paper</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('containers')">&#8592; Containers & Cold Starts</a><a class="pn-link pn-next" onclick="show('autoscaling')">Autoscaling & Routing &#8594;</a></div>
 </div>
 
 <div id="sec-autoscaling" class="hidden">
@@ -4169,7 +4285,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   <p>For latency-critical APIs serving 24/7, scale-to-zero is wrong. Keep <code>min replicas ≥ 1</code> and accept the floor cost.</p>
 
   <div class="resource-bar">📖 <a href="https://github.com/Azure/kaito" target="_blank">KAITO — K8s for LLM workloads</a><a href="https://docs.vllm.ai/en/latest/serving/distributed_serving.html" target="_blank">vLLM production deployment</a></div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('containers')">&#8592; Containers & Cold Starts</a><a class="pn-link pn-next" onclick="show('multicloud')">Multi-Cloud & Reliability &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('coldstart')">&#8592; Cold Start Bottlenecks</a><a class="pn-link pn-next" onclick="show('multicloud')">Multi-Cloud & Reliability &#8594;</a></div>
 </div>
 
 <div id="sec-multicloud" class="hidden">
@@ -4361,6 +4477,382 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
 <div class="prev-next"><a class="pn-link pn-prev" onclick="show('clientside')">&#8592; Client-Side & Streaming</a></div>
 </div>
 
+<div id="sec-sglang-dd" class="hidden">
+<div class="breadcrumb">DeepDives &rsaquo; SGLang</div>
+<h2>SGLang — a NotebookLM-style deep dive <span class="new-badge">new</span></h2>
+  <p class="subtitle">A NotebookLM-style five-segment deep dive grounded entirely in six cited sources: the SGLang paper, the LMSYS launch blog, the GitHub README, Ying Sheng's CMU lecture, an implementation walkthrough, and a compressed-FSM explainer. ~50 minutes of audio.</p>
+
+  <div class="info"><strong>How to read this section.</strong> Every concrete claim is attributed inline to one of six sources, marked <code>[paper]</code> (Sheng et al., arXiv 2312.07104, NeurIPS'24), <code>[blog]</code> (LMSYS launch blog, Jan 2024), <code>[readme]</code> (sgl-project/sglang README), <code>[cmu]</code> (Ying Sheng's CMU lecture PDF), <code>[sugiv]</code> (blog.sugiv.fyi implementation walkthrough), <code>[aimerge]</code> (theaimerge compressed-FSM explainer). When a number is workload-dependent or version-specific, the source's qualifier is preserved. Segment 5 contains an editorial extension to the NIM-Factory framing — clearly marked, because none of the six sources cover NIM, Dynamo, or NIXL directly.</div>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 1 — What SGLang is and why it exists  (~5 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 1 — What SGLang is, and why a co-designed runtime exists</div>
+  <p>SGLang is described by its CMU lecture as "a fast serving framework for large language models and vision language models," and on its own GitHub page as "an open-source inference engine for LLMs" <code>[cmu]</code><code>[readme]</code>. But the launch blog frames it differently: SGLang is "a domain-specific language embedded in Python" with primitives that "handle intra-program parallelism and batching" — language inspired by Guidance, but extended for runtime co-design <code>[blog]</code>. Both descriptions are true. The thing has a frontend (the SGLang DSL) and a backend (the runtime), and they were built together.</p>
+  <p>The frontend's primitives, per the launch blog <code>[blog]</code>:</p>
+  <ul>
+    <li><code>fork</code> — "creates multiple parallel copies of a prompt," giving the runtime an explicit signal that N children share an ancestor.</li>
+    <li><code>gen</code> — "invokes an LLM generation and stores the result in a variable," with non-blocking execution that enables parallel background calls.</li>
+    <li>Variable retrieval via <code>[variable_name]</code> for reading prior generation results.</li>
+    <li><code>choices</code> — "imposes constraints on the generation," restricting outputs to a fixed set.</li>
+    <li><code>run</code> — executes an SGLang function with arguments.</li>
+  </ul>
+  <p>And the language can run in two modes: <em>interpreter mode</em> (eager execution) or <em>compiler mode</em>, which traces the program into a dataflow graph and enables "code movement, instruction selection, and auto-tuning" <code>[blog]</code>. The point is not to replace Python; it is to surface enough structure that the runtime can see what the program is doing — which calls share a prefix, which branches are independent, which spans are constrained — and then exploit that.</p>
+  <p>The runtime's architecture, per the CMU lecture, is small <code>[cmu]</code>: a Server containing an API server / Tokenizer, a Detokenizer, and a Model Worker. The Model Worker holds three things: a <strong>memory pool</strong>, a <strong>radix tree cache</strong>, and an <strong>attention backend</strong>. The Client side exposes a Native generation API, an OpenAI-compatible API, and the structured language frontend. The CMU slide labels this "Lightweight and customizable codebase in Python/PyTorch" — and that compactness is part of why the project moves quickly.</p>
+  <p>The reason a structured frontend matters is that real LLM applications are not single self-contained prompts. The CMU lecture characterizes the dominant pattern as "complex pipeline with multiple LLM calls" — chained calls (a follow-up question reuses the previous answer) and parallel calls (one question fans out to several answers, then a select step) <code>[cmu]</code>. The lecture lists three concrete structures: multi-turn chat (where the chat history grows and is reusable across turns), few-shot learning (where the few-shot examples are shared across many prompts), and tree search with LLM agents (where every node of the search tree shares an ancestor's history with its siblings) <code>[cmu]</code>. In all three, the KV cache from earlier calls is reusable — and the punchline of the lecture's first half is "<strong>Existing systems: Discard KV cache after an LLM call finishes. Ours: Maintain the KV cache of all LLM calls in a radix tree (compact prefix tree)</strong>" <code>[cmu]</code>.</p>
+  <p>Two facts worth absorbing before going deeper:</p>
+  <ul>
+    <li><strong>The runtime ships an OpenAI-compatible API</strong> — you do not need to use the DSL to benefit <code>[cmu]</code>. The lecture's architecture diagram shows three client entry points: native API, OpenAI-compatible API, and the language frontend. The runtime works either way.</li>
+    <li><strong>Production scale.</strong> The CMU lecture says SGLang "serves the production and research workloads at xAI (100K+ GPUs)" <code>[cmu]</code>. The README puts the broader number at "powering over 400,000 GPUs worldwide" and "generating trillions of tokens in production each day," with users including xAI, AMD, NVIDIA, Intel, LinkedIn, Cursor, Oracle Cloud, Google Cloud, Microsoft Azure, AWS <code>[readme]</code>. The lecture also lists 400+ OSS contributors <code>[cmu]</code>.</li>
+  </ul>
+  <p>The version history from the CMU lecture is also worth seeing in one place, because it shows what the project has invested in over its first year <code>[cmu]</code>:</p>
+  <ul>
+    <li><strong>v0.1 (Jan 2024):</strong> 5× higher throughput with automatic KV cache reuse; 3× faster grammar-based constrained decoding.</li>
+    <li><strong>v0.2 (July 2024):</strong> 3× higher throughput with low-overhead CPU runtime.</li>
+    <li><strong>v0.3 (Sept 2024):</strong> 7× faster Triton attention backend for custom attention variants (DeepSeek MLA); 1.5× lower latency with torch.compile.</li>
+    <li><strong>v0.4 (Dec 2024):</strong> Zero-overhead CPU scheduler and structured outputs; cache-aware load balancer; "fastest DeepSeek inference."</li>
+  </ul>
+  <p>The trajectory tells the story: KV reuse (v0.1) → CPU scheduling (v0.2/v0.4) → MoE / MLA acceleration (v0.3) → cluster-level cache awareness (v0.4). Each version solves a different bottleneck. The next four segments walk through the four major techniques that the CMU lecture singles out.</p>
+
+  <div class="viz-flow">
+    <div class="viz-box accent"><strong>v0.1 · Jan '24</strong>5× KV reuse<br>3× grammar decode</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box accent"><strong>v0.2 · Jul '24</strong>3× CPU runtime</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box accent"><strong>v0.3 · Sep '24</strong>7× MLA Triton<br>1.5× torch.compile</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box accent"><strong>v0.4 · Dec '24</strong>Zero-overhead sched<br>Cache-aware router</div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 2 — RadixAttention deep dive  (~10 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 2 — RadixAttention, the headline trick</div>
+  <p>The CMU lecture's framing is direct <code>[cmu]</code>: the KV cache is "some reusable intermediate tensors," it "can be very large (&gt;20GB, larger than model weights)," and it "only depends on the prefix tokens." Existing systems discard it when an LLM call finishes. SGLang keeps it — for every call, in a radix tree — and reuses it whenever a new request shares a prefix.</p>
+
+  <div class="sec-h" style="font-size:14px;">What the data structure looks like</div>
+  <p>The launch blog describes RadixAttention as a "space-efficient prefix tree" where "edges can be labeled with sequences of elements of varying lengths" <code>[blog]</code>. KV tensors are stored on the GPU in paged layout (one token per page); the tree structure lives on the CPU "with minimal overhead" <code>[blog]</code>. The blog explicitly notes that RadixAttention is "compatible with continuous batching and paged attention," and that prefix matching is automatic — the user does not configure anything <code>[blog]</code>.</p>
+  <p>The implementation walkthrough adds the per-node detail <code>[sugiv]</code>: each TreeNode holds <code>children = defaultdict(TreeNode)</code> for branching on token IDs, an optional <code>value: torch.Tensor</code> for KV cache contents, plus <code>last_access_time</code> and <code>hit_count</code> for eviction bookkeeping. Prefix matching is the obvious tree-walk: descend by token ID until the next token diverges, complexity O(prefix_length).</p>
+  <p>The CMU lecture walks through an animated five-frame insertion example <code>[cmu]</code>. The tree starts empty. After one request ("You are a helpful assistant. User: Hello! Assistant: Hi!"), the tree is a single chain. A second request that extends with "User: Solve this problem... Assistant: Sure!..." extends that chain. A third request branches at the system prompt — "User: What can you do?..." — splitting the tree at the divergence point so the system prefix is shared. The fifth frame shows eviction: an idle leaf is freed, marked "evicted," when memory pressure hits. The lecture states the cache "handles trees with hundreds of thousands of tokens" <code>[cmu]</code>.</p>
+
+  <div class="viz-grid viz-grid-3">
+    <div class="viz-card">
+      <div class="viz-card-title" style="color:#94a3b8;">Frame 1 — Empty</div>
+      <pre style="font-size:11px;color:#64748b;margin:0;line-height:1.5;">·</pre>
+      <p style="font-size:11px;color:#64748b;margin-top:8px;">Cache is empty. No prior call to share with.</p>
+    </div>
+    <div class="viz-card">
+      <div class="viz-card-title" style="color:#93c5fd;">Frame 2–3 — Linear chain</div>
+<pre style="font-size:11px;color:#cbd5e1;margin:0;line-height:1.5;">[ Sys: helpful assistant ]
+        │
+[ User: Hello! / Assistant: Hi! ]
+        │
+[ User: Solve... / Assistant: Sure!... ]</pre>
+      <p style="font-size:11px;color:#64748b;margin-top:8px;">Two requests, where the second extends the first. Each new turn appends to the same chain — no branching yet.</p>
+    </div>
+    <div class="viz-card">
+      <div class="viz-card-title" style="color:#34d399;">Frame 4 — Branch at divergence</div>
+<pre style="font-size:11px;color:#cbd5e1;margin:0;line-height:1.5;">       [ Sys: helpful assistant ]
+              ╱           ╲
+[ User: Hello! / Hi! ]   [ User: What can you do? / I can... ]
+        │
+[ User: Solve... / Sure!... ]</pre>
+      <p style="font-size:11px;color:#64748b;margin-top:8px;">A third request shares only the system prompt. The tree splits at the divergence token. <strong>The system prefix is stored exactly once</strong> and shared by both branches.</p>
+    </div>
+  </div>
+  <div class="viz-grid viz-grid-2">
+    <div class="viz-card" style="border-color:#dc2626;">
+      <div class="viz-card-title" style="color:#fca5a5;">Frame 5 — LRU leaf eviction</div>
+<pre style="font-size:11px;color:#cbd5e1;margin:0;line-height:1.5;">       [ Sys: helpful assistant ]
+              ╱           ╲
+[ User: Hello! / Hi! ]   [ User: What can... / I can... ]
+        │                          │
+   <span style="color:#fca5a5;">[ X evicted ]</span>          [ User: Write a story... ]</pre>
+      <p style="font-size:11px;color:#64748b;margin-top:8px;">Memory pressure → recursive leaf-node LRU. Only the leaf is freed; the shared system-prompt ancestor is preserved as long as any descendant is in use <code>[blog]</code>.</p>
+    </div>
+    <div class="viz-card" style="border-color:#3b82f6;">
+      <div class="viz-card-title" style="color:#93c5fd;">Why it works</div>
+      <p style="font-size:12px;color:#cbd5e1;margin:0 0 6px;">• <strong>Shared prefixes physically share an ancestor path</strong> — stored once, regardless of how many branches descend from it.</p>
+      <p style="font-size:12px;color:#cbd5e1;margin:0 0 6px;">• <strong>O(prefix_length)</strong> for prefix matching, insert, and eviction <code>[sugiv]</code>.</p>
+      <p style="font-size:12px;color:#cbd5e1;margin:0 0 6px;">• <strong>Handles trees with hundreds of thousands of tokens</strong> — same data structure, same complexity <code>[cmu]</code>.</p>
+      <p style="font-size:12px;color:#cbd5e1;margin:0;">• KV tensors live on the GPU in paged layout (one token/page); the tree itself lives on the CPU "with minimal overhead" <code>[blog]</code>.</p>
+    </div>
+  </div>
+
+  <div class="sec-h" style="font-size:14px;">Eviction</div>
+  <p>The launch blog specifies the eviction policy explicitly: "Least Recently Used (LRU) eviction policy" with "recursive leaf-node eviction" <code>[blog]</code>. The "recursive leaf" framing is important — the cache only ever evicts leaves of the tree, which preserves shared ancestors as long as any descendant is in use. The implementation walkthrough mentions "LRU eviction with cache-aware scheduling" tracked via <code>last_access_time</code> on each node <code>[sugiv]</code>.</p>
+
+  <div class="sec-h" style="font-size:14px;">Why this beats discarding the cache — the headline benchmark</div>
+  <p>The launch blog's headline result is "up to 5 times higher throughput" versus the baselines, with the system "outperforming the baseline systems in all benchmarks" tested <code>[blog]</code>. The CMU lecture restates the v0.1 milestone the same way: "5x higher throughput with automatic KV cache reuse" <code>[cmu]</code>. Both attribute it to the same nine workloads.</p>
+  <p>The exact setup, per the launch blog <code>[blog]</code>:</p>
+  <ul>
+    <li><strong>Hardware:</strong> Llama-7B on a single NVIDIA A10G (24 GB, FP16); Mixtral-8×7B on 8× A10G with tensor parallelism (FP16).</li>
+    <li><strong>Baselines:</strong> vLLM v0.2.5, Guidance v0.1.8, Hugging Face TGI v1.3.0.</li>
+    <li><strong>Workloads:</strong> MMLU (5-shot), HellaSwag (20-shot), ReAct Agent, Tree-of-Thought (GSM-8K), JSON Decode (Wikipedia extraction), Chat (short and long, 4-turn), DSPy RAG, LLaVA Bench.</li>
+  </ul>
+  <p>The CMU lecture's bar chart (sourced back to the v0.1 blog) shows SGLang at normalized throughput 1.0 on every workload, with the second-best baseline ranging from ~0.94 (vLLM on Chat Long) down to ~0.03 (vLLM on Tree-of-Thought) <code>[cmu]</code>. The gap is largest exactly where structure exists — agents and ToT — and smallest on plain long chat.</p>
+
+  <div class="sec-h" style="font-size:14px;">Cache hit rates by workload</div>
+  <p>The implementation walkthrough provides the often-cited cache hit rate table comparing vLLM PagedAttention to SGLang RadixAttention <code>[sugiv]</code>:</p>
+  <table>
+    <tr><th>Workload</th><th>vLLM PagedAttention</th><th>SGLang RadixAttention</th></tr>
+    <tr><td>Few-Shot Learning</td><td>15–25%</td><td>85–95%</td></tr>
+    <tr><td>Multi-Turn Chat</td><td>10–20%</td><td>75–90%</td></tr>
+    <tr><td>Code Analysis</td><td>5–15%</td><td>60–80%</td></tr>
+    <tr><td>Single Requests</td><td>0%</td><td>0% (equivalent)</td></tr>
+  </table>
+  <p>The "Single Requests" row is the important honest case: when there is no prefix sharing in the workload, both systems report 0% hit and SGLang has nothing to gain. The walkthrough explicitly flags this — there is no separate breakout for agents or tree-of-thought beyond what is implicit in the workload categories.</p>
+
+  <div class="sec-h" style="font-size:14px;">Throughput numbers from a more recent comparison</div>
+  <p>The implementation walkthrough also provides per-task throughput in tokens/second, comparing vLLM v0.6.2 to SGLang v0.4 <code>[sugiv]</code>:</p>
+  <table>
+    <tr><th>Task</th><th>vLLM v0.6.2</th><th>SGLang v0.4</th><th>Speedup</th></tr>
+    <tr><td>MMLU (5-shot)</td><td>1,420</td><td>4,250</td><td>3.0×</td></tr>
+    <tr><td>Chat (multi-turn)</td><td>890</td><td>4,180</td><td>4.7×</td></tr>
+    <tr><td>JSON Decode</td><td>580</td><td>2,900</td><td>5.0×</td></tr>
+    <tr><td>Code Generation</td><td>1,200</td><td>3,600</td><td>3.0×</td></tr>
+    <tr><td>Few-shot Learning</td><td>650</td><td>2,850</td><td>4.4×</td></tr>
+  </table>
+  <p>Same source reports first-token latency 53–73% faster than vLLM across batch sizes 1–32 <code>[sugiv]</code>.</p>
+  <p>Two important caveats from the sources themselves. First, the launch blog's 5× number was measured against vLLM v0.2.5, which predates vLLM's prefix-cache support — modern vLLM is a stronger baseline than that comparison reflects <code>[blog]</code>. Second, every cited number is workload-dependent; the launch blog's own bar chart shows the gap shrinking on Chat Long, where the prefix sharing is less dominant relative to the per-turn generation <code>[cmu]</code>.</p>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 3 — The other three techniques  (~10 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 3 — The other three techniques</div>
+  <p>The CMU lecture lists four major techniques in total: (1) RadixAttention, which we just covered, (2) cache-aware load balancing via SGL-Router, (3) zero-overhead CPU scheduling, and (4) hierarchical KV cache <code>[cmu]</code>. We will cover the second and third in detail because the lecture does, and we will cover the fourth briefly because the lecture itself marks the slide "Skipped" — the cited sources do not give us deep content on it. Structured outputs is a separate thread that is not in the CMU lecture's four but is explicitly listed as a v0.4 capability and a paper contribution <code>[cmu]</code><code>[paper]</code>; we will cover it last in this segment.</p>
+
+  <div class="sec-h" style="font-size:14px;">Cache-aware load balancing — SGL-Router</div>
+  <p>The CMU lecture states the problem and the comparison explicitly <code>[cmu]</code>. Round-Robin Data Parallel (SGLang v0.3) routes requests across replicas without any awareness of which replica has which prefix cached. The lecture annotates this case: "Not cache aware, ~20% Cache Hit Rate." The replacement, Cache-Aware Data Parallel (SGLang v0.4), introduces an "Approximate Tree" at the router that mirrors the actual radix trees on the workers, and routes each request to the replica with the best matching prefix. The lecture annotates this case: "Cache aware, ~75% Cache Hit Rate."</p>
+  <p>The lecture provides a concrete head-to-head table for a workload with two prefixes (Prefix 1 routed to replicas 1–2, Prefix 2 routed to replicas 3–4) <code>[cmu]</code>:</p>
+  <table>
+    <tr><th></th><th>Round robin</th><th>Cache-aware load balancer</th></tr>
+    <tr><td>Throughput (token/s)</td><td>82,665</td><td>158,596</td></tr>
+    <tr><td>Cache hit rate</td><td>20%</td><td>75%</td></tr>
+  </table>
+  <p>That is roughly 1.92× throughput from routing alone, with the underlying engine unchanged. The implementation walkthrough adds detail on the routing function: SGL-Router is implemented in Rust and uses an approximate radix tree at the router level (with INSERT and EVICT messages from the workers) to score candidate replicas as <code>score = cache_hit_rate * 2.0 - load_factor</code>, then routes to the highest-scoring replica <code>[sugiv]</code>. The same source reports an aggregate "1.9× throughput improvement with 3.8× higher cache hit rates" when the load balancer is enabled <code>[sugiv]</code>.</p>
+
+  <div class="viz-grid viz-grid-2">
+    <div class="viz-card" style="border-color:#dc2626;">
+      <div class="viz-card-title" style="color:#fca5a5;">Round-robin (SGLang v0.3)</div>
+      <p style="font-size:12px;margin-bottom:10px;">Incoming prefixes scattered across all workers — every worker holds a bit of every prefix.</p>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:10px;font-weight:700;">
+        <div style="background:#1e3a5f;color:#93c5fd;padding:6px 10px;border-radius:6px;border:1px solid #3b82f6;">W1: P1 P2</div>
+        <div style="background:#1e3a5f;color:#93c5fd;padding:6px 10px;border-radius:6px;border:1px solid #3b82f6;">W2: P1 P2</div>
+        <div style="background:#1e3a5f;color:#93c5fd;padding:6px 10px;border-radius:6px;border:1px solid #3b82f6;">W3: P1 P2</div>
+        <div style="background:#1e3a5f;color:#93c5fd;padding:6px 10px;border-radius:6px;border:1px solid #3b82f6;">W4: P1 P2</div>
+      </div>
+      <div style="margin-top:12px;font-size:13px;">
+        <div style="color:#fca5a5;">Cache hit rate ≈ <strong>20%</strong></div>
+        <div style="color:#fca5a5;">Throughput ≈ <strong>82,665 tok/s</strong></div>
+      </div>
+    </div>
+    <div class="viz-card" style="border-color:#059669;">
+      <div class="viz-card-title" style="color:#34d399;">Cache-aware (SGLang v0.4)</div>
+      <p style="font-size:12px;margin-bottom:10px;">Approximate-tree at router → each prefix sticks to a worker subset.</p>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:10px;font-weight:700;">
+        <div style="background:#0f1e3a;color:#93c5fd;padding:6px 10px;border-radius:6px;border:1px solid #3b82f6;">W1: P1</div>
+        <div style="background:#0f1e3a;color:#93c5fd;padding:6px 10px;border-radius:6px;border:1px solid #3b82f6;">W2: P1</div>
+        <div style="background:#1a1505;color:#fbbf24;padding:6px 10px;border-radius:6px;border:1px solid #d97706;">W3: P2</div>
+        <div style="background:#1a1505;color:#fbbf24;padding:6px 10px;border-radius:6px;border:1px solid #d97706;">W4: P2</div>
+      </div>
+      <div style="margin-top:12px;font-size:13px;">
+        <div style="color:#34d399;">Cache hit rate ≈ <strong>75%</strong></div>
+        <div style="color:#34d399;">Throughput ≈ <strong>158,596 tok/s</strong> (1.92× ↑)</div>
+      </div>
+    </div>
+  </div>
+  <p>The framing that lands for an infrastructure audience: this is session affinity for KV state. Round-robin is the right default for stateless services; cached LLM serving is not stateless, so round-robin trashes the cache. The lecture's two phrases — "Not cache aware, ~20%" versus "Cache aware, ~75%" — are the whole story.</p>
+
+  <div class="sec-h" style="font-size:14px;">Zero-overhead CPU scheduling</div>
+  <p>The CMU lecture is blunt: "An unoptimized inference engine can waste more than 50% time on CPU scheduling" <code>[cmu]</code>. The supporting chart compares vLLM v0.5.4 to SGLang v0.3 on Llama 1.3B, plotting average iteration time in ms <code>[cmu]</code>:</p>
+  <ul>
+    <li><strong>vLLM v0.5.4:</strong> ~32 ms per iteration, of which ~16 ms is GPU computation and ~16 ms is CPU overhead. Roughly 50/50.</li>
+    <li><strong>SGLang v0.3:</strong> ~17 ms per iteration, of which ~16 ms is GPU computation and ~1 ms is CPU overhead. CPU overhead is essentially gone.</li>
+  </ul>
+  <p>Same GPU work, half the wall-clock. The chart cites <code>mlsys.wuklab.io/posts/scheduling_overhead/</code> as the underlying analysis <code>[cmu]</code>.</p>
+
+  <div class="viz-timeline">
+    <div class="viz-row"><span class="viz-label">vLLM v0.5.4</span><div class="viz-bar decode" style="width:160px;">GPU 16 ms</div><div class="viz-bar blocked" style="width:160px;">CPU overhead 16 ms</div><span style="font-size:11px;color:#fca5a5;margin-left:10px;font-weight:600;">≈ 32 ms / iter</span></div>
+    <div class="viz-row"><span class="viz-label">SGLang v0.3</span><div class="viz-bar decode" style="width:160px;">GPU 16 ms</div><div class="viz-bar blocked" style="width:10px;"></div><span style="font-size:11px;color:#34d399;margin-left:10px;font-weight:600;">≈ 17 ms / iter — CPU overhead ≈ 1 ms</span></div>
+    <div class="viz-legend">
+      <div class="viz-legend-item"><div class="viz-legend-dot" style="background:#059669;"></div>GPU compute</div>
+      <div class="viz-legend-item"><div class="viz-legend-dot" style="background:#dc2626;"></div>CPU scheduling overhead</div>
+      <div class="viz-legend-item" style="color:#94a3b8;">Source: CMU lecture, Llama 1.3B</div>
+    </div>
+  </div>
+  <p>What does the CPU scheduler actually do, that takes that much time? The lecture lists the jobs <code>[cmu]</code>:</p>
+  <ul>
+    <li>Receive input messages.</li>
+    <li>Stream model outputs.</li>
+    <li>Check the stop conditions.</li>
+    <li>Maintain the radix tree and run prefix matching.</li>
+    <li>Allocate memory for the next batch.</li>
+  </ul>
+  <p>And the design ideas behind the overlapped scheduler <code>[cmu]</code>:</p>
+  <ul>
+    <li>"Resolve the dependency by delaying the stop condition check" — break the synchronous tie between detecting "this request finished" and dispatching the next batch, so the next batch can start without waiting.</li>
+    <li>"Use CUDA events and streams to do fine-grained scheduling."</li>
+  </ul>
+  <p>The technique itself: instead of a Blocking Scheduler (Scheduler runs → Model Worker runs → Scheduler runs → Model Worker runs, serialized), an Overlapped Scheduler runs the next-iteration scheduling concurrently with the current-iteration model work, so by the time the GPU finishes step N the next batch is already prepared <code>[cmu]</code>. The lecture credits the conceptual lineage to NanoFlow (Kan Zhu et al.).</p>
+
+  <div class="viz-timeline">
+    <div class="viz-row"><span class="viz-label">Blocking</span><div class="viz-bar tool" style="width:60px;">Sched</div><div class="viz-bar decode" style="width:90px;">Worker</div><div class="viz-bar tool" style="width:60px;">Sched</div><div class="viz-bar decode" style="width:90px;">Worker</div><div class="viz-bar tool" style="width:60px;">Sched</div><div class="viz-bar decode" style="width:90px;">Worker</div></div>
+    <div class="viz-row"><span class="viz-label">Overlapped</span><div class="viz-bar tool" style="width:60px;">Sched</div><div class="viz-bar tool" style="width:60px;">Sched</div><div class="viz-bar tool" style="width:60px;">Sched</div></div>
+    <div class="viz-row"><span class="viz-label" style="opacity:0;">.</span><div class="viz-bar idle" style="width:60px;"></div><div class="viz-bar decode" style="width:90px;">Worker</div><div class="viz-bar decode" style="width:90px;">Worker</div><div class="viz-bar decode" style="width:90px;">Worker</div></div>
+    <div class="viz-legend">
+      <div class="viz-legend-item"><div class="viz-legend-dot" style="background:#6b21a8;"></div>CPU scheduler</div>
+      <div class="viz-legend-item"><div class="viz-legend-dot" style="background:#059669;"></div>GPU model worker</div>
+      <div class="viz-legend-item" style="color:#94a3b8;">In overlapped mode, scheduler for batch N+1 runs <em>during</em> worker step N</div>
+    </div>
+  </div>
+  <p>The lecture's own profiling result for the optimized scheduler: "Zero CPU time according to the nsight profiler" — the trace shows 99.8% kernels and 0.2% memory, with no visible CPU bubble between kernel launches <code>[cmu]</code>. And on a downstream Llama 3.2 3B benchmark on H100, SGLang v0.4 reaches ~5,500 output tokens/s versus a SOTA OSS baseline at ~4,100 tok/s — "1.3× faster than SOTA OSS baseline" <code>[cmu]</code>. SGLang v0.3 sits between them at ~4,900 tok/s, showing the v0.3 → v0.4 scheduler progression even after the original wins.</p>
+  <p>The implementation walkthrough phrases the same idea at the API level <code>[sugiv]</code>: SGLang uses <code>torch.cuda.Event()</code> to mark GPU work boundaries and overlaps CPU batch preparation with GPU execution via futures. The same source reports GPU utilization moving from "78–85% (non-overlapped)" to "95–98% (zero-overhead)" — consistent with the wall-clock drop in the lecture's iteration-time chart.</p>
+
+  <div class="sec-h" style="font-size:14px;">Structured outputs (compressed FSM)</div>
+  <p>Constrained decoding — making the model emit valid JSON, YAML, or regex-matching text — is implemented in the conventional approach by compiling the grammar to a finite state machine and, at each decode step, applying logit bias to disallow tokens that would leave the valid set. The compressed-FSM explainer summarizes the standard approach <code>[aimerge]</code>: "The FSM method converts a JSON schema into a regular expression," then "for each state in the FSM, it calculates the possible transitions," then "it identifies the acceptable next tokens" and applies logit bias to constrain output, while "the FSM tracks the current state during decoding" to maintain validity.</p>
+  <p>The compressed variant — referenced in the explainer as "Jump-Forward decoding using Compressed FSM" — is described at a high level only <code>[aimerge]</code>; the explainer does not provide implementation depth or quantitative comparisons, deferring to "this guide from SGLang" for benchmarks. What the cited sources do tell us about magnitude is on the structured-decoding axis overall: the CMU lecture's v0.1 milestone says "<strong>3× faster grammar-based constrained decoding</strong>" <code>[cmu]</code>, and v0.4 brings "structured outputs" listed alongside the zero-overhead CPU scheduler as a flagship capability <code>[cmu]</code>. The implementation walkthrough reports a JSON-generation operating point of "4,200 tokens/sec, 99.8% validity rate, 0.4 s latency" with SGLang plus xGrammar <code>[sugiv]</code>.</p>
+  <p>The lecture's headline-result slide also includes JSON Decode (Wikipedia extraction) as one of the nine workloads where SGLang reaches 1.0 normalized throughput, and the launch blog's bar chart shows it as a workload where structured-output handling and KV reuse compound <code>[blog]</code><code>[cmu]</code>.</p>
+
+  <div class="sec-h" style="font-size:14px;">Hierarchical KV cache</div>
+  <p>The fourth technique in the lecture's outline is "Hierarchical KV cache" — and the slide itself is labeled "Skipped" <code>[cmu]</code>. The README mentions "prefix caching" and "prefill-decode disaggregation" as features <code>[readme]</code>, and the open-source roadmap slide lists "Prefill-decode disaggregation" and "Expert/pipeline/context parallelism" under "Throughput-oriented large-scale deployment" <code>[cmu]</code>. The DeepSeek case study (Segment 5) shows an "External KVCache Storage (Optional)" tier in the architecture <code>[cmu]</code>. Beyond that, the cited sources do not provide enough detail to write a deep dive on tier sizing, transport, or specific workload outcomes — so we will not invent one here.</p>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 4 — When to pick SGLang vs vLLM vs TRT-LLM  (~5 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 4 — When SGLang wins, by what the sources actually show</div>
+  <p>The cited sources do not contain a head-to-head SGLang vs vLLM vs TensorRT-LLM workload guide written by a neutral party. What they contain are SGLang's own benchmarks against vLLM and Guidance, plus an industry-adoption picture. Honest framing: the decision rule below is what those sources <em>do</em> support, not a general "engine of choice for X" pronouncement.</p>
+
+  <div class="sec-h" style="font-size:14px;">Workloads where the source benchmarks show the largest SGLang gap</div>
+  <p>The launch blog's bar chart and the CMU lecture's reproduction of it both show the <strong>workload-by-workload spread</strong> of the v0.1 5× headline <code>[blog]</code><code>[cmu]</code>. The gap is enormous on:</p>
+  <ul>
+    <li><strong>HellaSwag (20-shot)</strong> — large shared few-shot prefix.</li>
+    <li><strong>Tree-of-Thought (GSM-8K)</strong> — extreme branching from a shared root.</li>
+    <li><strong>ReAct Agent</strong> — agent loops with shared system / tool prompt.</li>
+    <li><strong>JSON Decode (Wikipedia extraction)</strong> — structured output plus shared schema.</li>
+    <li><strong>DSPy RAG, LLaVA Bench</strong> — both show vLLM/baseline at &lt;0.3 normalized throughput on the v0.1 chart.</li>
+  </ul>
+  <p>And the gap is small or absent on:</p>
+  <ul>
+    <li><strong>Chat (Long, 4-turn)</strong> — vLLM reaches ~0.94 normalized throughput on the v0.1 chart, the closest of any workload <code>[cmu]</code>.</li>
+    <li><strong>Single Requests</strong> — the implementation walkthrough explicitly puts both vLLM and SGLang at 0% cache hit on this case <code>[sugiv]</code>.</li>
+  </ul>
+  <p>So the source-grounded rule is: SGLang's wins are concentrated in workloads with structure — shared prefixes, branching, structured output. That matches the system's design.</p>
+
+  <div class="sec-h" style="font-size:14px;">Industry adoption — who is actually running it</div>
+  <p>The CMU lecture's industry-adoption slide names the institutions running SGLang in production <code>[cmu]</code>: xAI, NVIDIA, AMD, Atlas Cloud, Baseten, Cursor, Data Crunch, Etched, Hyperbolic, Jam &amp; Tea Studios, LinkedIn, Meituan, Nebius, Novita, RunPod, Stanford, Berkeley, UCLA, 01.AI. The README adds Intel, Oracle Cloud, Google Cloud, Microsoft Azure, AWS <code>[readme]</code>. The lecture also notes "<strong>SGLang serves the production and research workloads at xAI (100K+ GPUs)</strong>" — and the project's GitHub-stars badge in the same slide reads 13.3k <code>[cmu]</code>.</p>
+
+  <div class="sec-h" style="font-size:14px;">What SGLang explicitly supports today</div>
+  <p>From the lecture's feature-coverage slide and the README, the runtime ships these optimizations <code>[cmu]</code><code>[readme]</code>: continuous batching, prefix caching, token attention (paged attention), speculative decoding, tensor / pipeline / expert / data parallelism, chunked prefill, structured outputs, multi-LoRA serving, quantization in FP4 / FP8 / INT4 (plus AWQ / GPTQ per the README). Model coverage spans Llama 1/2/3, Qwen, Mixtral, DeepSeek V3/R1, Kimi, GLM, GPT, Gemma, Mistral on the text side, and Llama 4, QwenVL, DeepSeek-VL, Llava, Pixtral on the vision side <code>[cmu]</code><code>[readme]</code>. Hardware: NVIDIA GB200 / B300 / H100 / A100, AMD MI355 / MI300, Intel Xeon, Google TPU, Ascend NPU <code>[readme]</code>.</p>
+  <p>The lecture's open-source roadmap groups upcoming work into three buckets <code>[cmu]</code>:</p>
+  <ul>
+    <li><strong>Throughput-oriented large-scale deployment:</strong> prefill-decode disaggregation, expert / pipeline / context parallelism.</li>
+    <li><strong>Reinforcement learning integration:</strong> weight sync, asynchronous algorithms, memory saver; veRL, Areal, LlamaFactory integrations.</li>
+    <li><strong>Low-latency optimizations:</strong> speculative decoding (e.g. EAGLE 3), kernel optimizations.</li>
+  </ul>
+  <p>The full roadmap is tracked at <code>github.com/sgl-project/sglang/issues/4042</code> per the same slide <code>[cmu]</code>.</p>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 5 — NIM Factory interview framing  (~5 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 5 — Production reality, with the DeepSeek case study</div>
+  <p>The CMU lecture closes with a real production case study, and it is the most concrete piece of evidence in any of the cited sources for what an SGLang fleet at scale actually looks like and how its economics work <code>[cmu]</code>.</p>
+
+  <div class="sec-h" style="font-size:14px;">The DeepSeek architecture, by component</div>
+  <p>The lecture diagrams the DeepSeek serving architecture as a stack of disaggregated services <code>[cmu]</code>:</p>
+  <ul>
+    <li><strong>API Server</strong> — the request entry point.</li>
+    <li><strong>Prefill Load Balancer</strong> → <strong>Prefill Service</strong> with its own Expert-Parallel Load Balancer fronting the prefill workers.</li>
+    <li><strong>Decode Load Balancer</strong> → <strong>Decode Service</strong> with its own Expert-Parallel Load Balancer fronting the decode workers.</li>
+    <li><strong>External KVCache Storage (Optional)</strong> — a tier underneath both the prefill and decode services, accessed by both.</li>
+  </ul>
+  <p>The lecture summarizes the recipe in one line: "Load balancer + prefill / decode disaggregation + speculative decoding + quantization + tensor / expert / pipeline parallelism + external KVCache storage" <code>[cmu]</code>. Every one of those is a feature listed elsewhere in the same lecture's coverage slides — this is not a custom system, it is SGLang's own primitives composed.</p>
+
+  <div class="viz-flow">
+    <div class="viz-box accent"><strong>Client</strong>API Server</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box green"><strong>Prefill LB</strong>(load balancer)</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box green"><strong>Prefill Service</strong>Expert-Parallel LB<br>+ EP workers</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box orange"><strong>Decode LB</strong>(load balancer)</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box orange"><strong>Decode Service</strong>Expert-Parallel LB<br>+ EP workers</div>
+  </div>
+  <div class="viz-flow" style="justify-content:center;margin-top:-6px;">
+    <div class="viz-box purple" style="min-width:360px;"><strong>External KVCache Storage (Optional)</strong>shared by Prefill ↑ and Decode ↑ — 56.3% of input tokens hit this tier in the DeepSeek 24-h trace</div>
+  </div>
+  <div class="viz-grid viz-grid-3" style="margin-top:6px;">
+    <div class="viz-card">
+      <div class="viz-card-title" style="color:#93c5fd;">Input volume</div>
+      <p style="font-size:13px;margin:0;"><strong>608B</strong> input tokens / day<br><span style="color:#34d399;"><strong>342B (56.3%)</strong> hit on-disk KV cache</span></p>
+    </div>
+    <div class="viz-card">
+      <div class="viz-card-title" style="color:#fbbf24;">Output volume</div>
+      <p style="font-size:13px;margin:0;"><strong>168B</strong> output tokens / day<br>across web, app, and API</p>
+    </div>
+    <div class="viz-card" style="border-color:#059669;">
+      <div class="viz-card-title" style="color:#34d399;">Unit economics</div>
+      <p style="font-size:13px;margin:0;">Theoretical revenue <strong>$562,027/day</strong> at R1 pricing<br>Cost-profit margin <strong>545%</strong></p>
+    </div>
+  </div>
+
+  <div class="sec-h" style="font-size:14px;">The 24-hour production numbers</div>
+  <p>The lecture provides hard 24-hour stats from the DeepSeek system <code>[cmu]</code>:</p>
+  <ul>
+    <li><strong>Total input tokens: 608B</strong>, of which <strong>342B (56.3%) hit the on-disk KV cache</strong>.</li>
+    <li><strong>Total output tokens: 168B.</strong></li>
+    <li><strong>Theoretical revenue: $562,027/day</strong> if all tokens were billed at DeepSeek-R1's published pricing.</li>
+    <li><strong>Cost-profit margin: 545%.</strong></li>
+  </ul>
+  <p>The lecture's chart of cost vs theoretical income across a 24-hour cycle shows costs as a roughly flat orange band of about $5K/hour during business hours dipping to ~$1–2K/hour overnight, against a theoretical-income blue band that peaks around $30K/hour during business hours and bottoms out at ~$5–10K/hour overnight <code>[cmu]</code>.</p>
+  <p>Two things to absorb from those numbers. First, the on-disk cache hit rate of 56.3% on input tokens is the entire economic story — more than half of input prefill compute is avoided because the KV state is already on disk. The "external KVCache storage" tier in the architecture diagram is doing exactly that work. Second, the 545% margin is the published case for why this architecture pays for itself: the same compute that a non-cached system would charge for is being served at a fraction of its incremental cost, and the difference is margin.</p>
+  <p>The lecture is careful to footnote: "The theoretical income is calculated based on R1's standard API pricing, taking into account all tokens across web, APP, and API. It is not our actual income" <code>[cmu]</code>. So the 545% is a unit-economics figure, not a P&amp;L number — but it is the right unit-economics figure for the engine's effect on cost.</p>
+
+  <div class="sec-h" style="font-size:14px;">What this tells us about SGLang's industry positioning</div>
+  <p>The cited sources do not write an SGLang positioning doc. What they show is:</p>
+  <ul>
+    <li><strong>xAI runs it on 100K+ GPUs</strong> for production and research <code>[cmu]</code>.</li>
+    <li><strong>DeepSeek's own production system</strong> is built on it, with the architecture and economics diagrammed above <code>[cmu]</code>.</li>
+    <li><strong>The README's adopter list</strong> spans frontier labs (xAI), all three major chip vendors (NVIDIA, AMD, Intel), the major hyperscalers (AWS, Azure, GCP, Oracle), application companies (Cursor, LinkedIn), inference-as-a-service vendors (Baseten, RunPod, Hyperbolic, Nebius, Novita, Atlas Cloud), and academia (Stanford, Berkeley, UCLA, CMU) <code>[readme]</code><code>[cmu]</code>.</li>
+    <li><strong>The version trajectory</strong> shows steady investment in distinct bottlenecks — KV reuse (v0.1) → CPU runtime (v0.2) → MLA/torch.compile (v0.3) → zero-overhead scheduler + cache-aware LB (v0.4) <code>[cmu]</code>.</li>
+  </ul>
+  <p>If you want a one-line summary the sources support: SGLang's wins are concentrated in workloads with shared prefixes, branching, and structured output, and at scale those wins compound into the kind of unit economics DeepSeek discloses (56% input-cache hit, 545% margin). On workloads without that structure the sources show the gap to vLLM closing.</p>
+
+  <div class="sec-h" style="font-size:14px;">Editorial postscript — the NIM-Factory mapping <em>(beyond the cited sources)</em></div>
+  <div class="warn"><strong>None of the six cited sources mention NVIDIA NIM, Dynamo, or NIXL.</strong> What follows is an editorial extension that maps what the sources do say onto the NIM-Factory three-engine question. Treat it as the listener's exercise, not as a claim grounded in the resource pack.</div>
+  <p>NVIDIA NIM ships three optimized inference backends per model — TensorRT-LLM, vLLM, and SGLang. The cited sources tell us what SGLang brings to that lineup that the others do not: a radix-tree KV cache that is uniquely strong on prefix-heavy and branching workloads (the launch blog's nine-workload chart and the implementation walkthrough's hit-rate table), a cache-aware router that turns those hits into ~1.92× throughput at the cluster level (the CMU lecture's 82,665 → 158,596 tok/s table), an overlapped CPU scheduler that recovers ~50% wall-clock by removing scheduling overhead (the CMU lecture's iteration-time chart), structured outputs (v0.4 capability), and a published production deployment at DeepSeek with a 56.3% on-disk cache hit rate and 545% margin (the CMU lecture's case study).</p>
+  <p>What the cited sources do <em>not</em> tell us — and what an interview answer would need to honest-attribute elsewhere if it goes there — is anything specific about Dynamo's KVBM, NIXL transports, or the NIM validation matrix. The right move in that interview is to talk about what SGLang demonstrably is from these sources, and let the interviewer surface the NIM-internal pieces.</p>
+
+  <div class="sec-h" style="font-size:14px;">A short list of things you can defend from the cited sources</div>
+  <ul>
+    <li>The radix tree maintains the KV cache of all LLM calls, not just the in-flight one — and existing systems discard it when a call ends <code>[cmu]</code>.</li>
+    <li>LRU with recursive leaf-node eviction; KV in paged GPU layout, tree on CPU; compatible with continuous batching and paged attention <code>[blog]</code>.</li>
+    <li>Up to 5× higher throughput on the v0.1 nine-workload benchmark, on Llama-7B (A10G) and Mixtral-8×7B (8× A10G TP), against vLLM v0.2.5 / Guidance v0.1.8 / TGI v1.3.0 <code>[blog]</code><code>[cmu]</code>.</li>
+    <li>Cache hit rates 85–95% (few-shot), 75–90% (multi-turn chat), 60–80% (code analysis), 0% (single-request) <code>[sugiv]</code>.</li>
+    <li>Cache-aware router: 82,665 → 158,596 tok/s and 20% → 75% hit rate <code>[cmu]</code>; 1.9× throughput / 3.8× cache hit rate aggregate <code>[sugiv]</code>.</li>
+    <li>Overlapped scheduler: ~32 ms → ~17 ms iteration (Llama 1.3B); "Zero CPU time" per nsight; 1.3× faster than SOTA OSS baseline (Llama 3.2 3B, H100) <code>[cmu]</code>.</li>
+    <li>3× faster grammar-based constrained decoding (v0.1) <code>[cmu]</code>; xGrammar JSON 4,200 tok/s @ 99.8% validity, 0.4 s latency <code>[sugiv]</code>.</li>
+    <li>DeepSeek production: 608B input / 342B (56.3%) on-disk cache hit / 168B output per day; 545% theoretical margin <code>[cmu]</code>.</li>
+    <li>400,000+ GPUs, trillions of tokens/day, xAI 100K+ GPUs, 400+ OSS contributors <code>[readme]</code><code>[cmu]</code>.</li>
+  </ul>
+
+  <div class="resource-bar">
+    📖 <a href="https://arxiv.org/pdf/2312.07104" target="_blank">SGLang paper (Sheng et al., 2023)</a>
+    <a href="https://lmsys.org/blog/2024-01-17-sglang/" target="_blank">LMSYS launch blog</a>
+    <a href="https://github.com/sgl-project/sglang" target="_blank">sgl-project/sglang on GitHub</a>
+    <a href="https://llmsystem.github.io/llmsystem2025spring/assets/files/llmsys-25-sglang-72edc5043338f59db34d47e5b96ac870.pdf" target="_blank">Ying Sheng's CMU lecture (PDF)</a>
+    <a href="https://blog.sugiv.fyi/inside-sglang-anatomy-high-performance-structured-llm-inference-system" target="_blank">Implementation walkthrough</a>
+    <a href="https://read.theaimerge.com/p/how-to-add-structure-to-your-llm" target="_blank">Compressed FSM explainer</a>
+  </div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('quiz-ch9')">&#8592; Chapter 9 Quiz</a></div>
+</div>
+
 </div>
 </div><!-- /flex column wrapper -->
 </div><!-- /container -->
@@ -4369,7 +4861,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
 /* ══════════════════════════════════════════════════════════
    SECTION ORDER + NAMES
    ══════════════════════════════════════════════════════════ */
-const order = ['tokenization','embeddings','qkv','multihead','layers','params','moe','numformats','sampling','quiz-ch1','mla','attnvariants','ssm','mtp','codesign','distill','lora','quiz-ch2','nvlink','parallelism','quiz-ch3','batching','kvcache','chunked','flashattn','quant','marlin','specdecode','optlist','quiz-ch4','reqlen','scheduling','outputpred','reqseqbatch','multiturn','agentic','disagg','quiz-ch5','traintoserve','engines','benchmarking','costeconomics','mfu','cuda','numlibs','fusion','fileformats','dynamo-orch','profiling','quiz-ch7','gpuinternals','cachehier','archroadmap','superchips','mig','otheraccel','formfactors','quiz-ch8','containers','autoscaling','multicloud','security','observability','clientside','quiz-ch9'];
+const order = ['tokenization','embeddings','qkv','multihead','layers','params','moe','numformats','sampling','quiz-ch1','mla','attnvariants','ssm','mtp','codesign','distill','lora','quiz-ch2','nvlink','parallelism','quiz-ch3','batching','kvcache','chunked','flashattn','quant','marlin','specdecode','optlist','quiz-ch4','reqlen','scheduling','outputpred','reqseqbatch','multiturn','agentic','disagg','quiz-ch5','traintoserve','engines','benchmarking','costeconomics','mfu','cuda','numlibs','fusion','fileformats','dynamo-orch','profiling','quiz-ch7','gpuinternals','cachehier','archroadmap','superchips','mig','otheraccel','formfactors','quiz-ch8','containers','autoscaling','multicloud','security','observability','clientside','quiz-ch9','sglang-dd'];
 
 const sectionNames = {};
 document.querySelectorAll('.nav-item').forEach(btn => {

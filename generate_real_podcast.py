@@ -1,30 +1,23 @@
 #!/usr/bin/env python3
 """
-Generate real conversational podcast audio using Claude (via CLI) + TTS.
-
-TTS backends:
-  - edge-tts (default): Microsoft Azure voices, fast, free, sounds robotic
-  - orpheus: Orpheus-TTS via llama.cpp, runs locally on Apple Silicon (Metal),
-             natural conversational quality with emotion support
+Generate real conversational podcast audio using Claude (via CLI) + edge-tts.
 
 Pipeline:
   1. Extract section text from index.html
   2. Send to `claude -p` to generate a two-host conversation script
   3. Parse the script into speaker turns
-  4. Voice each turn with the selected TTS engine
+  4. Voice each turn with edge-tts (Microsoft Azure voices)
   5. Concatenate into final MP3
 
 Usage:
-    python3 generate_real_podcast.py --sections tokenization              # edge-tts (default)
-    python3 generate_real_podcast.py --all --tts orpheus                  # Orpheus TTS
-    python3 generate_real_podcast.py --all --tts orpheus --force          # Regenerate audio only
-    python3 generate_real_podcast.py --all --tts orpheus --force-transcript  # Regenerate everything
-    python3 generate_real_podcast.py --list                               # List sections
+    python3 generate_real_podcast.py --sections tokenization
+    python3 generate_real_podcast.py --all
+    python3 generate_real_podcast.py --all --force                # Regenerate audio (keeps cached transcripts)
+    python3 generate_real_podcast.py --all --force-transcript     # Also re-run Claude
+    python3 generate_real_podcast.py --list                       # List sections
 
-Requires: claude CLI, beautifulsoup4
-  edge-tts backend: pip install edge-tts
-  orpheus backend:  pip install orpheus-cpp numpy scipy
-                    pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal
+Requires: claude CLI, beautifulsoup4, edge-tts
+  pip install edge-tts beautifulsoup4
 """
 
 import asyncio
@@ -50,10 +43,6 @@ TRANSCRIPT_DIR = BASE_DIR / "podcast" / "transcripts"
 EDGE_VOICE_HOST = "en-US-GuyNeural"       # Alex — the explainer
 EDGE_VOICE_COHOST = "en-US-JennyNeural"   # Jenny — the curious questioner
 
-# Voices for the two hosts — Orpheus TTS
-ORPHEUS_VOICE_HOST = "leo"     # Alex — male, clear explainer voice
-ORPHEUS_VOICE_COHOST = "tara"  # Jenny — female, recommended as best quality
-
 AUDIENCE = """The listener is a senior engineering leader at AWS — strong background in distributed systems, cloud infrastructure, and GPU workload scaling at cloud scale, but relatively new to ML internals. He learns best through concrete analogies mapped to infrastructure concepts he already knows: auto scaling, bin packing, memory hierarchies, distributed systems, EC2 capacity management."""
 
 # Map section IDs to their chapter for context
@@ -69,6 +58,13 @@ CHAPTER_MAP = {
     'multiturn': 'ch5', 'agentic': 'ch5', 'toolcalling': 'ch5', 'disagg': 'ch5', 'dynamo': 'ch5',
     'traintoserve': 'ch6', 'engines': 'ch6', 'sglang': 'ch6', 'benchmarking': 'ch6',
     'costeconomics': 'ch6', 'mfu': 'ch6',
+    'cuda': 'ch7', 'numlibs': 'ch7', 'fusion': 'ch7', 'fileformats': 'ch7',
+    'dynamo-orch': 'ch7', 'profiling': 'ch7',
+    'gpuinternals': 'ch8', 'cachehier': 'ch8', 'archroadmap': 'ch8', 'superchips': 'ch8',
+    'mig': 'ch8', 'otheraccel': 'ch8', 'formfactors': 'ch8',
+    'containers': 'ch9', 'coldstart': 'ch9', 'autoscaling': 'ch9', 'multicloud': 'ch9',
+    'security': 'ch9', 'observability': 'ch9', 'clientside': 'ch9',
+    'sglang-dd': 'ch10',
 }
 
 CHAPTER_NAMES = {
@@ -78,6 +74,10 @@ CHAPTER_NAMES = {
     'ch4': 'Optimization (batching, caching, quantization, kernels)',
     'ch5': 'Serving at Scale (scheduling, routing, disaggregation)',
     'ch6': 'Operations (engines, benchmarking, cost economics)',
+    'ch7': 'Software Stack (CUDA, kernel libraries, compilers, profiling)',
+    'ch8': 'Hardware Depth (GPU internals, generations, accelerators)',
+    'ch9': 'Production (containers, autoscaling, multi-cloud, security, observability)',
+    'ch10': 'DeepDives (long-form, NotebookLM-style explorations of single topics)',
 }
 
 # Analogies pre-generated for each chapter to seed the conversation
@@ -140,7 +140,57 @@ CHAPTER_ANALOGIES = {
         'Compressed FSM / jump-forward decoding = when the grammar forces a deterministic span of tokens, skip the model entirely for those tokens — like pre-computing a static portion of the response',
         'Benchmarking = load testing your inference endpoint — the metrics that matter and how to avoid misleading results',
         'Cost economics = unit economics of inference — cost-per-token is the new cost-per-request',
+        'Roofline / arithmetic intensity = the same compute-vs-bandwidth framing you use for storage tiers, applied to a GPU — every operation lives somewhere on a curve and you optimize by moving it across the breakeven',
         'MFU = the utilization metric for GPUs — like CPU utilization but for matrix math throughput, and much harder to max out',
+    ],
+    'ch7': [
+        'CUDA kernel = a function pinned to a specific compute resource pool — the lowest layer where work actually runs, like a Lambda handler running on a specific instance type',
+        'GEMM = the central matrix multiply, ~95% of inference compute — every other op is incidental',
+        'cuBLAS / cuDNN / CUTLASS / FlashInfer / DeepGEMM = the layered library tower from "general-purpose primitive" to "narrowly specialized fast path"',
+        'Kernel fusion = combining a chain of memory-bound ops into one kernel so intermediate data stays in registers/SRAM — like collapsing a microservice chain into one binary to skip network hops',
+        'CUDA Graphs = a pre-recorded DAG of kernel launches replayed in one shot — eliminates per-kernel host overhead, exactly like batching API calls',
+        'safetensors = the universal LLM serving format — memory-mapped, sharded, zero code execution; ONNX = the cross-framework graph format; GGUF = the CPU/edge format',
+        'NVIDIA Dynamo = the orchestration layer above engines, treating vLLM/SGLang/TRT-LLM as worker pools and adding cluster-wide KV-aware routing and disaggregation',
+        'Nsight Systems / Nsight Compute = the timeline profiler and the per-kernel deep-dive — like distributed tracing vs single-service flame graphs',
+        'DCGM = production GPU telemetry exporter — the equivalent of node_exporter but for GPUs',
+    ],
+    'ch8': [
+        'SM = the basic execution unit of a GPU, like a single core in a CPU — H100 has 132 of them',
+        'Tensor Core = the MMA unit (D = A·B + C) — where ~95% of inference FLOPs happen',
+        'CUDA core / Tensor Core / SFU = scalar / matrix / transcendental units — three specialized execution pools per SM',
+        'Cache hierarchy = registers → SRAM/L1 (256KB/SM) → L2 (50MB) → HBM (80GB) → host RAM — each tier 10× slower and 10× larger than the one above',
+        '2:4 structured sparsity = hardware-accelerated sparsity pattern (2 zeros in every 4 weights) doubling Tensor Core throughput — only works because the hardware understands the exact pattern',
+        'Architecture roadmap = each generation adds a smaller precision (BF16 → FP8 → FP4) and a new FlashAttention generation; quantization research follows hardware',
+        'NVL72 / NVL144 = rack-scale NVLink domains where 72+ GPUs all reach each other at NVLink speed — turns "node + InfiniBand" deployments into "rack as a single unit"',
+        'Grace / Vera = ARM CPUs on-package with the GPU via NVLink-C2C at 900 GB/s — makes host RAM a usable spillover tier for KV cache',
+        'MIG = hardware partitioning that turns one big GPU into up to 7 isolated smaller GPUs — like EC2 dedicated-host slicing for GPUs',
+        'PCIe vs SXM = same chip, different package — but SXM gets full HBM bandwidth, NVLink, and higher power; PCIe is the discount tier with no NVLink, unsuitable for TP',
+        'Non-NVIDIA accelerators = TPU, Trainium, Groq, Cerebras, AMD MI300X — the silicon is competitive but the CUDA software moat keeps the LLM serving market on NVIDIA',
+    ],
+    'ch9': [
+        'Cold start = GPU procurement → image pull → weight load → engine warmup, totaling 1–5 minutes — autoscaling on lagging metrics is too slow because of this',
+        'NIM = pre-baked containers with quantized weights and compiled engines — pull-and-run instead of build-and-warm',
+        'Five autoscaling knobs = min/max replicas, autoscaling window, scale-down delay, concurrency target — each has a default trap',
+        'Queue depth as the leading indicator = the metric that grows before latency does, so autoscaling has time to react before SLO violations',
+        'KV-aware + LoRA-aware routing = session-affinity at the load balancer for cache locality — round-robin is the wrong default for cached LLM serving',
+        'Multi-cloud bin packing = scheduling replicas across hyperscalers, neoclouds, and reserved capacity — necessary at scale because no single provider has enough flagship GPUs',
+        'Llama 3 paper failure rate = 1 GPU failure per 50,000 GPU-hours — a 1,000-GPU fleet sees ~3–4 incidents a week, so active-active is mandatory',
+        'SOC 2 / HIPAA / data residency = the certifications and constraints customers actually ask for — region-pinned tenancy is often the biggest deployment constraint',
+        'Tenant isolation in shared inference = per-tenant cache scoping, authoritative adapter selection, sandboxed tool execution — the unique multi-tenancy hazards of LLM serving',
+        'Shadow + canary = the safe model-rollout pattern; mirror traffic to validate quality, then 1%/10%/50%/100% canary for capacity — blue-green doubles GPU cost and skips quality validation',
+        'TLS handshake tax = up to 140 ms of latency on a fresh HTTPS connection — connection reuse via persistent SDK clients is the highest-leverage client-side fix',
+        'Streaming = HTTP/SSE for one-way (LLM standard), WebSocket for bidirectional (voice / agents), gRPC for internal service-to-service with strict schemas',
+        'Async with webhooks = fire-and-forget pattern for jobs over ~30 seconds — the only sane shape for batch and long-running agent work',
+    ],
+    'ch10': [
+        'RadixAttention = a shared filesystem cache across processes — vs. PagedAttention which is virtual memory paging within a single process',
+        'SGL-Router = a sticky/session-affinity load balancer in front of a fleet of replicas, where the "session" is the cached prefix',
+        'Overlapped CPU scheduler = pipelining the dispatcher: build batch N+1 while the GPU runs batch N, like a CPU pipeline hiding the fetch stage',
+        'HiCache = a tiered buffer pool for KV state — HBM is the hot tier, host RAM is warm, RDMA-attached storage is cold, exactly how a database manages pages',
+        'Compressed FSM / jump-forward decoding = skip the model entirely for spans the grammar forces — same idea as a query optimizer constant-folding deterministic predicates',
+        'NIM Factory three-engine matrix = a workload-shape acknowledgement: TRT-LLM for peak throughput, vLLM for general-purpose, SGLang for prefix-heavy/structured/agentic',
+        'NIXL = the RDMA transport that lets KV blocks travel between nodes; SGLang HiCache speaks NIXL natively, which is why Dynamo + SGLang composes cleanly',
+        'API-tier prompt caching (Anthropic, OpenAI) = the same content-addressable KV trick exposed at the API; RadixAttention is the open-source primitive shape',
     ],
 }
 
@@ -151,6 +201,60 @@ def build_prompt_for_section(section_text: str, section_title: str, sec_id: str)
     analogies = CHAPTER_ANALOGIES.get(chapter, [])
 
     analogies_block = '\n'.join(f'  - {a}' for a in analogies)
+
+    # Long-form NotebookLM-style deep dives target 45-60 minutes of audio.
+    if chapter == 'ch10':
+        return f"""You are writing a long-form, NotebookLM-style podcast script for a two-host show about LLM inference infrastructure.
+
+AUDIENCE:
+{AUDIENCE}
+The listener already knows vLLM well (PagedAttention, continuous batching, prefix caching basics). Do NOT re-explain those — reference them as known and build on them.
+
+HOSTS:
+- **Alex** (male): The main explainer. Deep ML inference expertise. Authoritative but accessible. Uses analogies constantly, especially distributed-systems / cloud-infra ones.
+- **Jenny** (female): Sharp, infra-systems-background co-host. Asks the questions the listener would ask. Pushes Alex to go deeper. Reacts genuinely. Connects new ideas back to vLLM, paging, caches, load balancers, buffer pools.
+
+EPISODE TOPIC:
+"{section_title}" — a single-topic deep dive in the DeepDives chapter.
+
+SOURCE MATERIAL (this is the structured outline; the section is already organized into five segments — preserve that segment structure in the conversation):
+---
+{section_text}
+---
+
+PRE-GENERATED ANALOGIES (use, adapt, extend):
+{analogies_block}
+
+STRUCTURE:
+The source is organized as five segments. Walk through them in order, but make the transitions feel natural — Jenny's questions should bridge between segments. Roughly:
+- Segment 1 (~5 min): What it is and why it exists. Hook the listener with the problem the system solves.
+- Segment 2 (~10 min): The headline technical idea. Go deep. This is where the listener should leave with a real mental model.
+- Segment 3 (~10 min): The complementary techniques. Cover each one as its own mini-arc.
+- Segment 4 (~5 min): The decision framework. When to pick this vs alternatives. Be honest about tradeoffs.
+- Segment 5 (~5 min): The real-world / interview-ready framing. Productization, ecosystem, what to actually say.
+
+DEPTH INSTRUCTION:
+For EVERY concept, explain WHY it works the way it does. Jenny pushes: "Why not just...?", "What breaks if you don't?", "How does that play out at scale?", "Wait, isn't that just...?". Go slow. Three important aspects of one concept get three exchanges, not one paragraph. Attribute numbers when you cite them ("the paper reports", "the LMSYS blog says", "per the CMU lecture"). When a number is workload-dependent, say so.
+
+CONVERSATION INSTRUCTION:
+This must sound like two real people talking, not reading. Include:
+- Natural reactions, mid-sentence interruptions, "wait, hold on" moments
+- Jenny connecting back to infra concepts she already knows (paging, caches, load balancers, buffer pools, sticky sessions, RDMA, pipelining)
+- Moments where Alex refines an analogy after Jenny pushes back
+- Occasional humor, surprise, "I had to think about this for a while too"
+- Building on each other's points, not alternating monologues
+- Brief recaps when transitioning between segments
+
+LENGTH:
+Target **7,000–9,000 words** of dialogue, which produces **45–60 minutes** of audio at conversational pace (~150 wpm). This is a long-form deep dive, NOT a quick overview. If you find yourself running short, go deeper on the WHY — there is always more to unpack.
+
+FORMAT:
+Output ONLY the dialogue lines. No stage directions, no notes, no segment headers, no "[pause]" markers.
+Format each line EXACTLY as:
+Alex: <what Alex says>
+Jenny: <what Jenny says>
+
+Start with a hook — something that connects to the listener's existing vLLM knowledge — then build outward."""
 
     return f"""You are writing a podcast script for a two-host show about LLM inference infrastructure.
 
@@ -255,7 +359,7 @@ def generate_conversation(section_text: str, section_title: str, sec_id: str = '
 
     result = subprocess.run(
         ['claude', '-p', prompt, '--output-format', 'text'],
-        capture_output=True, text=True, timeout=300
+        capture_output=True, text=True, timeout=900
     )
 
     if result.returncode != 0:
@@ -348,115 +452,9 @@ async def generate_audio_edge(turns: list[dict], output_path: Path):
         pass
 
 
-# ── Audio generation: Orpheus TTS backend ──
-
-# Lazy-initialized Orpheus model (heavy, only load once)
-_orpheus_model = None
-
-
-def _get_orpheus():
-    """Initialize Orpheus TTS model on first use. Uses default Q4_K_M (~2 GB).
-
-    Q4_K_M is the orpheus-cpp default — small enough for 16 GB Apple Silicon without
-    triggering macOS memory pressure crashes. No manual model swap needed.
-    """
-    global _orpheus_model
-    if _orpheus_model is not None:
-        return _orpheus_model
-
-    try:
-        from orpheus_cpp import OrpheusCpp
-    except ImportError:
-        sys.exit(
-            "Orpheus TTS not installed. Run:\n"
-            "  pip install llama-cpp-python "
-            "--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal\n"
-            "  pip install orpheus-cpp numpy scipy"
-        )
-
-    # Use the default Q4_K_M model (~2 GB) — orpheus-cpp downloads it automatically
-    print('  [orpheus] Initializing model with Metal acceleration (Q4_K_M, ~2 GB)...')
-    model = OrpheusCpp(n_gpu_layers=99, verbose=False, lang="en")
-    print('  [orpheus] Ready (Q4_K_M model loaded with Metal offload)')
-
-    _orpheus_model = model
-    return model
-
-
-def generate_turn_orpheus(text: str, voice: str) -> 'numpy.ndarray':
-    """Generate audio samples for a single turn using Orpheus TTS.
-
-    Returns numpy int16 array of audio samples at 24kHz.
-    """
-    model = _get_orpheus()
-    sample_rate, samples = model.tts(text, options={
-        "voice_id": voice,
-        "max_tokens": 4096,   # longer turns need more tokens
-        "temperature": 0.6,   # lower = more stable/consistent voice
-        "top_p": 0.9,
-    })
-    # samples shape is (1, N) — squeeze to 1D
-    return samples.squeeze()
-
-
-async def generate_audio_orpheus(turns: list[dict], output_path: Path):
-    """Generate MP3 from conversation turns using Orpheus TTS."""
-    import numpy as np
-    from scipy.io.wavfile import write as write_wav
-
-    temp_dir = output_path.parent / '.temp'
-    temp_dir.mkdir(exist_ok=True)
-
-    all_samples = []
-    for i, turn in enumerate(turns):
-        voice = ORPHEUS_VOICE_HOST if turn['speaker'] == 'Alex' else ORPHEUS_VOICE_COHOST
-        print(f'    Turn {i+1}/{len(turns)} ({turn["speaker"]}): {len(turn["text"])} chars')
-
-        # Run TTS in executor to avoid blocking the event loop
-        loop = asyncio.get_event_loop()
-        samples = await loop.run_in_executor(
-            None, generate_turn_orpheus, turn['text'], voice
-        )
-        all_samples.append(samples)
-
-        # Add a short silence between turns (0.3s at 24kHz)
-        silence = np.zeros(7200, dtype=np.int16)
-        all_samples.append(silence)
-
-    # Concatenate all audio
-    full_audio = np.concatenate(all_samples)
-
-    # Write WAV then convert to MP3 via ffmpeg
-    wav_path = temp_dir / f'{output_path.stem}.wav'
-    write_wav(str(wav_path), 24000, full_audio)
-
-    # Convert WAV → MP3
-    result = subprocess.run(
-        ['ffmpeg', '-y', '-i', str(wav_path), '-codec:a', 'libmp3lame',
-         '-b:a', '128k', str(output_path)],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        print(f'    ffmpeg error: {result.stderr[:200]}')
-        # Fallback: just copy the WAV as-is (browser can play WAV too)
-        import shutil
-        wav_out = output_path.with_suffix('.wav')
-        shutil.move(str(wav_path), str(wav_out))
-        print(f'    Saved as WAV instead: {wav_out.name}')
-        return
-
-    # Cleanup
-    wav_path.unlink(missing_ok=True)
-    try:
-        temp_dir.rmdir()
-    except OSError:
-        pass
-
-
 # ── Main ──
 
-async def process_section(sec_id: str, paragraphs: list[str], section_names: dict,
-                          tts_engine: str = 'edge'):
+async def process_section(sec_id: str, paragraphs: list[str], section_names: dict):
     """Full pipeline for one section: text → conversation → audio."""
     title = section_names.get(sec_id, sec_id)
     output_mp3 = PODCAST_DIR / f'{sec_id}.mp3'
@@ -489,12 +487,9 @@ async def process_section(sec_id: str, paragraphs: list[str], section_names: dic
     total_words = sum(len(t['text'].split()) for t in turns)
     print(f'  [{sec_id}] {len(turns)} turns ({alex_turns} Alex, {jenny_turns} Jenny, ~{total_words} words)')
 
-    # Step 3: Generate audio with the selected TTS engine
-    print(f'  [{sec_id}] Generating audio ({tts_engine})...')
-    if tts_engine == 'orpheus':
-        await generate_audio_orpheus(turns, output_mp3)
-    else:
-        await generate_audio_edge(turns, output_mp3)
+    # Step 3: Generate audio with edge-tts
+    print(f'  [{sec_id}] Generating audio (edge-tts)...')
+    await generate_audio_edge(turns, output_mp3)
     size_kb = output_mp3.stat().st_size / 1024
     print(f'  [{sec_id}] -> {output_mp3.name} ({size_kb:.0f} KB)')
     return True
@@ -514,12 +509,10 @@ def get_section_names(html_path: Path) -> dict:
 
 async def main():
     parser = argparse.ArgumentParser(
-        description='Generate real conversational podcast using Claude CLI + TTS')
+        description='Generate real conversational podcast using Claude CLI + edge-tts')
     parser.add_argument('--all', action='store_true', help='Generate all sections')
     parser.add_argument('--sections', nargs='*', help='Specific section IDs')
     parser.add_argument('--list', action='store_true', help='List sections')
-    parser.add_argument('--tts', choices=['edge', 'orpheus'], default='edge',
-                        help='TTS engine: edge (default, Microsoft Azure) or orpheus (local, natural voice)')
     parser.add_argument('--force', action='store_true',
                         help='Regenerate even if MP3 exists (keeps cached transcripts)')
     parser.add_argument('--force-transcript', action='store_true',
@@ -530,17 +523,10 @@ async def main():
         parser.print_help()
         return
 
-    # Validate TTS engine dependencies
-    if args.tts == 'edge':
-        try:
-            import edge_tts  # noqa: F401
-        except ImportError:
-            sys.exit("Install edge-tts: pip install edge-tts")
-    elif args.tts == 'orpheus':
-        # Check ffmpeg is available (needed for WAV→MP3 conversion)
-        if subprocess.run(['which', 'ffmpeg'], capture_output=True).returncode != 0:
-            sys.exit("ffmpeg is required for Orpheus TTS. Install: brew install ffmpeg")
-        # Orpheus model loads lazily on first use
+    try:
+        import edge_tts  # noqa: F401
+    except ImportError:
+        sys.exit("Install edge-tts: pip install edge-tts")
 
     sections = extract_sections(SOURCE)
     section_names = get_section_names(SOURCE)
@@ -574,8 +560,7 @@ async def main():
             continue
 
         try:
-            success = await process_section(sec_id, sections[sec_id], section_names,
-                                            tts_engine=args.tts)
+            success = await process_section(sec_id, sections[sec_id], section_names)
             if success:
                 generated += 1
         except Exception as e:
@@ -583,7 +568,7 @@ async def main():
             print(f'  [{sec_id}] Skipping, will retry on next run')
             continue
 
-    print(f'\nDone! {generated} podcast episodes generated in {PODCAST_DIR}/ (TTS: {args.tts})')
+    print(f'\nDone! {generated} podcast episodes generated in {PODCAST_DIR}/')
     print(f'Transcripts cached in {TRANSCRIPT_DIR}/')
 
 

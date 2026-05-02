@@ -426,10 +426,12 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <button class="ch-header" onclick="toggleChapter('ch10')">
       <span class="ch-arrow">&#9656;</span>
       <span class="ch-title">DeepDives</span>
-      <span class="ch-count" id="count-ch10">0/1</span>
+      <span class="ch-count" id="count-ch10">0/2</span>
     </button>
     <div class="ch-topics">
       <button class="nav-item" data-sec="sglang-dd" onclick="show('sglang-dd')">SGLang <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="trtllm-dd" onclick="show('trtllm-dd')">TensorRT-LLM <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="moe-dd" onclick="show('moe-dd')">MoE Inference <span class="new-badge">new</span></button>
     </div>
   </div>
 </div>
@@ -4850,8 +4852,192 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <a href="https://blog.sugiv.fyi/inside-sglang-anatomy-high-performance-structured-llm-inference-system" target="_blank">Implementation walkthrough</a>
     <a href="https://read.theaimerge.com/p/how-to-add-structure-to-your-llm" target="_blank">Compressed FSM explainer</a>
   </div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('quiz-ch9')">&#8592; Chapter 9 Quiz</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('quiz-ch9')">&#8592; Chapter 9 Quiz</a><a class="pn-link pn-next" onclick="show('trtllm-dd')">TensorRT-LLM &#8594;</a></div>
 </div>
+
+<div id="sec-trtllm-dd" class="hidden">
+<div class="breadcrumb">DeepDives &rsaquo; TensorRT-LLM</div>
+<h2>TensorRT-LLM — a NotebookLM-style deep dive <span class="new-badge">new</span></h2>
+  <p class="subtitle">A NotebookLM-style five-segment deep dive grounded in NVIDIA's own architecture docs, the developer hub, the GitHub README, the wide-EP part-3 tech blog, and one third-party optimization guide. Roughly 45–60 minutes of audio. Written for an AWS engineering manager preparing for a NIM Factory interview, with vLLM as the assumed baseline.</p>
+
+  <div class="info"><strong>How to read this section.</strong> Every concrete claim is attributed inline to one of seven sources, marked <code>[overview]</code> (TensorRT-LLM Architecture Overview docs), <code>[landing]</code> (TensorRT-LLM project landing page on nvidia.github.io), <code>[devhub]</code> (developer.nvidia.com/tensorrt-llm marketing/feature page), <code>[github]</code> (NVIDIA/TensorRT-LLM GitHub README and recent release notes), <code>[ep3]</code> (Scaling Expert Parallelism in TensorRT-LLM, Part 3 tech blog), <code>[docs]</code> (docs.nvidia.com/tensorrt-llm hub page), <code>[introl]</code> (introl.com third-party optimization guide). Numbers that the source qualifies as workload-, model-, or hardware-dependent are kept with that qualifier. Segment 5 contains an <strong>editorial postscript</strong> on the NIM-Factory framing — clearly marked, because none of the cited sources document NIM container architecture or its validation matrix.</p>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 1 — What TRT-LLM is and where it fits  (~5 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 1 — What TensorRT-LLM is, and where it fits next to vLLM</div>
+  <p>The developer hub frames TensorRT-LLM as "an open-source library built to deliver high-performance, real-time inference optimization for large language models (LLMs) on NVIDIA GPUs," with the goal that developers "maximize inference performance to serve more users in parallel, while minimizing operational costs" <code>[devhub]</code>. The GitHub README's canonical line is more careful: TensorRT-LLM "provides users with an easy-to-use Python API to define Large Language Models (LLMs) and supports state-of-the-art optimizations to perform inference efficiently on NVIDIA GPUs" <code>[github]</code>. The docs hub adds the bridging phrase that ties the project to its namesake compiler — the API is used to "build NVIDIA TensorRT engines that contain state-of-the-art optimizations" <code>[docs]</code>. That sentence is the whole identity in one line: TensorRT-LLM is the LLM-shaped front door to the underlying TensorRT compiler stack.</p>
+  <p>Architecturally the docs describe two layers. There is a Python authoring layer — the <code>LLM</code> class is the "core entry point" that "abstracts away preprocessing and postprocessing complexity while managing efficient GPU execution" <code>[overview]</code>. And underneath there is a runtime, which on the new PyTorch-native path is structured around a <code>PyExecutor(Worker)</code> running an asynchronous background loop with four explicit subcomponents: a <strong>Scheduler</strong> that "determines which requests execute at each step," a <strong>KVCacheManager</strong> that "manages Key-Value cache allocation and maintenance," a <strong>ModelEngine</strong> that "loads and executes the model on GPU," and a <strong>Sampler</strong> that "applies sampling strategies (greedy, top-k, top-p, beam search) to logits" <code>[overview]</code>. The four-component split is worth memorizing because every later optimization plugs into one of those four.</p>
+  <p>The point that does not survive a casual skim of the docs but matters most for an interview answer is the relationship to TensorRT itself. The NVIDIA inference stack has had a graph-level compiler — TensorRT — for years, and its model has always been the same: take a model description, run aggressive graph rewriting (kernel fusion, quantization calibration, layer selection, precision lowering), and emit a serialized engine that is then loaded and replayed at inference time. TensorRT-LLM inherits that build-then-run pattern; the docs hub describes the workflow as "build NVIDIA TensorRT engines that contain state-of-the-art optimizations" <code>[docs]</code>. The newer PyTorch-native LLM API softens that workflow — the GitHub README emphasizes "high-level Python LLM API" and PyTorch-native authoring rather than a discrete <code>trtllm-build</code> step <code>[github]</code>, and the developer hub explicitly markets a "PyTorch-native model authoring with stable production API" <code>[devhub]</code>. But the underlying mental model — compile, then serve — is still the right one.</p>
+  <p>That is what makes the AOT-vs-JIT framing useful when you are setting expectations next to vLLM. vLLM is, in practice, JIT-compiled like Python: you ship a model checkpoint, the engine inspects it, allocates pages, picks attention kernels, and starts serving. TRT-LLM is closer to AOT-compiled like C++: there is a meaningful build step where the engine for your specific model, hardware, max batch size, and precision is produced and committed. The cited sources do not write that analogy, but they do support both halves: the docs explicitly describe "build NVIDIA TensorRT engines" <code>[docs]</code>, and introl summarizes the practical consequence as "Setup Complexity: TensorRT-LLM High (weeks); vLLM Low (hours)" <code>[introl]</code>. The tradeoff is engineering time up front, in exchange for peak performance at serve time.</p>
+
+  <div class="viz-flow">
+    <div class="viz-box accent"><strong>Author</strong>PyTorch model<br>+ LLM API</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box accent"><strong>Build</strong>Graph rewrites,<br>kernel selection,<br>quantization calibration</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box green"><strong>TensorRT engine</strong>Serialized, hardware-<br>and shape-specific</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box orange"><strong>Serve</strong>PyExecutor<br>(Scheduler / KVCache /<br>ModelEngine / Sampler)</div>
+  </div>
+
+  <p>Where does it fit relative to vLLM and SGLang? The developer hub names AWS, Google Cloud, Microsoft, and Grammarly among ecosystem partners <code>[devhub]</code>; the project lists support for Llama 3.3 70B, Llama 4 Scout 17B, DeepSeek R1, Nemotron v3 Super, GPT-OSS, Qwen3, and Kimi K2 Thinking among the canonical deployment targets <code>[landing]</code>. The release cadence is heavy: the GitHub repo shows 76 total releases with v1.2.1 dated April 20, 2026 <code>[github]</code>. The marketing claim attached to the v1.0 cut is "8X AI inference performance improvement" with v1.0, and on Blackwell Ultra "up to 50x better performance and 35x lower cost" specifically for "agentic AI on NVIDIA Blackwell Ultra" <code>[devhub]</code>. Those are vendor numbers, not third-party benchmarks — keep that qualifier when you cite them.</p>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 2 — The optimization stack  (~10 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 2 — The optimization stack, mechanism by mechanism</div>
+  <p>The optimizations TRT-LLM ships fall into three families: ones that attack CPU-side launch overhead, ones that attack memory bandwidth or memory footprint, and ones that attack arithmetic by reshaping how decode steps are computed. The cited sources describe each one tersely; this segment walks through them in the order they appear in the docs and the release notes, with a short note on what bottleneck each one attacks.</p>
+
+  <div class="sec-h" style="font-size:14px;">CUDA Graphs and CUDA Graph padding</div>
+  <p>The architecture overview names CUDA Graph as a first-class runtime feature that "reduces CPU overhead by capturing kernel sequences" <code>[overview]</code>. The mechanism is the standard one: the host records the sequence of kernel launches that make up one decode iteration, then replays the captured graph in a single submission instead of issuing N individual launches. The bottleneck is host-side launch overhead — when the model is small or the GPU is fast enough that per-kernel launch latency starts to rival per-kernel work, the CPU becomes the gate. The overview specifically calls out <strong>CUDA Graph padding</strong> as a related runtime knob that yields "up to a 22% end-to-end throughput increase" <code>[overview]</code>. Padding here means rounding the dynamic batch up to a captured size so the graph can be reused — without it, every batch shape would invalidate the capture.</p>
+
+  <div class="sec-h" style="font-size:14px;">In-flight batching (continuous batching, but at the engine level)</div>
+  <p>Introl's optimization guide describes in-flight batching directly: "Inflight batching adds new requests to running batches at each generation step, processing context and generation phases together. The approach maximizes GPU utilization" <code>[introl]</code>. The architecture overview confirms it ships as "Paged Attention, IFB, and Request Scheduling" — the three primitives that compose continuous batching are listed together <code>[overview]</code>. Conceptually the technique is the same as vLLM's continuous batching — at every decode iteration, finished requests leave the batch and new prefill requests join — but it is implemented inside the same compiled engine that runs the matmuls, not as an outer Python scheduler over a frozen kernel. That co-location is what lets the engine fuse scheduler decisions into kernel launches in the first place.</p>
+
+  <div class="sec-h" style="font-size:14px;">PagedAttention in TRT-LLM</div>
+  <p>Paged KV caching in TRT-LLM is described by introl as "Paged attention allocates KV cache in non-contiguous blocks rather than requiring continuous memory regions. Block-level allocation enables sharing KV cache among requests with common prefixes" <code>[introl]</code>. The architecture overview lists it as a feature alongside IFB <code>[overview]</code>. The semantics are the ones a vLLM listener already knows — block-level allocation, no fragmentation, prefix sharing — so the right framing is that TRT-LLM has the same paging primitive, just compiled into the engine. Where it differs is in interaction with hand-tuned attention kernels: introl notes "Hand-optimized implementations of multi-head and grouped-query attention leverage Tensor Core instructions. FP8 attention kernels on Hopper and Blackwell GPUs provide additional speedups" <code>[introl]</code>. The release notes include "Multiblock Attention Boosts Throughput by More Than 3x for Long Sequence Lengths" as a specific paging-aware long-context optimization <code>[github]</code>.</p>
+
+  <div class="sec-h" style="font-size:14px;">Kernel fusion</div>
+  <p>Introl describes the fusion strategy in one line: "Multiple transformer operations [are combined] into single optimized CUDA kernels. LayerNorm, matrix multiplications, bias additions, and activation functions execute together" <code>[introl]</code>. The bottleneck this attacks is memory bandwidth — the unfused chain reads and writes the same activation tensors to HBM between every op, and on a modern GPU that round trip costs more than the math itself. Fusing LayerNorm + matmul + bias + activation into one kernel means the intermediates stay in registers or shared memory and never touch HBM. The fetch.ai writeup adds the GEMM-plugin and GPT-attention-plugin framing — the same kernels are wrapped as TensorRT plugins so they slot into the compiled graph <code>[fetch]</code>.</p>
+
+  <div class="sec-h" style="font-size:14px;">FP8 and NVFP4 quantization, and when each is used</div>
+  <p>The developer hub lists "FP8 and NVFP4 quantization" as headline optimization features, paired with paged KV caching and speculative decoding <code>[devhub]</code>. Introl ranks them by use case: <strong>FP8</strong> is "Best performance/accuracy tradeoff, requires Hopper/Blackwell"; <strong>INT8 SmoothQuant</strong> is the "Good alternative for Ada GPUs"; <strong>INT4 AWQ/GPTQ</strong> is for "Maximum compression for memory-constrained scenarios" and "excels in small-batch scenarios (batch size ≤ 4) where inference becomes memory-bound" <code>[introl]</code>. The release notes call out concrete operating points: "Falcon-180B on a single H200 GPU with INT4 AWQ" — a model that does not fit at FP16 fitting on one card after AWQ <code>[github]</code>. NVFP4 is the newer Blackwell-era format; introl ties it to the December 2025 releases that include "DeepSeek-R1 performance optimization for B200" and "NVFP4 (4-bit) quantization support" <code>[introl]</code>, and the wide-EP blog uses NVFP4 inside the AlltoAll combine to compress per-token expert outputs in flight <code>[ep3]</code>.</p>
+  <p>The mental model to take into an interview: FP8 is the throughput tier for current-generation Hopper/Blackwell, NVFP4 is the next step down for memory-bound and Blackwell-specific paths, and INT4 AWQ is the small-batch / memory-pressure escape hatch. Each one has Tensor Core support on the hardware that lists it.</p>
+
+  <div class="sec-h" style="font-size:14px;">Speculative decoding — EAGLE-3, MTP, n-gram, lookahead, Medusa</div>
+  <p>The TRT-LLM landing page enumerates the supported drafting methods explicitly: "N-Gram, Lookahead, Medusa, Eagle, Eagle3, and MTP (Multi-Token Prediction) decoding methods" <code>[landing]</code>. The developer hub specifically promotes "speculative decoding (EAGLE-3, multi-token prediction)" as headline optimizations <code>[devhub]</code>. Introl adds a magnitude estimate that holds across speculative variants in general: "The technique provides 1.5-2x speedup for compatible workloads" and benefits "latency-sensitive applications where time-to-completion matters" <code>[introl]</code>. The bottleneck speculative decoding attacks is the autoregressive serial chain — each accepted draft token saves one decode step — so the gain depends on accept rate, which depends on the drafter and the workload.</p>
+  <p>The cited sources do not give a deep mechanism explanation of EAGLE-3's "dynamic tree" or MTP's exact head structure; they list the methods as supported. The wide-EP blog does describe one MTP-side optimization explicitly: "MTP LM Head Tensor Parallelism" splits the LM head across 4 GPUs with intra-node AllGather and 4-way TP on the vocabulary, "reducing weight loading time in memory-bound scenarios" <code>[ep3]</code>. That is the only MTP internal detail any cited source provides.</p>
+
+  <div class="sec-h" style="font-size:14px;">Long-sequence and sparse-style attention</div>
+  <p>The cited sources do not document a feature literally called "sparse attention" in TRT-LLM. What they do document is multiblock attention: the GitHub release-notes list includes "Multiblock Attention Boosts Throughput by More Than 3x for Long Sequence Lengths" <code>[github]</code>. That is the long-context kernel that pays off the same way sparse attention would — it splits attention work into blocks that can run in parallel and avoids materializing the full attention matrix. Introl summarizes the family of long-sequence wins as "FP8 attention kernels on Hopper and Blackwell GPUs provide additional speedups" <code>[introl]</code>. If you need to talk about sparse attention specifically, flag it as not directly named in the public docs.</p>
+
+  <div class="sec-h" style="font-size:14px;">Overlap scheduler</div>
+  <p>The architecture overview lists the Overlap Scheduler as a runtime feature that "hide[s] CPU-bound latency behind GPU computation" <code>[overview]</code>. The mechanism — running scheduler bookkeeping for iteration N+1 while the GPU is still computing iteration N — is the same idea covered in the SGLang deep dive. The bottleneck it attacks is the CPU bubble between kernel launches when the host scheduler dominates wall-clock; padding plus graph capture handle the static-shape part, the overlap scheduler handles the dynamic-batch part. The overview does not give a TRT-LLM-specific magnitude for this knob alone.</p>
+
+  <div class="sec-h" style="font-size:14px;">A representative operating point</div>
+  <p>For a sense of where the stacked optimizations land, the landing page reports "H200 achieves nearly 12,000 tokens/sec on Llama2-13B" and "10,000 tok/s at 100ms to first token" on H100 <code>[landing]</code>. The repo highlights "24,000 tokens per second" achieved with Meta Llama 3 and "3x Faster AllReduce with NVSwitch and TensorRT LLM MultiShot" as a separate scaling-out claim <code>[github]</code>. These are vendor benchmarks under specific configs; treat them as upper bounds, not as anything you would reproduce on an arbitrary cluster.</p>
+
+  <div class="viz-grid viz-grid-3">
+    <div class="viz-card">
+      <div class="viz-card-title" style="color:#93c5fd;">CPU-side wins</div>
+      <p style="font-size:12px;color:#cbd5e1;margin:0;">CUDA Graph capture removes per-launch host overhead. CUDA Graph padding "up to 22% end-to-end throughput" <code>[overview]</code>. Overlap Scheduler hides CPU-bound latency behind GPU compute <code>[overview]</code>.</p>
+    </div>
+    <div class="viz-card">
+      <div class="viz-card-title" style="color:#fbbf24;">Memory-bandwidth wins</div>
+      <p style="font-size:12px;color:#cbd5e1;margin:0;">Kernel fusion keeps LayerNorm + matmul + bias + activation in registers/SRAM <code>[introl]</code>. Paged KV cache + custom attention kernels exploit Tensor Cores; FP8 attention on Hopper/Blackwell <code>[introl]</code>.</p>
+    </div>
+    <div class="viz-card" style="border-color:#059669;">
+      <div class="viz-card-title" style="color:#34d399;">Arithmetic / serial-chain wins</div>
+      <p style="font-size:12px;color:#cbd5e1;margin:0;">FP8 (Hopper/Blackwell), NVFP4 (Blackwell), INT4 AWQ (small-batch). Speculative decoding (Eagle, Eagle3, MTP, N-Gram, Lookahead, Medusa) — "1.5–2x speedup for compatible workloads" <code>[introl]</code><code>[landing]</code>.</p>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 3 — Wide expert parallelism and MoE  (~10 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 3 — Wide expert parallelism and the DeepSeek-class MoE story</div>
+  <p>The single biggest TRT-LLM differentiator the cited sources support is the wide-EP work for DeepSeek R1 and similar mixture-of-experts models. The developer hub flags it directly as a feature line: "Wide expert parallelism (EP) and disaggregated serving" <code>[devhub]</code>. The detailed engineering writeup lives in the wide-EP part-3 tech blog, and it is more specific than any other source in this section <code>[ep3]</code>.</p>
+
+  <div class="sec-h" style="font-size:14px;">The problem wide-EP solves</div>
+  <p>The blog frames it as the computational bottleneck of "massive Mixture-of-Experts (MoE) models like DeepSeek R1" — distributing expert computation across many GPUs so that a model with hundreds of experts can run on cluster-shaped hardware without each replica needing to hold every expert <code>[ep3]</code>. The hardware target is explicit: optimizations are designed for "NVIDIA GB200 NVL72 (dual-GPU nodes with NVLink3)" and "Blackwell architecture, leveraging superior FP8 Tensor performance and higher bandwidth compared to Hopper" <code>[ep3]</code>. The whole point of wide-EP is that an expert-parallel deployment turns the all-to-all communication step between MLP-down and MLP-up into the dominant cost — so the kernels that move tokens between experts have to be co-designed with the rest of the engine.</p>
+
+  <div class="sec-h" style="font-size:14px;">EP communication: AlltoAll redesign</div>
+  <p>The blog describes the AlltoAll work directly: TRT-LLM "redesigned and reimplemented AlltoAll" so that multiple data fields — hidden states, scaling factors, token routing information — fuse into single operations, "reducing kernel launch overhead critical in wide-EP scenarios" <code>[ep3]</code>. Then on the combine phase, where each expert's outputs flow back to the requesting tokens, the system "temporarily quantize[s] the per-token expert outputs to NVFP4, send[s] the compact representation across GPUs, and dequantize[s] back to the original dtype on the receiving side" — supported by PR 7155 and PR 7898 <code>[ep3]</code>. The technique compresses the wire payload exactly where the network is the bottleneck, and absorbs the quant/dequant cost on either side because the receiving GPU is already cheap on FP4.</p>
+
+  <div class="sec-h" style="font-size:14px;">Programmatic Dependent Launch (PDL)</div>
+  <p>The third EP-side trick in the blog is Programmatic Dependent Launch — a CUDA-level mechanism that "enables kernels to overlap execution within the same CUDA stream" <code>[ep3]</code>. The profiling examples in the blog show three kernels (<code>moeComputeRouteKernel</code>, <code>computeCountAndIndiceDevice</code>, <code>computeCumsumDevice</code>) executing strictly sequentially without PDL, then overlapping with PDL enabled <code>[ep3]</code>. It is the same idea as the overlap scheduler but at a finer grain — the host says "kernel B may begin once kernel A produces enough of its output," and the device hardware actually starts B without waiting for A to fully finish.</p>
+
+  <div class="sec-h" style="font-size:14px;">MLA-specific optimization</div>
+  <p>DeepSeek's Multi-head Latent Attention compresses keys and values into a smaller latent space, but the price is a more complex Q/K/V layout: "Q and K are divided into two parts: with RoPE and without RoPE" <code>[ep3]</code>. PR 6538 "eliminate[d] the need for concatenating Q/K/V, saving copy operations and significantly improving prefill latency in wide EP scenarios" <code>[ep3]</code>. There is also a quantization story specific to MLA: "FP8 Context FMHA" quantizes query projections to FP8 to match an FP8 KV cache, "enabling FP8 Tensor Core operations during prefill" — automatically enabled when an FP8 KV cache is selected (PR 7610, 7612) <code>[ep3]</code>. And the LM head itself gets a separate scaling treatment: "MTP LM Head Tensor Parallelism" performs intra-node AllGather across 4 GPUs, applies 4-way TP to split vocabulary weights, then collects local argmax logits before global reduction — "reducing weight loading time in memory-bound scenarios" (PR 7571, 7891) <code>[ep3]</code>.</p>
+  <p>One more MLA-side knob: "wo GEMM FP4 Quantization" quantizes the attention output projection to FP4 while "maintaining a similar MTP accept rate (AR)" using checkpoints from NVIDIA Model Optimizer <code>[ep3]</code>. The fact that the AR is preserved is the point — quantizing the wrong projection in a speculative pipeline collapses the accept rate and erases the speedup.</p>
+
+  <div class="viz-flow">
+    <div class="viz-box accent"><strong>Token routing</strong>moeComputeRouteKernel</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box accent"><strong>AlltoAll dispatch</strong>fused fields:<br>hidden + scales + routing</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box green"><strong>Expert MLPs</strong>FP8 / NVFP4<br>per-expert compute</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box orange"><strong>AlltoAll combine</strong>NVFP4 on the wire,<br>dequant on receiver</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box purple"><strong>MLA + MTP head</strong>FP8 Context FMHA,<br>4-way LM-head TP</div>
+  </div>
+
+  <div class="sec-h" style="font-size:14px;">Why this is a TRT-LLM differentiator</div>
+  <p>The blog itself does not give an engine-vs-engine table for wide-EP. What the cited sources support is the directional claim: TRT-LLM has invested heavily and specifically in EP communication kernels (AlltoAll fusion, NVFP4-on-the-wire), in MLA-aware kernel fusion (Q/K/V concat elimination, FP8 Context FMHA), in scaling-out tricks (PDL, MTP LM-head TP), and in Blackwell-class hardware exploitation (NVFP4, GB200 NVL72) — all driven by PR-level engineering against DeepSeek-R1 as a target workload <code>[ep3]</code>. SGLang has its own wide-EP work and so does vLLM, but the wide-EP blog's level of mechanism detail and the cadence of merged PRs are what an interview answer should point to as the TRT-LLM differentiator. Frame it as: when the workload is a frontier MoE on Blackwell, TRT-LLM is where the kernel-level optimization is being landed first.</p>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 4 — When to pick TRT-LLM vs vLLM  (~5 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 4 — TensorRT-LLM versus vLLM, the honest tradeoff</div>
+  <p>The cleanest head-to-head data point in the cited sources is in introl's optimization guide. On Llama-70B on A100, the comparative numbers are <code>[introl]</code>:</p>
+  <table>
+    <tr><th>Metric</th><th>TensorRT-LLM</th><th>vLLM</th></tr>
+    <tr><td>Peak throughput</td><td>~700 tokens/sec</td><td>~600–650 tokens/sec</td></tr>
+    <tr><td>Time-to-first-token</td><td>35–50 ms</td><td>50–80 ms</td></tr>
+    <tr><td>Short-sequence advantage</td><td>1.34× higher</td><td>baseline</td></tr>
+    <tr><td>Long-sequence TPOT advantage</td><td>2.72× better</td><td>baseline</td></tr>
+    <tr><td>Setup complexity</td><td>High (weeks)</td><td>Low (hours)</td></tr>
+  </table>
+  <p>Introl's framing of when each engine wins is direct <code>[introl]</code>. TRT-LLM is a strong fit when the team is "Committed to NVIDIA GPU infrastructure long-term," has "CUDA/TensorRT experience," is running workloads where "20-40% performance improvement justifies weeks of optimization," is at "Production scale deployments exceeding $50,000 monthly," or has "Sub-50ms TTFT requirements." It is a weak fit for "Rapid prototyping or experimental work," "Teams lacking NVIDIA optimization expertise," "Multi-cloud requirements," "Small-scale deployments where vLLM suffices," and "Frequent model changes." The summary line: "Deploy TensorRT-LLM when maximizing hardware efficiency justifies engineering investment. Choose vLLM for faster time-to-production or when operating at smaller scale" <code>[introl]</code>.</p>
+  <p>A decision framework you can defend in an interview, grounded in those numbers and the rest of this section:</p>
+  <ul>
+    <li><strong>Pick TRT-LLM</strong> when (a) the deployment is large enough that a 1.34×–2.72× window pays for weeks of build/calibration time <code>[introl]</code>, (b) the hardware is Blackwell or Blackwell Ultra and you want NVFP4 plus the Wide-EP kernels <code>[ep3]</code><code>[devhub]</code>, (c) the workload is a frontier MoE like DeepSeek R1 where the all-to-all and MLA optimizations land first <code>[ep3]</code>, or (d) TTFT below 50 ms is a hard product constraint <code>[introl]</code>.</li>
+    <li><strong>Pick vLLM</strong> when (a) time-to-production matters more than peak throughput, (b) hardware diversity matters (multi-cloud, AMD, future flexibility), (c) the model lineup changes faster than a build pipeline can keep up with, or (d) the deployment scale does not justify the build/validation engineering tax <code>[introl]</code>.</li>
+    <li><strong>Honest caveat:</strong> "1.34× / 2.72×" are introl's numbers for Llama-70B on A100; on Blackwell against the most recent vLLM with FlashAttention-3 and FP8, the gap will look different. Cite the framing, not the precise multiplier.</li>
+  </ul>
+  <p>The orthogonal point worth making in an interview: this is not a one-engine choice for a real production fleet. Most NVIDIA-aligned shops will end up running both — TRT-LLM for the high-volume flagship workloads, vLLM for the long tail of internal models, experiments, and hardware footprints that do not yet have an optimized TRT-LLM path. The infrastructure question then becomes how to operate two engines side by side, which is what NIM exists to absorb.</p>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 5 — NIM Factory framing  (~5 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 5 — What this means for a NIM Factory interview</div>
+  <p>The cited sources do not contain a description of NIM Factory's pipeline architecture, its validation matrix, or its container build internals. What they do contain — and what is fair game for an interview answer — is a clean picture of the artifact NIM ships and the build characteristics of the engine that produces that artifact. The rest is editorial extension.</p>
+
+  <div class="sec-h" style="font-size:14px;">What the sources do support about productized TRT-LLM</div>
+  <p>The artifact: TRT-LLM produces "NVIDIA TensorRT engines that contain state-of-the-art optimizations" <code>[docs]</code>, built from a model definition through the LLM Python API <code>[github]</code>. The build is shape- and hardware-specific — kernel selection, quantization calibration, and graph rewriting all bake in assumptions about target precision, max batch size, max sequence length, and parallelism layout. The runtime that loads the engine has the four-component shape described earlier: Scheduler, KVCacheManager, ModelEngine, Sampler <code>[overview]</code>. The optimizations that ship with it cover CUDA Graph capture and padding <code>[overview]</code>, in-flight batching and paged attention <code>[overview]</code><code>[introl]</code>, kernel fusion <code>[introl]</code>, FP8 / NVFP4 / INT4 AWQ quantization <code>[devhub]</code><code>[introl]</code><code>[github]</code>, six speculative-decoding methods including Eagle3 and MTP <code>[landing]</code>, multiblock attention for long sequences <code>[github]</code>, an overlap scheduler <code>[overview]</code>, wide expert parallelism with NVFP4-on-the-wire AlltoAll and PDL <code>[ep3]</code>, MLA-aware kernel fusion <code>[ep3]</code>, and disaggregated serving <code>[devhub]</code>.</p>
+  <p>The release-cadence picture from the cited sources: 76 total releases on the GitHub repo, with v1.2.1 dated April 20, 2026 <code>[github]</code>, plus the developer-hub claim of "8X AI inference performance improvement" with v1.0 and "up to 50x better performance and 35x lower cost" for "agentic AI on NVIDIA Blackwell Ultra" <code>[devhub]</code>. Ecosystem footprint: AWS, Google Cloud, Microsoft, Grammarly are listed partners <code>[devhub]</code>; canonical model targets in the deployment guides include Llama 3.3 70B, Llama 4 Scout, DeepSeek R1, Nemotron v3 Super, GPT-OSS, Qwen3, Kimi K2 <code>[landing]</code>.</p>
+
+  <div class="sec-h" style="font-size:14px;">Editorial postscript — beyond the cited sources</div>
+  <div class="warn"><strong>None of the cited sources document the NIM Factory pipeline, the NIM container build process, the validation matrix, or how pre-compiled engines are catalogued and shipped.</strong> What follows is editorial extension that maps what the sources <em>do</em> say about TRT-LLM onto the structural questions an interviewer would actually ask. Treat it as a reasoned exercise, not a sourced claim.</div>
+  <p>The build pipeline question. If the artifact is a pre-compiled TRT-LLM engine, then "what does the build pipeline look like" reduces to: for every supported (model × precision × hardware × parallelism × max-shape) tuple, run the LLM-API build, validate the resulting engine against a quality and performance bar, and publish the resulting container. The build itself is what the cited sources describe — kernel selection, calibration, graph rewriting <code>[docs]</code><code>[github]</code> — so the pipeline's hard problem is not the build, it is the surface area. Each new precision (FP8, NVFP4, INT4 AWQ) multiplies the matrix; each new hardware target (H100, H200, B200, GB200 NVL72) multiplies it again; each new parallelism layout (TP, PP, CP, EP, plus combinations) multiplies it again. The Wide-EP blog's PR-by-PR list of optimizations is a hint at how often the matrix's "right" cell is changing under you <code>[ep3]</code>.</p>
+  <p>The combinatorial scaling question. The honest answer is that you cannot enumerate the full Cartesian product; the validation matrix has to be pruned by usage. The sources do not document NIM's pruning rules, but the canonical model list at the landing page is a strong signal — Llama 3.3 70B, Llama 4 Scout, DeepSeek R1, Nemotron v3 Super, GPT-OSS, Qwen3, Kimi K2 <code>[landing]</code> are the models that get the productization investment, and the rest of the long tail is what vLLM in a NIM container is for.</p>
+  <p>The shipping-pre-compiled-vs-letting-customers-compile tradeoff. Pre-compiled engines (NIM-style) buy fast cold start, predictable performance, and a fixed validation surface — at the cost of inflexibility on shape, precision, or hardware that was not in the matrix. Customer-compiled engines buy flexibility — at the cost of build time (introl's "weeks" framing) <code>[introl]</code>, calibration data, and the operational burden of keeping the build pipeline current with TRT-LLM's release cadence (76 releases, last on 2026-04-20) <code>[github]</code>. NIM's value proposition is precisely to absorb that burden for the cell of the matrix that the customer actually needs.</p>
+  <p>The right interview move is to talk concretely about what the cited sources do say — the optimization stack, the wide-EP differentiator, the AOT-style build characteristic, the release cadence — and let the interviewer surface NIM-internal specifics. Do not invent an architecture for a pipeline you have not been shown.</p>
+
+  <div class="sec-h" style="font-size:14px;">A short list of things you can defend from the cited sources</div>
+  <ul>
+    <li>TRT-LLM builds TensorRT engines from an LLM Python API; the docs state "build NVIDIA TensorRT engines that contain state-of-the-art optimizations" <code>[docs]</code><code>[github]</code>.</li>
+    <li>The runtime's PyExecutor has four components: Scheduler, KVCacheManager, ModelEngine, Sampler <code>[overview]</code>.</li>
+    <li>CUDA Graph padding yields "up to a 22% end-to-end throughput increase" <code>[overview]</code>.</li>
+    <li>Six speculative-decoding methods are supported: N-Gram, Lookahead, Medusa, Eagle, Eagle3, MTP <code>[landing]</code>; speculative decoding gives "1.5–2x speedup for compatible workloads" <code>[introl]</code>.</li>
+    <li>FP8 / NVFP4 / INT4 AWQ quantization, with INT4 AWQ "excels in small-batch scenarios (batch size ≤ 4)" <code>[introl]</code><code>[github]</code>.</li>
+    <li>Wide-EP redesigned AlltoAll fuses hidden states + scaling factors + routing into one op; combine phase quantizes per-token expert outputs to NVFP4 on the wire (PR 7155, 7898) <code>[ep3]</code>.</li>
+    <li>MLA-specific PR 6538 eliminates Q/K/V concatenation; FP8 Context FMHA matches FP8 KV cache (PR 7610, 7612); MTP LM Head TP splits vocab 4-way intra-node (PR 7571, 7891) <code>[ep3]</code>.</li>
+    <li>Vendor operating points: H200 ~12,000 tok/s on Llama2-13B; H100 10,000 tok/s @ 100 ms TTFT; 24,000 tok/s on Meta Llama 3 with MultiShot AllReduce 3× faster; Multiblock Attention >3× throughput on long sequences; 8× v1.0 inference perf; up to 50× perf / 35× cost on Blackwell Ultra agentic AI <code>[landing]</code><code>[github]</code><code>[devhub]</code>.</li>
+    <li>Llama-70B / A100 head-to-head: ~700 vs ~600–650 tok/s, 35–50 vs 50–80 ms TTFT, 1.34× short-seq, 2.72× long-seq TPOT, "weeks" vs "hours" setup <code>[introl]</code>.</li>
+    <li>Release cadence: 76 releases, v1.2.1 on 2026-04-20 <code>[github]</code>.</li>
+  </ul>
+
+  <div class="resource-bar">
+    📖 <a href="https://nvidia.github.io/TensorRT-LLM/architecture/overview.html" target="_blank">TensorRT-LLM Architecture Overview</a>
+    <a href="https://nvidia.github.io/TensorRT-LLM/" target="_blank">TensorRT-LLM landing page</a>
+    <a href="https://developer.nvidia.com/tensorrt-llm" target="_blank">developer.nvidia.com/tensorrt-llm</a>
+    <a href="https://github.com/NVIDIA/TensorRT-LLM" target="_blank">NVIDIA/TensorRT-LLM on GitHub</a>
+    <a href="https://nvidia.github.io/TensorRT-LLM/blogs/tech_blog/blog14_Scaling_Expert_Parallelism_in_TensorRT-LLM_part3.html" target="_blank">Scaling Expert Parallelism in TensorRT-LLM (Part 3)</a>
+    <a href="https://docs.nvidia.com/tensorrt-llm/index.html" target="_blank">docs.nvidia.com/tensorrt-llm</a>
+    <a href="https://introl.com/blog/tensorrt-llm-optimization-nvidia-inference-stack-guide" target="_blank">introl.com TRT-LLM optimization guide</a>
+  </div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('sglang-dd')">&#8592; SGLang DeepDive</a><a class="pn-link pn-next" onclick="show('moe-dd')">MoE Inference &#8594;</a></div>
+</div>
+
+__MOE_DD_SECTION__
 
 </div>
 </div><!-- /flex column wrapper -->
@@ -4861,7 +5047,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
 /* ══════════════════════════════════════════════════════════
    SECTION ORDER + NAMES
    ══════════════════════════════════════════════════════════ */
-const order = ['tokenization','embeddings','qkv','multihead','layers','params','moe','numformats','sampling','quiz-ch1','mla','attnvariants','ssm','mtp','codesign','distill','lora','quiz-ch2','nvlink','parallelism','quiz-ch3','batching','kvcache','chunked','flashattn','quant','marlin','specdecode','optlist','quiz-ch4','reqlen','scheduling','outputpred','reqseqbatch','multiturn','agentic','disagg','quiz-ch5','traintoserve','engines','benchmarking','costeconomics','mfu','cuda','numlibs','fusion','fileformats','dynamo-orch','profiling','quiz-ch7','gpuinternals','cachehier','archroadmap','superchips','mig','otheraccel','formfactors','quiz-ch8','containers','autoscaling','multicloud','security','observability','clientside','quiz-ch9','sglang-dd'];
+const order = ['tokenization','embeddings','qkv','multihead','layers','params','moe','numformats','sampling','quiz-ch1','mla','attnvariants','ssm','mtp','codesign','distill','lora','quiz-ch2','nvlink','parallelism','quiz-ch3','batching','kvcache','chunked','flashattn','quant','marlin','specdecode','optlist','quiz-ch4','reqlen','scheduling','outputpred','reqseqbatch','multiturn','agentic','disagg','quiz-ch5','traintoserve','engines','benchmarking','costeconomics','mfu','cuda','numlibs','fusion','fileformats','dynamo-orch','profiling','quiz-ch7','gpuinternals','cachehier','archroadmap','superchips','mig','otheraccel','formfactors','quiz-ch8','containers','autoscaling','multicloud','security','observability','clientside','quiz-ch9','sglang-dd','trtllm-dd','moe-dd'];
 
 const sectionNames = {};
 document.querySelectorAll('.nav-item').forEach(btn => {

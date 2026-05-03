@@ -1,0 +1,91 @@
+Alex: So Jenny, I want to talk about two knobs today that look unrelated but actually fight each other in production all the time. LoRA serving and tensor parallelism.
+
+Jenny: Okay, I'll bite. Why those two together? In my head LoRA is a fine-tuning thing and TP is a "my model doesn't fit on one GPU" thing.
+
+Alex: Right, and that's exactly the trap. Both are deployment-time knobs — you don't retrain anything to use either one. But they push on completely different bottlenecks, and if you tune one without thinking about the other, you end up with a four-GPU deployment that's slower than your two-GPU one. Or a multi-tenant LoRA server that mysteriously falls off a cliff at thirty adapters.
+
+Jenny: Oh that's a fun failure mode. Okay, start me at LoRA. Pretend I only vaguely remember what an adapter is.
+
+Alex: Sure. A LoRA adapter is just a tiny pair of low-rank matrices — call them A and B — that you add to specific weight matrices in the base model. So instead of the original weight W, the layer effectively computes W plus B times A. The rank is small, usually eight to sixty-four, so the adapter itself is tiny. Maybe ten to fifty megabytes.
+
+Jenny: Tiny compared to a 70B model, yeah. So at serve time, what do I actually do with these things?
+
+Alex: Two options. Option one: merge. You compute W plus B·A once at load, throw the adapter away, and now you're just serving a normal model. Zero per-request overhead.
+
+Jenny: But then one model equals one adapter, right? I can't batch a request for "legal-tone fine-tune" together with "coding fine-tune" because they're literally different weights now.
+
+Alex: Exactly. Which kills you economically the moment you have more than one tenant. So option two is dynamic, or unmerged. You keep the base model resident once, you keep N adapters in GPU memory as separate small tensors, and per request you compute x·W plus x·A·B based on which adapter that request needs.
+
+Jenny: Hang on. So now every request in my batch might want a different adapter. That sounds like it'd wreck batching. Isn't the whole point of batched inference that you load the weights once and amortize them across the batch?
+
+Alex: That is exactly the hidden cost. You just nailed it. Compute-wise, the adapter math is cheap — like half a percent extra FLOPs per layer. Memory-wise, a hundred adapters is maybe one to five gigs, fits comfortably next to a 70B FP8 model. The killer is bandwidth. Each LoRA-aware kernel has to load the right A and B for every request in the batch, and if every request wants a different adapter, you've lost the amortization.
+
+Jenny: So my batch of thirty-two suddenly looks like thirty-two batches of one for the adapter math.
+
+Alex: Right. And that's where Punica comes in — the SGMV and BGMV kernels. The trick is to group requests in the batch by which adapter they want, so each adapter's matmul is itself a batched GEMM rather than thirty-two tiny ones. S-LoRA extended that with a unified paging scheme so adapters and KV cache share the same memory pool.
+
+Jenny: Oh wait. So it's basically the same idea as cache-aware routing — you're sorting your batch by something that lets you reuse weights. It's like consolidating EBS reads by volume instead of issuing them in random order.
+
+Alex: That's a great way to think about it. And the practical implication is wild: a batch of thirty-two requests all hitting adapter A serves nearly as fast as a batch of thirty-two with no LoRA at all. A batch of thirty-two requests across thirty-two different adapters can be two to four times slower.
+
+Jenny: So adapter diversity in the batch matters way more than how many adapters I have loaded.
+
+Alex: Way more. You can have five hundred adapters loaded and be fine, as long as your traffic concentrates on a handful of hot ones. It's a Zipf distribution problem, not a count problem.
+
+Jenny: Got it. Okay, switch me over to tensor parallelism. What does TP=N actually buy me?
+
+Alex: TP shards individual weight matrices across N GPUs. For attention, you split heads across GPUs. For the FFN, you split the up-projection column-wise and the down-projection row-wise. And every transformer layer ends with a collective communication step — an all-reduce — to glue the shards back together.
+
+Jenny: So I'm paying network on every single layer. That has to hurt.
+
+Alex: It does, and that's the whole tension. Let me give you the three things that change with TP=N. Each GPU holds 1/N of the weights and 1/N of the KV cache — that's the obvious win. Compute per GPU drops to roughly 1/N, which gives you near-linear speedup in compute-bound regimes. And bandwidth per GPU also drops to 1/N for weight loading, which is what helps decode.
+
+Jenny: Okay so for a 70B model on TP=8, each GPU only has to stream like nine gigs of weights per decode step instead of seventy. That's huge for memory-bandwidth-bound decode.
+
+Alex: Huge. But — and this is the catch — you've added two all-reduces per layer. On NVLink, that's a few hundred microseconds per layer. Across eighty layers per decode step, that's tens of milliseconds. On NVLink it's tolerable. Off NVLink, on PCIe or cross-node without NVSwitch, it's an order of magnitude worse and you lose the speedup entirely.
+
+Jenny: So the cross-node all-reduce is basically the cross-AZ network call of the inference world. You really, really don't want it on the hot path.
+
+Alex: Perfect analogy. Keep TP inside one NVLink domain — typically eight GPUs — and use pipeline or expert parallelism for any cross-node hop.
+
+Jenny: Okay so when does cranking TP up actually hurt me? Because my instinct is more sharding equals more parallelism equals faster.
+
+Alex: Here's the clean mental model. TP trades per-token latency for aggregate throughput, with the conversion rate set by how much the all-reduce eats. If you're latency-bound, big model, NVLink-connected — TP wins clearly. If you're throughput-bound and the model fits on one GPU comfortably, TP usually loses. Two TP=1 replicas in data-parallel will out-throughput one TP=2 instance on the same hardware, every time.
+
+Jenny: Because the second instance isn't paying any all-reduce tax.
+
+Alex: Right. Let me make it concrete. Llama-3 70B on eight H100s, three layouts. TP=8 with one giant instance — lowest per-token latency, best for chat with strict TTFT SLOs. TP=4 with two instances — usually the production sweet spot, often 1.4 to 1.7x higher total tokens per second than TP=8 at slightly worse per-token latency. TP=2 with four instances — highest aggregate throughput if everything fits, but per-token latency is the worst. That's your offline batch inference layout.
+
+Jenny: That's basically the same tradeoff curve as picking instance size in auto scaling. One huge box has lower coordination overhead per request, four small boxes give you better packing and concurrency. The sweet spot is almost never the extreme.
+
+Alex: Exactly. And the rule I'd give: pick the smallest TP that fits the model plus KV cache plus batch headroom, then scale out with data parallelism. Going to TP=N+1 "for safety" almost always costs throughput.
+
+Jenny: Okay, so where do these two knobs actually collide? Because I can feel it coming.
+
+Alex: Three places. First, the adapters get sharded too. Under TP, each LoRA's A and B matrices have to be split the same way as the base layer they target. Punica and the vLLM kernels handle this automatically, but custom LoRA code often doesn't, and that's where you see weird correctness bugs.
+
+Jenny: So if I roll my own adapter loader, I can silently corrupt the math.
+
+Alex: Yep. Second collision: cross-adapter batching gets harder under TP. Each rank now needs the right shard of the right adapter for every request in the batch. Per-adapter matmuls are smaller GEMMs, so you have less amortization headroom to begin with. And third, this is the practical one — if you're serving fifty-plus adapters on one base, picking TP=4 over TP=8 when both fit often gives meaningfully better throughput, because the LoRA matmuls become better-amortized per rank.
+
+Jenny: So multi-tenant LoRA servers should bias toward lower TP than single-tenant servers of the same model.
+
+Alex: All else equal, yes. The amortization loss from sharding the adapter math compounds with the all-reduce overhead.
+
+Jenny: That's such a non-obvious failure mode. You'd never figure that out from looking at single-model benchmarks.
+
+Alex: Which is exactly why teams blow up at thirty adapters. They benchmarked at TP=8 with one tenant and called it done.
+
+Jenny: Okay, so where does this story go next? If LoRA and TP are the deployment-time knobs, what's the next layer up?
+
+Alex: That's the perfect handoff. Because everything we just talked about assumes one base model on one node. The next conversation is about what happens when you've got a fleet — multiple base models, hundreds of adapters, traffic distributions you don't control. That's where disaggregated serving comes in: splitting prefill from decode onto different hardware pools because they have completely different bottleneck profiles.
+
+Jenny: Oh, like splitting your write path from your read path because they have different IOPS shapes.
+
+Alex: Exactly that. Prefill is compute-bound, decode is memory-bandwidth-bound. Running them on the same GPU means one always starves the other. And once you separate them, you start needing smart routing on top — which adapter, which prefix, which pool. It's basically the inference equivalent of building a real load balancer.
+
+Jenny: So the knobs we just talked about become inputs to a much bigger control plane.
+
+Alex: Right. And the next episode is where it gets really fun, because now you're not optimizing one server — you're designing the placement and routing policy for a whole fleet. See you there.
+
+Jenny: Can't wait.

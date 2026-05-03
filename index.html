@@ -344,7 +344,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <button class="ch-header" onclick="toggleChapter('ch4')">
       <span class="ch-arrow">&#9656;</span>
       <span class="ch-title">Optimization</span>
-      <span class="ch-count" id="count-ch4">0/9</span>
+      <span class="ch-count" id="count-ch4">0/10</span>
     </button>
     <div class="ch-topics">
       <button class="nav-item" data-sec="batching" onclick="show('batching')">Continuous Batching</button>
@@ -354,6 +354,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
       <button class="nav-item" data-sec="flashattn" onclick="show('flashattn')">FlashAttention</button>
       <button class="nav-item" data-sec="quant" onclick="show('quant')">Quantization Deep Dive</button>
       <button class="nav-item" data-sec="marlin" onclick="show('marlin')">Marlin Kernel</button>
+      <button class="nav-item" data-sec="loratp" onclick="show('loratp')">LoRA & TP at Inference <span class="new-badge">new</span></button>
       <button class="nav-item" data-sec="specdecode" onclick="show('specdecode')">Speculative Decoding</button>
       <button class="nav-item" data-sec="optlist" onclick="show('optlist')">Full Optimization List</button>
       <button class="nav-item" data-sec="quiz-ch4" onclick="show('quiz-ch4')">Chapter 4 Quiz</button>
@@ -2422,7 +2423,70 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   <div class="highlight">The bandwidth gap between SRAM (~20 TB/s) and HBM (~3.35 TB/s) is 6×. Every HBM read you eliminate, or replace with an SRAM read, unlocks 6× faster access to that data. This is why kernel engineering — which seems like low-level plumbing — produces such large end-to-end speedups in LLM inference.</div>
 
   <div class="resource-bar">📖 <a href="https://arxiv.org/abs/2408.11743" target="_blank">Marlin paper</a><a href="https://github.com/IST-DASLab/marlin" target="_blank">Marlin GitHub</a></div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('quant')">&#8592; Quantization Deep Dive</a><a class="pn-link pn-next" onclick="show('specdecode')">Speculative Decoding &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('quant')">&#8592; Quantization Deep Dive</a><a class="pn-link pn-next" onclick="show('loratp')">LoRA & TP at Inference &#8594;</a></div>
+</div>
+
+<div id="sec-loratp" class="hidden">
+<div class="breadcrumb">Optimization &rsaquo; LoRA & Tensor Parallelism at Inference</div>
+<h2>LoRA and tensor parallelism — two knobs, two very different cost shapes <span class="new-badge">new</span></h2>
+  <p class="subtitle">How adapter serving and TP degree each move the throughput / latency / memory dials — and how they interact</p>
+
+  <div class="sec-h">Why these two together</div>
+  <p>LoRA and tensor parallelism are both "deployment-time" knobs — you don't retrain the base model to use them. But they push on completely different bottlenecks. LoRA changes <em>what's in the batch</em> (which adapter each request needs); TP changes <em>how the model is laid out across GPUs</em> (which layer math runs where). Tuning one without thinking about the other is how teams end up with a 4-GPU deployment that's slower than a 2-GPU one, or a multi-tenant LoRA server that mysteriously falls off a cliff at 30 adapters.</p>
+
+  <div class="sec-h">LoRA at inference — the multi-tenant story</div>
+  <p>A LoRA adapter is a pair of low-rank matrices (A: d×r, B: r×d, r typically 8–64) that get added to specific base-model weight matrices: <code>W' = W + B·A</code>. Two ways to serve them at inference time:</p>
+  <ul>
+    <li><strong>Merged weights.</strong> Compute <code>W + B·A</code> once at load time, throw the adapter away, serve the merged model exactly like a normal model. Zero per-request overhead. But: one model = one adapter. You can't batch requests targeting different adapters together.</li>
+    <li><strong>Dynamic / unmerged.</strong> Keep the base model resident once, keep N adapters in GPU memory as separate small tensors, apply <code>x·W + (x·A)·B</code> per request based on which adapter that request needs. Adds two small matmuls per LoRA-touched layer per request. Lets you batch many tenants' requests together against one base model.</li>
+  </ul>
+  <p>Production multi-tenant servers (vLLM, TGI, SGLang) all use the unmerged path with specialized batched-LoRA kernels — the most cited is <strong>Punica</strong> (the SGMV / BGMV kernels), which group requests in the batch by their adapter so each adapter's matmul is itself a batched GEMM rather than N tiny ones. S-LoRA extended this with a unified paging scheme so adapters and KV cache share the same memory pool.</p>
+
+  <div class="sec-h">What LoRA actually costs you at inference</div>
+  <ul>
+    <li><strong>Compute:</strong> Small. The adapter math is two GEMMs of size (batch × d × r) and (batch × r × d). With r=16 and d=4096, that's ~0.5% extra FLOPs per attention/FFN layer. On a memory-bandwidth-bound decode step, this is essentially free.</li>
+    <li><strong>Memory:</strong> ~10–50 MB per adapter (depends on rank and how many layers it targets). 100 adapters ≈ 1–5 GB — fits comfortably alongside a 70B FP8 base model on an 8×H100 node. The cap is usually GPU memory minus model minus KV cache headroom, not adapter count per se.</li>
+    <li><strong>Bandwidth:</strong> The hidden cost. Each LoRA-aware kernel has to load A and B matrices for every request in the batch — and with heterogeneous adapters across the batch, you lose the "load weights once, reuse across batch" amortization that makes batched inference fast in the first place. Punica's whole point is to recover that amortization by grouping same-adapter requests.</li>
+    <li><strong>Throughput shape:</strong> A batch of 32 requests all using adapter A serves nearly as fast as a batch of 32 with no LoRA. A batch of 32 requests across 32 different adapters can be 2–4× slower because every adapter's matmul runs on a batch of 1. <strong>Adapter diversity in the batch matters more than adapter count in the system.</strong></li>
+  </ul>
+  <div class="highlight">Rule of thumb: if your traffic concentrates on a handful of "hot" adapters, dynamic LoRA is a near-free way to serve dozens-to-hundreds of fine-tunes from one base model. If every request hits a different adapter, you're paying close to the cost of running N separate models, just without the memory blowup.</div>
+
+  <div class="sec-h">Tensor parallelism at inference — what TP=N actually buys you</div>
+  <p>Tensor parallelism shards individual weight matrices across N GPUs. For attention: split heads across GPUs (each GPU computes its share of heads, then all-gather). For FFN: split the up-projection column-wise and the down-projection row-wise (column-parallel + row-parallel pattern), then all-reduce. Every layer ends with a collective communication step.</p>
+  <ul>
+    <li><strong>Memory:</strong> Each GPU holds 1/N of the weights and 1/N of the KV cache. This is the only reason to use TP for many models — a 70B FP16 model is ~140 GB and won't fit on one 80 GB H100, so TP=2 is forced. For a 7B model on an H100, TP=1 is almost always right.</li>
+    <li><strong>Compute per GPU:</strong> Drops to roughly 1/N. In compute-bound regimes (long prefill, large batch), this gives near-linear speedup.</li>
+    <li><strong>Bandwidth per GPU:</strong> Also drops to ~1/N for weight loading. This is where decode benefits — a 70B model on TP=8 means each GPU only loads ~9 GB of weights per decode step instead of 70 GB.</li>
+    <li><strong>Communication overhead:</strong> Two all-reduces per transformer layer. On NVLink (~600 GB/s on H100 NVL), this is a few hundred microseconds per layer. Across 80 layers per decode step, that's tens of milliseconds. Off NVLink (PCIe, or cross-node without NVSwitch) it's an order of magnitude worse and you can easily lose the speedup entirely.</li>
+  </ul>
+
+  <div class="sec-h">When TP helps decode latency vs. when it hurts throughput</div>
+  <p>The clean mental model: TP trades <strong>per-token latency</strong> for <strong>aggregate throughput</strong>, with the conversion rate set by how much the all-reduce eats.</p>
+  <ul>
+    <li><strong>Latency-bound, large model, NVLink-connected:</strong> TP wins clearly. A 70B model decoding at TP=4 can be ~2.5–3× faster per-token than TP=1 (which doesn't even fit). Each GPU has less HBM traffic per step; the all-reduce is small.</li>
+    <li><strong>Throughput-bound, large batch, model fits on one GPU:</strong> TP usually loses. You've doubled the GPU count but each step now includes communication. Two TP=1 replicas serving in data-parallel will out-throughput one TP=2 instance on the same hardware.</li>
+    <li><strong>Sweet spot — model barely fits at TP=N:</strong> Often best to pick the smallest TP that fits the model + KV cache + batch headroom, then scale out with data parallelism. Going to TP=N+1 "for safety" usually costs throughput.</li>
+    <li><strong>Cross-node TP:</strong> Avoid unless you have NVSwitch / NVLink across nodes. Otherwise, use pipeline or expert parallelism for the cross-node hop and keep TP within a single NVLink domain (typically 8 GPUs).</li>
+  </ul>
+
+  <div class="sec-h">A worked sketch — Llama-3 70B on 8×H100</div>
+  <p>Same hardware, same model, three layouts:</p>
+  <ul>
+    <li><strong>TP=8, DP=1 (one giant instance).</strong> Lowest per-token latency. Best choice for chat with strict TTFT/ITL SLOs at moderate concurrency. Throughput per GPU is the lowest of the three because of all-reduce overhead.</li>
+    <li><strong>TP=4, DP=2 (two instances).</strong> Common production sweet spot. Each instance still benefits from 4-way weight sharding; you double effective concurrency by running two replicas. Often 1.4–1.7× higher total tokens/s than TP=8 at slightly worse per-token latency.</li>
+    <li><strong>TP=2, DP=4 (four instances).</strong> Highest aggregate throughput if the model + KV cache + max batch fits at TP=2. Per-token latency is worst. Best for offline batch inference.</li>
+  </ul>
+
+  <div class="sec-h">Where the two knobs meet</div>
+  <p>LoRA serving and TP interact in a few specific places:</p>
+  <ul>
+    <li><strong>Adapters get sharded too.</strong> Under TP, each LoRA's A and B matrices are split the same way as the base layer they target (column-parallel A, row-parallel B for FFN-style adapters). Punica and the vLLM LoRA kernels are TP-aware and handle this automatically — but custom LoRA code often isn't.</li>
+    <li><strong>Cross-adapter batching is harder under TP.</strong> Each TP rank now needs the right shard of the right adapter for each request in the batch. Memory pressure on each rank goes up, and the per-adapter matmul is now a smaller GEMM (less amortization headroom). Multi-tenant LoRA servers usually prefer lower TP than single-tenant servers of the same model, all else equal.</li>
+    <li><strong>Practical guidance:</strong> If you're serving 50+ adapters on one base model, picking TP=4 over TP=8 (when both fit) often gives meaningfully better throughput because the LoRA matmuls become better-amortized per rank.</li>
+  </ul>
+
+  <div class="resource-bar">📖 <a href="https://arxiv.org/abs/2310.18547" target="_blank">Punica — multi-tenant LoRA serving</a><a href="https://arxiv.org/abs/2311.03285" target="_blank">S-LoRA — paged adapter serving</a><a href="https://arxiv.org/abs/1909.08053" target="_blank">Megatron-LM — original TP recipe</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('marlin')">&#8592; Marlin Kernel</a><a class="pn-link pn-next" onclick="show('specdecode')">Speculative Decoding &#8594;</a></div>
 </div>
 
 <div id="sec-specdecode" class="hidden">
@@ -2499,7 +2563,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   <div class="highlight">Speculative decoding is rare among inference optimizations: it offers free throughput gains (when acceptance rates are high) without any quality degradation. The costs are system complexity (running two models, managing verification logic) and memory overhead (holding both models in GPU memory). For production deployments with long outputs, this tradeoff is usually very favorable.</div>
 
   <div class="resource-bar">📖 <a href="https://arxiv.org/abs/2211.17192" target="_blank">Speculative Decoding (Chen et al. 2023)</a><a href="https://arxiv.org/abs/2302.01318" target="_blank">Draft & Verify — Accelerated Inference (Leviathan et al.)</a></div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('marlin')">&#8592; Marlin Kernel</a><a class="pn-link pn-next" onclick="show('optlist')">Full Optimization List &#8594;</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('loratp')">&#8592; LoRA & TP at Inference</a><a class="pn-link pn-next" onclick="show('optlist')">Full Optimization List &#8594;</a></div>
 </div>
 
 <div id="sec-optlist" class="hidden">

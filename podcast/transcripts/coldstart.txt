@@ -1,0 +1,105 @@
+Alex: So Jenny, I want to start with a number that I think will frustrate you as an infrastructure person. When you spin up a new LLM inference replica from scratch — a vanilla cold start, nothing optimized — you're looking at three to ten minutes before that thing serves its first token.
+
+Jenny: Wait. Three to ten minutes? For one replica? That's... I mean, when we autoscale EC2 fleets at AWS, we're sweating if a node takes ninety seconds to come into rotation.
+
+Alex: Right. And here's the thing — that gap is exactly why naive autoscaling on LLM workloads falls apart. By the time your CPU utilization or your latency metric crosses the threshold, you've already been violating SLO for four minutes while the new replica boots.
+
+Jenny: Okay, so before we get to the fixes — where are those minutes actually going? Because three minutes is a lot of wall clock to account for.
+
+Alex: That's the right question, and it's the whole game. Cold start is really five stacked bottlenecks, and the trick is none of them run in parallel. Every second you save in stage one still pays, because stage two is sitting there waiting.
+
+Jenny: Stacked, not parallel. Got it. Walk me through the stack.
+
+Alex: Stage one is GPU procurement. Your Kubernetes scheduler needs to find a pod a node with a free GPU. If a node already exists, that's milliseconds. If not, the cluster autoscaler — Karpenter, whatever — calls the cloud API and provisions a fresh GPU instance. That's sixty to a hundred and eighty seconds, longer if you're chasing constrained SKUs like H100 SXM where you're queuing against capacity pressure.
+
+Jenny: So that's basically EC2 instance launch time plus driver bootstrap. Same physics as any GPU workload.
+
+Alex: Exactly. Stage two is image pull. Your vLLM or SGLang container is eight to fifteen gigs, sometimes twenty-five for TRT-LLM. You're pulling that from a registry, gunzipping it, and unpacking layers onto the node's EBS volume.
+
+Jenny: And which leg dominates there — the network fetch or the unpack?
+
+Alex: Counterintuitively, the unpack. Disk write throughput on gp3 is the wall, not bandwidth. People assume it's network and they go optimize their registry, but the tar extraction is what's pinning them.
+
+Jenny: Huh. That's the kind of thing you'd only know from actually measuring.
+
+Alex: Right, and there's a sneakier thing too — the lazy-load tax. The container "finishes" pulling, but a lot of those bytes only get faulted in when the engine first imports them. So cost from stage two leaks into stage four and looks like engine warmup when it's really still image I/O.
+
+Jenny: Oh, that's evil. So your phase-level metrics lie to you.
+
+Alex: They lie unless you're careful. Stage three is weight load. This is the big one for anything bigger than a 7B. You're streaming hundreds of gigs of model weights from S3, through host RAM, into GPU HBM.
+
+Jenny: And that's three legs, right? S3 to disk, disk to RAM, RAM to GPU.
+
+Alex: Yeah, and any of them can be the wall. S3 to disk on a single thread is a hundred to seven hundred megabytes a second. A 140-gig Llama-70B checkpoint over one connection is multiple minutes. The default HuggingFace safetensors loader is serial across files, so the engine just sits there waiting on a single stream.
+
+Jenny: Wait, serial? In 2026? Why has nobody fixed that in the default loader?
+
+Alex: That's why Run:AI Model Streamer exists. It's a concurrent multi-stream reader, you flip one flag in vLLM — `--load-format runai_streamer` — and you get roughly a 2x speedup. It's the highest-ROI lever most teams aren't pulling.
+
+Jenny: One flag. That's almost embarrassing.
+
+Alex: It's the kind of thing where if you're not on it, you're leaving thirty seconds on the floor for free. Now stage four is engine warmup. Weights are in HBM, you're still not ready. CUDA context init, library imports, then torch.compile fuses the forward pass into Triton kernels — that's thirty to a hundred and twenty seconds the first time.
+
+Jenny: But that's cached, right? You only pay it once?
+
+Alex: Cached on disk, yes — but here's the trap. The cache has to match GPU plus CUDA plus PyTorch plus engine version exactly. You bump vLLM, cache invalidates, you eat a hundred and twenty seconds again.
+
+Jenny: So the cache is real but it's brittle. That's like a CloudFront invalidation problem — the cache is only useful if you can keep it warm across deploys.
+
+Alex: Perfect analogy. And there's a second JIT layer most people miss — FlashInfer, FlashAttention, TVM-FFI. Separate kernel libraries, separate caches. Even with torch.compile warm, those run on first request. The Doubleword folks did a great SGLang dissection showing this is the bucket everyone forgets.
+
+Jenny: Okay so let me push back. You're describing this multi-minute pipeline. What's the realistic floor with everything tuned?
+
+Alex: Without snapshots? Thirty to ninety seconds. With snapshots? Sub-ten.
+
+Jenny: Hold on. That's a 10x cliff. What's a snapshot doing that's so different?
+
+Alex: This is the part I love. So Modal, CRIUgpu, the vLLM RFC #34303 — they all do the same thing. You boot vLLM once, you run full warmup, compile, graph capture, weight load, the works. Then you snapshot the entire CUDA process state to disk. VRAM contents, kernel modules, captured graphs, host memory — all of it.
+
+Jenny: You're snapshotting GPU memory? That's... I didn't know you could do that.
+
+Alex: CRIU 4.0 plus NVIDIA's cuda-checkpoint userspace tool made it production-grade in the last eighteen months. Modal published a Qwen2.5 example: 45 seconds to 5 seconds. Mistral 3 case study, 10x. You're not re-running init — you're restoring it.
+
+Jenny: It's literally GPU process hibernation. Like instance state save on EC2 but for the CUDA context.
+
+Alex: That's exactly the right mental model. And it changes the whole problem. Cold start stops being "how do I make each of five stages faster" and becomes "how big is the snapshot artifact and how fast can I read it from the snapshot store."
+
+Jenny: Okay but what's the catch? There has to be a catch.
+
+Alex: A few. The snapshot is roughly model weight size times 1.05, so it's huge. It's per-driver-version brittle — cuda-checkpoint needs display driver 570+, 580+ for full device migration. And NCCL communicators don't survive suspend, so multi-GPU restore needs a reinit. Tensor-parallel vLLM with TP greater than one is fragile today.
+
+Jenny: So single-GPU is the safe path right now. Anything bigger and you're back to the snowflake territory.
+
+Alex: For now, yes. Single GPU, single replica, snapshots, sub-ten-second cold start. If you need TP across eight H100s, you're still in the thirty-to-ninety-second band.
+
+Jenny: Okay one more — there's a multi-tenant angle here too, right? Where you don't even want to restart, you just want to swap which model is hot?
+
+Alex: Yes, that's the sixth bottleneck nobody puts in the four-phase model. Tenant routing where the request itself selects the model. You can't pay sixty seconds per swap. So vLLM Sleep Mode keeps the process alive — Level 1 offloads weights to CPU RAM, Level 2 discards them and reloads from disk on wake. 18 to 200 times faster than full restart.
+
+Jenny: It's basically swap space for GPU memory. The OS has been doing this for forty years.
+
+Alex: It's exactly that. The novel part is just that nobody had bothered to build it for CUDA contexts until the multi-tenant inference economics demanded it.
+
+Jenny: So if I'm an EM looking at this — what's the playbook? Where do I start?
+
+Alex: Triage rule: don't optimize anything below your dominant bottleneck. If you're spending four minutes in image pull because Docker Hub is throttling you, no amount of Run:AI Streamer matters. Measure first, attack the largest phase. Then the stack-up is in-region registry, slim image, pre-baked AMI with EBS Fast Snapshot Restore, Run:AI Streamer, persist your compile caches, and finally snapshots if you can swing the operational complexity.
+
+Jenny: That's a five-hundred-second baseline down to single-digit seconds. And the order matters because each step pays even if the next one fails.
+
+Alex: Right. Snapshots subsume most of the earlier work, but you still want the earlier work because your snapshot pipeline will break, and you'll fall back to the multi-stage pipeline on bad days.
+
+Jenny: So what's coming next, where does this thread lead?
+
+Alex: This is where we get to autoscaling proper. Cold start is the input — once you know your replica takes ninety seconds, or ten seconds, or three minutes to come online, that completely changes which metric you autoscale on.
+
+Jenny: Because if my cold start is four minutes, CPU utilization is way too lagging. The replica is born already behind.
+
+Alex: Exactly. Next episode we're going to dig into queue depth as the leading indicator, the five autoscaling knobs everyone gets wrong, and why round-robin is the wrong load balancer default for KV-cache-aware serving. Cold start sets the budget — autoscaling is how you spend it.
+
+Jenny: And I assume "scale to zero" is going to come up as a trap.
+
+Alex: Big trap. It only works if you've already solved cold start. Otherwise scale-to-zero is just deferring the four-minute wait to your first user, who will hate you for it.
+
+Jenny: Looking forward to that one. See you next episode.
+
+Alex: See you then.

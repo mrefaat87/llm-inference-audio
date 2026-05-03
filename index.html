@@ -204,6 +204,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   .nav {
     position: fixed; left: -280px; top: 0; height: 100vh; z-index: 1000;
     transition: left 0.25s ease; width: 280px;
+    overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
   }
   .nav.open { left: 0; }
   .mobile-header { display: flex; }
@@ -246,6 +247,26 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
 .completion-dot:hover { border-color: #64748b; }
 .completion-dot.in-progress { background: #eab308; border-color: #eab308; }
 .completion-dot.done { background: #22c55e; border-color: #22c55e; }
+
+/* ── Up Next Queue ── */
+.queue-star { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; line-height: 16px; text-align: center; font-size: 13px; color: #475569; background: none; border: none; padding: 0; cursor: pointer; transition: color 0.15s, transform 0.15s; }
+.queue-star:hover { color: #94a3b8; transform: translateY(-50%) scale(1.15); }
+.queue-star.queued { color: #f59e0b; }
+.queue-group { border-bottom: 1px solid #1e2a3a; padding-bottom: 6px; margin-bottom: 6px; }
+.queue-group.empty { display: none; }
+.queue-header { display: flex; align-items: center; gap: 6px; padding: 10px 16px 6px; font-size: 11px; font-weight: 700; color: #f59e0b; text-transform: uppercase; letter-spacing: 0.05em; }
+.queue-header .queue-count { color: #64748b; font-weight: 500; margin-left: auto; }
+.queue-list { display: flex; flex-direction: column; }
+.queue-item { display: flex; align-items: center; gap: 4px; padding: 5px 10px 5px 16px; font-size: 12px; color: #cbd5e1; border-left: 2px solid transparent; cursor: pointer; transition: background 0.1s; }
+.queue-item:hover { background: #1a2035; }
+.queue-item.active { background: #1e2a45; border-left-color: #f59e0b; color: #fde68a; }
+.queue-item-num { width: 18px; flex-shrink: 0; font-size: 11px; color: #f59e0b; font-weight: 600; }
+.queue-item-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-item-controls { display: flex; gap: 2px; flex-shrink: 0; }
+.queue-btn { width: 20px; height: 20px; line-height: 18px; text-align: center; font-size: 12px; color: #64748b; background: none; border: none; padding: 0; cursor: pointer; border-radius: 3px; }
+.queue-btn:hover { background: #2d3748; color: #e2e8f0; }
+.queue-btn:disabled { opacity: 0.25; cursor: default; }
+.queue-btn:disabled:hover { background: none; color: #64748b; }
 
 /* ── Notes Section ── */
 .notes-section { margin-top: 32px; padding-top: 20px; border-top: 1px solid #1e2a3a; }
@@ -1154,6 +1175,15 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
   <div class="sec-h">The numbers from DeepSeek-V2</div>
   <p>DeepSeek-V2 introduced MLA and reported a 93% reduction in KV cache memory compared to their equivalent MHA baseline, with no meaningful quality loss on benchmarks. This is dramatically more aggressive than even MQA, which would only achieve ~1/64 reduction (one K/V head for 64 Q heads). MLA achieves this because it's compressing the information itself, not just sharing pointers to it.</p>
   <p>Practically: if GPT-3 MHA needs ~4.7 MB KV cache per token, an equivalent MLA model might need ~0.3 MB per token. At 100k tokens: 470 GB → ~30 GB. This change alone makes very-long-context serving fundamentally more economical.</p>
+
+  <div class="sec-h">MLA vs. KV cache quantization — different axes, they compose</div>
+  <p>A common point of confusion: MLA and KV cache quantization sound similar (both shrink the KV cache) but they operate on completely different axes and stack multiplicatively.</p>
+  <ul>
+    <li><strong>MLA changes the architecture.</strong> Instead of caching full per-head K and V tensors, it caches a small shared low-rank latent (plus a tiny RoPE key piece) and reconstructs K/V on the fly via learned up-projections. The cache shrinks because the <em>representation</em> is smaller. MLA must be trained in — you cannot bolt it onto an existing GQA or MHA model post-hoc.</li>
+    <li><strong>KV cache quantization is a post-training compression</strong> of whatever K/V you already cache: store them in INT8, INT4, or FP8 instead of FP16/BF16. Architecture is unchanged; you trade precision for bytes (with per-channel/per-token scales and outlier handling to keep the quality hit small).</li>
+  </ul>
+  <p>They compose. MLA's cache is just tensors — the latent vector plus the RoPE key — so you can quantize those tensors the same way. DeepSeek-V2/V3 production deployments do exactly this: MLA for the architectural shrink, then FP8 on the latent for another multiplicative reduction. The caveat: MLA's latent is already information-dense with low redundancy, so aggressive quantization tends to hurt it more per bit than it hurts a fat MHA cache. In practice people stay at FP8 on the latent rather than pushing INT4 without careful calibration.</p>
+  <p>Mental model: <strong>MLA reduces how many numbers you store per token; quantization reduces how many bits per number.</strong> Orthogonal axes, multiply together.</p>
 
   <div class="sec-h">Why Kimi K2 and others adopted it</div>
   <p>Kimi K2 uses MLA combined with their reduced attention head count and increased expert sparsity. These are all facets of the same co-design philosophy: reduce the parts of the architecture that scale badly with context (attention heads + KV cache memory), and increase the parts that scale well (MoE experts). The combination lets them serve 128k+ context requests at costs competitive with models serving much shorter contexts.</p>
@@ -5836,6 +5866,131 @@ document.querySelectorAll('.nav-item[data-sec]').forEach(btn => {
   dot.addEventListener('click', (e) => cycleCompletion(secId, dot, e));
   btn.appendChild(dot);
 });
+
+/* ══════════════════════════════════════════════════════════
+   UP NEXT QUEUE (manual section queue, persisted)
+   ══════════════════════════════════════════════════════════ */
+let upNextQueue = JSON.parse(localStorage.getItem('llm-ref-queue') || '[]');
+
+function saveQueue() {
+  localStorage.setItem('llm-ref-queue', JSON.stringify(upNextQueue));
+}
+
+function toggleQueue(secId, e) {
+  e.stopPropagation();
+  const idx = upNextQueue.indexOf(secId);
+  if (idx >= 0) upNextQueue.splice(idx, 1);
+  else upNextQueue.push(secId);
+  saveQueue();
+  renderQueue();
+  updateStarStates();
+}
+
+function removeFromQueue(secId, e) {
+  e.stopPropagation();
+  const idx = upNextQueue.indexOf(secId);
+  if (idx >= 0) {
+    upNextQueue.splice(idx, 1);
+    saveQueue();
+    renderQueue();
+    updateStarStates();
+  }
+}
+
+function moveInQueue(secId, delta, e) {
+  e.stopPropagation();
+  const idx = upNextQueue.indexOf(secId);
+  const target = idx + delta;
+  if (idx < 0 || target < 0 || target >= upNextQueue.length) return;
+  [upNextQueue[idx], upNextQueue[target]] = [upNextQueue[target], upNextQueue[idx]];
+  saveQueue();
+  renderQueue();
+}
+
+function navItemTitle(secId) {
+  const btn = document.querySelector('.nav-item[data-sec="' + secId + '"]');
+  if (!btn) return secId;
+  // Strip the appended completion-dot text by cloning and removing children we don't want
+  const clone = btn.cloneNode(true);
+  clone.querySelectorAll('.completion-dot, .queue-star, .new-badge').forEach(n => n.remove());
+  return clone.textContent.trim();
+}
+
+function updateStarStates() {
+  document.querySelectorAll('.queue-star').forEach(star => {
+    const queued = upNextQueue.includes(star.dataset.sec);
+    star.classList.toggle('queued', queued);
+    star.textContent = queued ? '★' : '☆';
+    star.title = queued ? 'Remove from Up Next' : 'Add to Up Next';
+  });
+}
+
+function renderQueue() {
+  const group = document.getElementById('queueGroup');
+  if (!group) return;
+  const list = group.querySelector('.queue-list');
+  const count = group.querySelector('.queue-count');
+  list.innerHTML = '';
+  group.classList.toggle('empty', upNextQueue.length === 0);
+  count.textContent = upNextQueue.length ? upNextQueue.length : '';
+  upNextQueue.forEach((secId, i) => {
+    const item = document.createElement('div');
+    item.className = 'queue-item' + (secId === currentSec ? ' active' : '');
+    item.onclick = () => show(secId);
+    const isFirst = i === 0;
+    const isLast = i === upNextQueue.length - 1;
+    item.innerHTML =
+      '<span class="queue-item-num">' + (i + 1) + '.</span>' +
+      '<span class="queue-item-title"></span>' +
+      '<span class="queue-item-controls">' +
+        '<button class="queue-btn" title="Move up"' + (isFirst ? ' disabled' : '') + '>↑</button>' +
+        '<button class="queue-btn" title="Move down"' + (isLast ? ' disabled' : '') + '>↓</button>' +
+        '<button class="queue-btn" title="Remove">×</button>' +
+      '</span>';
+    item.querySelector('.queue-item-title').textContent = navItemTitle(secId);
+    const [upBtn, downBtn, rmBtn] = item.querySelectorAll('.queue-btn');
+    upBtn.onclick = (e) => moveInQueue(secId, -1, e);
+    downBtn.onclick = (e) => moveInQueue(secId, 1, e);
+    rmBtn.onclick = (e) => removeFromQueue(secId, e);
+    list.appendChild(item);
+  });
+}
+
+// Inject the Up Next group at the top of the sidebar (after search, before chapters)
+(function initQueueUI() {
+  const sidebar = document.getElementById('sidebar');
+  const firstCh = sidebar.querySelector('.ch-group');
+  const group = document.createElement('div');
+  group.className = 'queue-group empty';
+  group.id = 'queueGroup';
+  group.innerHTML =
+    '<div class="queue-header">' +
+      '<span>★ Up Next</span>' +
+      '<span class="queue-count"></span>' +
+    '</div>' +
+    '<div class="queue-list"></div>';
+  sidebar.insertBefore(group, firstCh);
+
+  // Add a star button to every nav-item
+  document.querySelectorAll('.nav-item[data-sec]').forEach(btn => {
+    const star = document.createElement('button');
+    star.className = 'queue-star';
+    star.dataset.sec = btn.dataset.sec;
+    star.addEventListener('click', (e) => toggleQueue(btn.dataset.sec, e));
+    btn.appendChild(star);
+  });
+  updateStarStates();
+  renderQueue();
+})();
+
+// Re-highlight active queue item when navigating (wraps show())
+const _origShow = window.show;
+window.show = function(id) {
+  _origShow(id);
+  document.querySelectorAll('.queue-item').forEach((it, i) => {
+    it.classList.toggle('active', upNextQueue[i] === id);
+  });
+};
 
 /* ══════════════════════════════════════════════════════════
    NOTES SECTION (per-page free text)

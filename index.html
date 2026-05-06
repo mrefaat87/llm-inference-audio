@@ -6263,13 +6263,14 @@ function applyMergedDoc(merged) {
 function mergeDocs(local, remote) {
   const ls = local.stamps || {}, rs = remote.stamps || {};
   const merged = { stamps: {} };
-  // queue: whole-array LWW, but pending local always wins
+  // queue: whole-array LWW, but pending local always wins. Copy the array so
+  // applyMergedDoc clearing upNextQueue doesn't also empty merged.queue.
   const queuePending = pendingFields.has(pendKey('queue', null));
   if (!queuePending && isNewer(rs.queue, ls.queue)) {
-    merged.queue = remote.queue || [];
+    merged.queue = (remote.queue || []).slice();
     if (rs.queue) merged.stamps.queue = rs.queue;
   } else {
-    merged.queue = local.queue || [];
+    merged.queue = (local.queue || []).slice();
     if (ls.queue) merged.stamps.queue = ls.queue;
   }
   // completion + notes: per-section LWW; pending local always wins

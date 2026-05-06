@@ -268,6 +268,38 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
 .queue-btn:disabled { opacity: 0.25; cursor: default; }
 .queue-btn:disabled:hover { background: none; color: #64748b; }
 
+/* ── GitHub Gist Sync ── */
+.sync-row { display: flex; align-items: center; gap: 6px; margin: 0 14px 8px; font-size: 11px; color: #64748b; }
+.sync-status { display: inline-flex; align-items: center; gap: 5px; }
+.sync-dot { width: 8px; height: 8px; border-radius: 50%; background: #475569; transition: background 0.2s; }
+.sync-dot.synced { background: #22c55e; }
+.sync-dot.pending { background: #eab308; }
+.sync-dot.error { background: #ef4444; }
+.sync-dot.off { background: #475569; }
+.sync-text { font-size: 11px; color: #64748b; }
+.sync-gear { margin-left: auto; background: none; border: 1px solid #2d3748; color: #94a3b8; cursor: pointer; padding: 4px 6px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; }
+.sync-gear:hover { background: #1a2035; color: #e2e8f0; border-color: #3b82f6; }
+
+.sync-modal-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 2000; }
+.sync-modal-backdrop.open { display: flex; align-items: center; justify-content: center; }
+.sync-modal { background: #131825; border: 1px solid #2d3748; border-radius: 10px; padding: 20px; max-width: 480px; width: 92%; color: #e2e8f0; font-size: 13px; line-height: 1.55; }
+.sync-modal h3 { margin: 0 0 12px; font-size: 16px; color: #f1f5f9; }
+.sync-modal p { margin: 6px 0 12px; color: #94a3b8; }
+.sync-modal label { display: block; font-size: 12px; color: #cbd5e1; margin: 10px 0 4px; }
+.sync-modal input { width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid #2d3748; background: #0a0d14; color: #e2e8f0; font-size: 13px; font-family: ui-monospace, monospace; outline: none; box-sizing: border-box; }
+.sync-modal input:focus { border-color: #3b82f6; }
+.sync-modal-actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+.sync-btn { padding: 7px 14px; border-radius: 6px; border: 1px solid #2d3748; background: #1a2035; color: #e2e8f0; font-size: 12px; cursor: pointer; font-family: inherit; }
+.sync-btn:hover { background: #243049; }
+.sync-btn.primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+.sync-btn.primary:hover { background: #2563eb; }
+.sync-btn.danger { background: #7f1d1d; border-color: #991b1b; color: #fee2e2; }
+.sync-btn:disabled { opacity: 0.4; cursor: default; }
+.sync-msg { margin-top: 10px; font-size: 12px; min-height: 16px; }
+.sync-msg.ok { color: #22c55e; }
+.sync-msg.err { color: #ef4444; }
+.sync-modal a { color: #93c5fd; }
+
 /* ── Notes Section ── */
 .notes-section { margin-top: 32px; padding-top: 20px; border-top: 1px solid #1e2a3a; }
 .notes-label { font-size: 13px; font-weight: 600; color: #94a3b8; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
@@ -282,6 +314,26 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
 <!-- Mobile sidebar backdrop -->
 <div class="nav-backdrop" id="navBackdrop" onclick="closeSidebar()"></div>
 
+<!-- Sync settings modal -->
+<div class="sync-modal-backdrop" id="syncModalBackdrop" onclick="if(event.target===this)closeSyncModal()">
+  <div class="sync-modal">
+    <h3>Sync via GitHub Gist</h3>
+    <p>Sync your queue, completion progress, and notes across devices using a private GitHub Gist. Your data stays in your account.</p>
+    <p style="font-size: 11px;">Create a fine-grained personal access token with <strong>Gists: read &amp; write</strong> at <a href="https://github.com/settings/tokens?type=beta" target="_blank">github.com/settings/tokens</a>. The token is stored in this browser only.</p>
+    <label for="syncToken">GitHub personal access token</label>
+    <input type="password" id="syncToken" placeholder="github_pat_…" autocomplete="off">
+    <label for="syncGistId">Gist ID <span style="color:#64748b">(leave blank to create a new one)</span></label>
+    <input type="text" id="syncGistId" placeholder="abc123def456…" autocomplete="off">
+    <div class="sync-msg" id="syncMsg"></div>
+    <div class="sync-modal-actions">
+      <button class="sync-btn primary" onclick="saveSyncSettings()">Save &amp; sync now</button>
+      <button class="sync-btn" onclick="syncNow()">Sync now</button>
+      <button class="sync-btn danger" onclick="disableSync()">Disable sync</button>
+      <button class="sync-btn" onclick="closeSyncModal()" style="margin-left:auto">Close</button>
+    </div>
+  </div>
+</div>
+
 <div class="container">
 <!-- Mobile header (visible <768px) -->
 <div class="mobile-header">
@@ -292,6 +344,18 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
 <div class="nav" id="sidebar">
   <div class="nav-brand"><span>LLM</span> Inference Reference</div>
   <div class="nav-search"><input type="text" id="search" placeholder="Search topics..." oninput="filterNav(this.value)"></div>
+  <div class="sync-row" id="syncRow">
+    <span class="sync-status" id="syncStatus" title="Sync status">
+      <span class="sync-dot off" id="syncDot"></span>
+      <span class="sync-text" id="syncText">Sync off</span>
+    </span>
+    <button class="sync-gear" id="syncGear" title="Sync settings" onclick="openSyncModal()" aria-label="Sync settings">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block">
+        <circle cx="12" cy="12" r="3"></circle>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+      </svg>
+    </button>
+  </div>
   <div class="ch-group open" data-ch="ch1">
     <button class="ch-header" onclick="toggleChapter('ch1')">
       <span class="ch-arrow">&#9656;</span>
@@ -5912,6 +5976,7 @@ function cycleCompletion(secId, dot, e) {
   }
   localStorage.setItem('llm-ref-completion', JSON.stringify(completionState));
   applyDotState(dot, next);
+  if (typeof markFieldChanged === 'function') markFieldChanged('completion', secId);
 }
 
 function applyDotState(dot, state) {
@@ -5938,6 +6003,7 @@ let upNextQueue = JSON.parse(localStorage.getItem('llm-ref-queue') || '[]');
 
 function saveQueue() {
   localStorage.setItem('llm-ref-queue', JSON.stringify(upNextQueue));
+  if (typeof markFieldChanged === 'function') markFieldChanged('queue', null);
 }
 
 function toggleQueue(secId, e) {
@@ -6070,6 +6136,7 @@ function saveNote(secId, textarea, indicator) {
     delete notesData[secId];
   }
   localStorage.setItem('llm-ref-notes', JSON.stringify(notesData));
+  if (typeof markFieldChanged === 'function') markFieldChanged('notes', secId);
   indicator.classList.add('visible');
   clearTimeout(noteSaveTimer);
   noteSaveTimer = setTimeout(() => indicator.classList.remove('visible'), 1500);
@@ -6082,7 +6149,7 @@ document.querySelectorAll('.content > div[id^="sec-"]').forEach(sec => {
   notesDiv.className = 'notes-section';
   notesDiv.innerHTML =
     '<div class="notes-label">My Notes <span class="notes-saved" id="notesSaved-' + secId + '">Saved</span></div>' +
-    '<textarea class="notes-textarea" placeholder="Add your notes, questions, or teach-back summaries here..." id="notesArea-' + secId + '"></textarea>';
+    '<textarea class="notes-textarea" data-sec="' + secId + '" placeholder="Add your notes, questions, or teach-back summaries here..." id="notesArea-' + secId + '"></textarea>';
   sec.appendChild(notesDiv);
   const textarea = notesDiv.querySelector('textarea');
   const indicator = notesDiv.querySelector('.notes-saved');
@@ -6093,6 +6160,251 @@ document.querySelectorAll('.content > div[id^="sec-"]').forEach(sec => {
 /* ══════════════════════════════════════════════════════════
    INITIALIZATION
    ══════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════
+   SYNC ENGINE — GitHub Gist (queue + completion + notes)
+   ══════════════════════════════════════════════════════════ */
+const SYNC_FILE = 'audio-reader-state.json';
+const SYNC_DEBOUNCE_MS = 2500;
+const SYNC_PULL_INTERVAL_MS = 30000;
+
+const syncCfg = {
+  token: localStorage.getItem('llm-ref-sync-token') || '',
+  gistId: localStorage.getItem('llm-ref-sync-gist') || '',
+};
+const fieldStamps = JSON.parse(localStorage.getItem('llm-ref-stamps') || '{}');
+let pushTimer = null;
+let syncing = false;
+
+function syncEnabled() { return !!(syncCfg.token && syncCfg.gistId); }
+function nowISO() { return new Date().toISOString(); }
+function isNewer(a, b) { return (a || '') > (b || ''); }
+
+function setSyncStatus(state, text) {
+  const dot = document.getElementById('syncDot');
+  const txt = document.getElementById('syncText');
+  if (!dot || !txt) return;
+  dot.classList.remove('synced', 'pending', 'error', 'off');
+  dot.classList.add(state);
+  txt.textContent = text;
+}
+
+function saveStamps() {
+  localStorage.setItem('llm-ref-stamps', JSON.stringify(fieldStamps));
+}
+
+function markFieldChanged(field, key) {
+  const ts = nowISO();
+  if (key) {
+    fieldStamps[field] = fieldStamps[field] || {};
+    fieldStamps[field][key] = ts;
+  } else {
+    fieldStamps[field] = ts;
+  }
+  saveStamps();
+  schedulePush();
+}
+
+function schedulePush() {
+  if (!syncEnabled()) return;
+  setSyncStatus('pending', 'Saving…');
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(syncNow, SYNC_DEBOUNCE_MS);
+}
+
+function buildLocalDoc() {
+  return {
+    queue: upNextQueue,
+    completion: completionState,
+    notes: notesData,
+    stamps: fieldStamps,
+    _client: 'audio-reader',
+  };
+}
+
+function applyMergedDoc(merged) {
+  // queue
+  upNextQueue.length = 0;
+  (merged.queue || []).forEach(s => upNextQueue.push(s));
+  localStorage.setItem('llm-ref-queue', JSON.stringify(upNextQueue));
+  renderQueue();
+  updateStarStates();
+  // completion
+  Object.keys(completionState).forEach(k => delete completionState[k]);
+  Object.assign(completionState, merged.completion || {});
+  localStorage.setItem('llm-ref-completion', JSON.stringify(completionState));
+  document.querySelectorAll('.completion-dot').forEach(dot => {
+    const btn = dot.closest('.nav-item');
+    const sec = btn && btn.dataset.sec;
+    if (sec) applyDotState(dot, completionState[sec] || 0);
+  });
+  updateCounts();
+  // notes
+  Object.keys(notesData).forEach(k => delete notesData[k]);
+  Object.assign(notesData, merged.notes || {});
+  localStorage.setItem('llm-ref-notes', JSON.stringify(notesData));
+  document.querySelectorAll('.notes-textarea').forEach(ta => {
+    const sec = ta.dataset.sec;
+    if (sec) ta.value = notesData[sec] || '';
+  });
+  // stamps
+  Object.keys(fieldStamps).forEach(k => delete fieldStamps[k]);
+  Object.assign(fieldStamps, merged.stamps || {});
+  saveStamps();
+}
+
+function mergeDocs(local, remote) {
+  const ls = local.stamps || {}, rs = remote.stamps || {};
+  const merged = { stamps: {} };
+  // queue: whole-array LWW
+  if (isNewer(rs.queue, ls.queue)) {
+    merged.queue = remote.queue || [];
+    if (rs.queue) merged.stamps.queue = rs.queue;
+  } else {
+    merged.queue = local.queue || [];
+    if (ls.queue) merged.stamps.queue = ls.queue;
+  }
+  // completion + notes: per-section LWW
+  for (const field of ['completion', 'notes']) {
+    merged[field] = {};
+    merged.stamps[field] = {};
+    const lf = local[field] || {}, rf = remote[field] || {};
+    const lfs = ls[field] || {}, rfs = rs[field] || {};
+    const keys = new Set([...Object.keys(lf), ...Object.keys(rf), ...Object.keys(lfs), ...Object.keys(rfs)]);
+    keys.forEach(k => {
+      const winRemote = isNewer(rfs[k], lfs[k]);
+      const src = winRemote ? rf : lf;
+      const ts = winRemote ? rfs[k] : lfs[k];
+      if (k in src) {
+        merged[field][k] = src[k];
+        if (ts) merged.stamps[field][k] = ts;
+      }
+    });
+  }
+  return merged;
+}
+
+async function ghFetch(path, options = {}) {
+  const headers = {
+    'Accept': 'application/vnd.github+json',
+    'Authorization': 'Bearer ' + syncCfg.token,
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+  if (options.body) headers['Content-Type'] = 'application/json';
+  const res = await fetch('https://api.github.com' + path, { ...options, headers });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(res.status + ' ' + (txt || res.statusText).slice(0, 200));
+  }
+  return res.json();
+}
+
+async function pullRemote() {
+  const gist = await ghFetch('/gists/' + syncCfg.gistId);
+  const file = gist.files && gist.files[SYNC_FILE];
+  if (!file) return null;
+  let content = file.content || '';
+  if (file.truncated && file.raw_url) {
+    const r = await fetch(file.raw_url);
+    content = await r.text();
+  }
+  try { return JSON.parse(content); } catch { return null; }
+}
+
+async function pushRemote(doc) {
+  const body = JSON.stringify({ files: { [SYNC_FILE]: { content: JSON.stringify(doc, null, 2) } } });
+  await ghFetch('/gists/' + syncCfg.gistId, { method: 'PATCH', body });
+}
+
+async function createGist() {
+  const body = JSON.stringify({
+    description: 'audio-reader sync state',
+    public: false,
+    files: { [SYNC_FILE]: { content: JSON.stringify(buildLocalDoc(), null, 2) } },
+  });
+  const gist = await ghFetch('/gists', { method: 'POST', body });
+  syncCfg.gistId = gist.id;
+  localStorage.setItem('llm-ref-sync-gist', gist.id);
+  return gist.id;
+}
+
+async function syncNow() {
+  if (!syncEnabled() || syncing) return;
+  syncing = true;
+  setSyncStatus('pending', 'Syncing…');
+  try {
+    const remote = await pullRemote();
+    const local = buildLocalDoc();
+    const merged = remote ? mergeDocs(local, remote) : local;
+    if (remote) applyMergedDoc(merged);
+    await pushRemote(merged);
+    const t = new Date();
+    setSyncStatus('synced', 'Synced ' + t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+  } catch (e) {
+    setSyncStatus('error', 'Sync error');
+    console.error('[sync]', e);
+  } finally {
+    syncing = false;
+  }
+}
+
+function openSyncModal() {
+  document.getElementById('syncToken').value = syncCfg.token;
+  document.getElementById('syncGistId').value = syncCfg.gistId;
+  const msg = document.getElementById('syncMsg');
+  msg.textContent = ''; msg.className = 'sync-msg';
+  document.getElementById('syncModalBackdrop').classList.add('open');
+}
+function closeSyncModal() {
+  document.getElementById('syncModalBackdrop').classList.remove('open');
+}
+async function saveSyncSettings() {
+  const token = document.getElementById('syncToken').value.trim();
+  const gistId = document.getElementById('syncGistId').value.trim();
+  const msg = document.getElementById('syncMsg');
+  if (!token) { msg.textContent = 'Token required.'; msg.className = 'sync-msg err'; return; }
+  syncCfg.token = token;
+  localStorage.setItem('llm-ref-sync-token', token);
+  msg.textContent = 'Verifying…'; msg.className = 'sync-msg';
+  try {
+    if (gistId) {
+      syncCfg.gistId = gistId;
+      localStorage.setItem('llm-ref-sync-gist', gistId);
+      await pullRemote();
+    } else {
+      msg.textContent = 'Creating gist…';
+      await createGist();
+      document.getElementById('syncGistId').value = syncCfg.gistId;
+    }
+    await syncNow();
+    msg.textContent = 'Connected. Gist: ' + syncCfg.gistId;
+    msg.className = 'sync-msg ok';
+  } catch (e) {
+    msg.textContent = 'Error: ' + e.message;
+    msg.className = 'sync-msg err';
+    setSyncStatus('error', 'Sync error');
+  }
+}
+function disableSync() {
+  syncCfg.token = ''; syncCfg.gistId = '';
+  localStorage.removeItem('llm-ref-sync-token');
+  localStorage.removeItem('llm-ref-sync-gist');
+  setSyncStatus('off', 'Sync off');
+  document.getElementById('syncToken').value = '';
+  document.getElementById('syncGistId').value = '';
+  const msg = document.getElementById('syncMsg');
+  msg.textContent = 'Sync disabled (token cleared from this device).';
+  msg.className = 'sync-msg';
+}
+
+if (syncEnabled()) {
+  syncNow();
+  setInterval(() => { if (!document.hidden) syncNow(); }, SYNC_PULL_INTERVAL_MS);
+  window.addEventListener('focus', () => syncNow());
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) syncNow(); });
+} else {
+  setSyncStatus('off', 'Sync off');
+}
+
 setMode(currentMode);
 
 if (location.hash) {

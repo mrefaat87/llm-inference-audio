@@ -8,7 +8,11 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e2e8f0; }
 .container { display: flex; height: 100vh; }
-.nav { width: 280px; flex-shrink: 0; border-right: 1px solid #1e2a3a; overflow-y: auto; background: #0a0d14; display: flex; flex-direction: column; }
+.nav { width: 280px; flex-shrink: 0; border-right: 1px solid #1e2a3a; overflow-y: auto; background: #0a0d14; display: flex; flex-direction: column; scrollbar-width: thin; scrollbar-color: #2d3748 transparent; scroll-padding-top: 40px; }
+.nav::-webkit-scrollbar { width: 10px; }
+.nav::-webkit-scrollbar-track { background: transparent; }
+.nav::-webkit-scrollbar-thumb { background: #2d3748; border-radius: 5px; border: 2px solid #0a0d14; }
+.nav::-webkit-scrollbar-thumb:hover { background: #475569; }
 .nav-brand { padding: 20px 20px 8px; font-size: 15px; font-weight: 700; color: #f1f5f9; letter-spacing: -0.02em; }
 .nav-brand span { color: #3b82f6; }
 .nav-search { margin: 8px 14px 12px; }
@@ -16,7 +20,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .nav-search input:focus { border-color: #3b82f6; }
 .nav-search input::placeholder { color: #4a5568; }
 .ch-group { border-bottom: 1px solid #1a2035; }
-.ch-header { display: flex; align-items: center; gap: 8px; width: 100%; padding: 11px 16px; background: none; border: none; cursor: pointer; color: #94a3b8; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; transition: background 0.1s; }
+.ch-header { display: flex; align-items: center; gap: 8px; width: 100%; padding: 11px 16px; background: #0a0d14; border: none; cursor: pointer; color: #94a3b8; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; transition: background 0.1s; position: sticky; top: 0; z-index: 5; }
+.ch-group.open > .ch-header { box-shadow: 0 1px 0 #1e2a3a; }
 .ch-header:hover { background: #131825; color: #e2e8f0; }
 .ch-arrow { font-size: 10px; transition: transform 0.15s; color: #4a5568; width: 12px; }
 .ch-group.open .ch-arrow { transform: rotate(90deg); }
@@ -348,7 +353,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <span class="sync-status" id="syncStatus" title="Sync status">
       <span class="sync-dot off" id="syncDot"></span>
       <span class="sync-text" id="syncText">Sync off</span>
-      <span class="sync-text" style="margin-left:4px; opacity:0.6" title="App version">v3</span>
+      <span class="sync-text" style="margin-left:4px; opacity:0.6" title="App version">v4</span>
     </span>
     <button class="sync-gear" id="syncGear" title="Sync settings" onclick="openSyncModal()" aria-label="Sync settings">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block">

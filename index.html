@@ -6172,8 +6172,14 @@ const syncCfg = {
   gistId: localStorage.getItem('llm-ref-sync-gist') || '',
 };
 const fieldStamps = JSON.parse(localStorage.getItem('llm-ref-stamps') || '{}');
+const pendingFields = new Set(JSON.parse(localStorage.getItem('llm-ref-pending') || '[]'));
 let pushTimer = null;
 let syncing = false;
+
+function pendKey(field, key) { return field + '::' + (key || '*'); }
+function savePending() {
+  localStorage.setItem('llm-ref-pending', JSON.stringify([...pendingFields]));
+}
 
 function syncEnabled() { return !!(syncCfg.token && syncCfg.gistId); }
 function nowISO() { return new Date().toISOString(); }
@@ -6201,6 +6207,8 @@ function markFieldChanged(field, key) {
     fieldStamps[field] = ts;
   }
   saveStamps();
+  pendingFields.add(pendKey(field, key));
+  savePending();
   schedulePush();
 }
 
@@ -6255,15 +6263,16 @@ function applyMergedDoc(merged) {
 function mergeDocs(local, remote) {
   const ls = local.stamps || {}, rs = remote.stamps || {};
   const merged = { stamps: {} };
-  // queue: whole-array LWW
-  if (isNewer(rs.queue, ls.queue)) {
+  // queue: whole-array LWW, but pending local always wins
+  const queuePending = pendingFields.has(pendKey('queue', null));
+  if (!queuePending && isNewer(rs.queue, ls.queue)) {
     merged.queue = remote.queue || [];
     if (rs.queue) merged.stamps.queue = rs.queue;
   } else {
     merged.queue = local.queue || [];
     if (ls.queue) merged.stamps.queue = ls.queue;
   }
-  // completion + notes: per-section LWW
+  // completion + notes: per-section LWW; pending local always wins
   for (const field of ['completion', 'notes']) {
     merged[field] = {};
     merged.stamps[field] = {};
@@ -6271,7 +6280,8 @@ function mergeDocs(local, remote) {
     const lfs = ls[field] || {}, rfs = rs[field] || {};
     const keys = new Set([...Object.keys(lf), ...Object.keys(rf), ...Object.keys(lfs), ...Object.keys(rfs)]);
     keys.forEach(k => {
-      const winRemote = isNewer(rfs[k], lfs[k]);
+      const isPending = pendingFields.has(pendKey(field, k));
+      const winRemote = !isPending && isNewer(rfs[k], lfs[k]);
       const src = winRemote ? rf : lf;
       const ts = winRemote ? rfs[k] : lfs[k];
       if (k in src) {
@@ -6334,9 +6344,14 @@ async function syncNow() {
   try {
     const remote = await pullRemote();
     const local = buildLocalDoc();
+    // Snapshot the pending set we're about to push so we only clear those.
+    const pendingSnapshot = new Set(pendingFields);
     const merged = remote ? mergeDocs(local, remote) : local;
     if (remote) applyMergedDoc(merged);
     await pushRemote(merged);
+    // Clear only the entries that were pending at push time.
+    pendingSnapshot.forEach(k => pendingFields.delete(k));
+    savePending();
     const t = new Date();
     setSyncStatus('synced', 'Synced ' + t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
   } catch (e) {

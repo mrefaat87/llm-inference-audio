@@ -53,7 +53,7 @@ CHAPTER_MAP = {
     'distill': 'ch2', 'lora': 'ch2',
     'nvlink': 'ch3', 'parallelism': 'ch3',
     'batching': 'ch4', 'kvcache': 'ch4', 'prefixcache': 'ch4', 'chunked': 'ch4',
-    'flashattn': 'ch4', 'quant': 'ch4', 'marlin': 'ch4', 'specdecode': 'ch4', 'optlist': 'ch4',
+    'flashattn': 'ch4', 'quant': 'ch4', 'marlin': 'ch4', 'loratp': 'ch4', 'specdecode': 'ch4', 'optlist': 'ch4',
     'reqlen': 'ch5', 'scheduling': 'ch5', 'outputpred': 'ch5', 'reqseqbatch': 'ch5',
     'multiturn': 'ch5', 'agentic': 'ch5', 'toolcalling': 'ch5', 'disagg': 'ch5', 'dynamo': 'ch5',
     'traintoserve': 'ch6', 'engines': 'ch6', 'sglang': 'ch6', 'benchmarking': 'ch6',
@@ -67,6 +67,7 @@ CHAPTER_MAP = {
     'sglang-dd': 'ch10',
     'trtllm-dd': 'ch10',
     'moe-dd': 'ch10',
+    'sizing-dd': 'ch10',
 }
 
 CHAPTER_NAMES = {
@@ -223,6 +224,25 @@ CHAPTER_ANALOGIES = {
         'EPLB caveat (LMSYS) = the load balancer is tuned on in-distribution traffic; production traffic is not in-distribution, so EPLB is a starting point not a finished product',
         'LMSYS 96-H100 reproduction = the public proof point for DeepSeek-class MoE inference on commodity H100 — 52.3k input / 22.3k output tokens/sec/node, TTFT 2-5s, ITL ~100ms, within 5.6%/6.6% of DeepSeek\'s own numbers, but throughput-optimized not latency-optimized',
         '~700 GB FP8 weights for 671B = even at FP8, the model does not fit on one node — every deployment is a multi-node aggregation problem before any optimization starts',
+        'Arithmetic intensity = FLOPs per byte loaded from memory — the single number that decides whether a kernel is compute-bound or memory-bound, like ops-per-IO in a storage system',
+        'Roofline model = the throughput ceiling as a function of arithmetic intensity — flat (compute) above the ridge, linear (bandwidth) below, the same plot you would draw for any storage tier',
+        'Critical batch size (B_crit) = the smallest batch where a matmul becomes compute-bound — ~240 tokens on TPU v5e, ~280 on H100 in bf16; the magic number that decides whether more batching helps',
+        'Prefill = compute-bound matmul soup over the whole prompt; decode = memory-bandwidth-bound per-token KV streaming — same model, opposite regimes, the entire reason for PD disaggregation',
+        'Per-token KV cache size (bytes) = 2 × bytes_per_float × num_kv_heads × head_dim × num_layers — the formula that decides how much context you can serve at what batch size, period',
+        'MLA per-token KV (DeepSeek-V3) = 70.272 KB at BF16, vs 327.68 KB Qwen-2.5 72B GQA (4.66×) and 516.10 KB Llama-3.1 405B GQA (7.28×) — the only architecture-level KV win that compounds at long context',
+        'GQA / MQA / MLA = three points on the same Pareto frontier — how aggressively to share KV heads across query heads, trading quality for cache size',
+        'PagedAttention block size = 16 tokens per block in vLLM by default — picks the granularity of KV allocation, like a page size in virtual memory',
+        'KV cache fraction = the share of GPU memory you hand to the KV pool after weights — the single knob with the largest throughput impact in any engine',
+        'TRT-LLM max_batch_size / max_num_tokens = the two-knob grid search every TRT-LLM deployment runs — Llama-3.3 70B on 4×H100 finds the optimum at 512 / 2048, 21% over default 2048',
+        'Saturation batch (B_sat) = the batch where extra tokens stop improving throughput because step time grows with B — the natural cap for any engine',
+        'Theoretical step time floor = (B × KV_size + param_bytes) / HBM_bandwidth — the memory-bound lower bound every benchmark has to live above',
+        'Disaggregated serving (PD split) = run prefill on a low-batch compute-bound pool, decode on a high-batch memory-bound pool, ship KV across — separates the two regimes so each is tuned for its own roofline',
+        'Continuous batching priority = decode-then-prefill — admit a new prompt only when there is room without starving in-flight decodes, exactly the elevator-scheduling problem',
+        'Speculative decoding economics = trade FLOPs for memory-bandwidth wins — a 1.8× win on a memory-bound decoder is essentially free FLOPs, because the GPU was idle on bandwidth anyway',
+        'KV quantization (INT8 / FP8) = compress the cache 2× — gives you 2× the batch at the same memory, sliding straight up the roofline',
+        'Character.AI scale = 20k QPS, <1¢/hour conversation, 33× cost reduction since 2022, 13.5× cheaper than competitor APIs — the cited public proof that radical KV reduction works at consumer scale',
+        'Two-batch / micro-batch overlap (DeepSeek-V3) = while one micro-batch computes MLA+MoE, the other does all-to-all — dual-pipeline pattern, the production version of ScMoE',
+        'DeepSeek-V3 TPOT math = 61 layers × 241.92μs all-to-all (CX7 400Gbps IB) = 14.76ms TPOT theoretical upper bound = 67 tok/sec; same on GB200 NVL72 (900GB/s) drops to 0.82ms TPOT = 1200 tok/sec',
     ],
 }
 

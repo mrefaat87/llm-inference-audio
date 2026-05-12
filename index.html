@@ -524,6 +524,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
       <button class="nav-item" data-sec="sglang-dd" onclick="show('sglang-dd')">SGLang <span class="new-badge">new</span></button>
       <button class="nav-item" data-sec="trtllm-dd" onclick="show('trtllm-dd')">TensorRT-LLM <span class="new-badge">new</span></button>
       <button class="nav-item" data-sec="moe-dd" onclick="show('moe-dd')">MoE Inference <span class="new-badge">new</span></button>
+      <button class="nav-item" data-sec="sizing-dd" onclick="show('sizing-dd')">Sizing &amp; Scaling <span class="new-badge">new</span></button>
     </div>
   </div>
 </div>
@@ -5509,7 +5510,288 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <a href="https://nvidia.github.io/TensorRT-LLM/blogs/tech_blog/blog14_Scaling_Expert_Parallelism_in_TensorRT-LLM_part3.html" target="_blank">TRT-LLM blog 14 — Scaling EP Part 3</a>
     <a href="https://nvidia.github.io/TensorRT-LLM/" target="_blank">TRT-LLM doc-home blog index</a>
   </div>
-<div class="prev-next"><a class="pn-link pn-prev" onclick="show('trtllm-dd')">&#8592; TensorRT-LLM DeepDive</a></div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('trtllm-dd')">&#8592; TensorRT-LLM DeepDive</a><a class="pn-link pn-next" onclick="show('sizing-dd')">Sizing &amp; Scaling &#8594;</a></div>
+</div>
+
+<div id="sec-sizing-dd" class="hidden">
+<div class="breadcrumb">DeepDives &rsaquo; Sizing &amp; Scaling</div>
+<h2>Sizing &amp; Scaling LLM Inference — a NotebookLM-style deep dive <span class="new-badge">new</span></h2>
+  <p class="subtitle">A six-segment deep dive on the roofline framework, KV cache sizing, batch-size economics, and disaggregated serving, grounded entirely in the Scaling Book (Part 7 &amp; 8), the vLLM anatomy blog, the DeepSeek-V3 insights paper, the Character.AI cost report, the LMSYS reproduction, and the TensorRT-LLM tuning guide. Roughly 45–60 minutes of audio.</p>
+
+  <div class="info"><strong>How to read this section.</strong> Every concrete number is attributed inline. Source tags: <code>[scaling-book]</code> (Austin, Douglas, Frostig, Pope et al., Google DeepMind 2025, jax-ml.github.io/scaling-book/inference, Parts 7 &amp; 8), <code>[vllm-anatomy]</code> ("Inside vLLM: Anatomy of a High-Throughput LLM Inference System", vLLM team, Sept 2025), <code>[ds-insights]</code> ("Insights into DeepSeek-V3: Scaling Challenges and Reflections on Hardware for AI Architectures", Zhao et al., DeepSeek-AI, ISCA '25, arXiv 2505.09343), <code>[character]</code> (Character.AI inference-cost blog post), <code>[lmsys-ep]</code> (LMSYS large-scale EP blog, May 2025), <code>[trt-tuning]</code> (TensorRT-LLM Performance Tuning Guide). When a number is hardware-, model-, or workload-specific, the source's qualifier is preserved. Segment 6's NIM-Factory framing is editorial — clearly marked.</div>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 1 — The roofline framework (~6 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 1 — The roofline framework: arithmetic intensity is the only variable that matters</div>
+  <p>Every sizing decision in LLM serving collapses to one question: is the kernel I am running <em>compute-bound</em> or <em>memory-bound</em>? The Scaling Book frames the whole field around this distinction <code>[scaling-book]</code>, and once you internalize it, the rest of the deep dive is a series of corollaries.</p>
+
+  <div class="sec-h" style="font-size:14px;">The break-even point: critical batch size</div>
+  <p>The hardware-specific roofline number is the <strong>arithmetic intensity</strong> at which a matmul flips from memory-bound to compute-bound. For TPU v5e, the Scaling Book gives FLOPs/s of 1.97E14 and HBM bandwidth of 8.20E11 bytes/s, so the ratio — also the critical batch size for bf16 matmuls — is <strong>240 tokens</strong> per replica <code>[scaling-book]</code>. For H100, the same source places the break-even at approximately <strong>280 tokens</strong> in bf16 <code>[scaling-book]</code>.</p>
+  <p>The Scaling Book writes the rule explicitly <code>[scaling-book]</code>: "Transformer matmuls are compute-bound <em>iff</em> the per-replica token batch size is greater than B_crit = C / W_hbm · (bits per param / bits per activation)." Two things to absorb from that formula. First, the break-even moves with precision: in int8 weights + bf16 activations, B_crit drops to 120; in int8 weights + int8 activations, it stays at 240 <code>[scaling-book]</code>. Second, this is <em>per-replica</em>, not global — sharding shrinks the per-chip batch and can push you back below B_crit.</p>
+
+  <div class="viz-grid viz-grid-2">
+    <div class="viz-card" style="border-color:#dc2626;">
+      <div class="viz-card-title" style="color:#fca5a5;">Below B_crit — memory-bound</div>
+      <p style="font-size:12px;color:#cbd5e1;margin:0 0 6px;"><strong>Throughput grows with batch.</strong> Each step's wall-clock is dominated by loading weights and KV; FLOPs are free.</p>
+      <p style="font-size:12px;color:#cbd5e1;margin:0;">Per-token cost <em>falls</em> as batch rises. Every extra request you fit into the batch costs almost nothing.</p>
+    </div>
+    <div class="viz-card" style="border-color:#059669;">
+      <div class="viz-card-title" style="color:#34d399;">Above B_crit — compute-bound</div>
+      <p style="font-size:12px;color:#cbd5e1;margin:0 0 6px;"><strong>Throughput plateaus.</strong> The matmul saturates the Tensor Cores; adding tokens grows step time roughly linearly with B.</p>
+      <p style="font-size:12px;color:#cbd5e1;margin:0;">Per-token cost <em>flatlines</em>. More batch just means longer latency at the same $/tok.</p>
+    </div>
+  </div>
+
+  <div class="sec-h" style="font-size:14px;">Prefill vs decode — opposite regimes on the same chip</div>
+  <p>The Scaling Book separates the two phases sharply <code>[scaling-book]</code>:</p>
+  <ul>
+    <li><strong>Prefill:</strong> "attention is usually compute bound for any reasonable sequence length (roughly &gt; 480 tokens)"; linear ops are compute-bound because the prompt itself <em>is</em> the batch. The right optimization target is "maximizing hardware utilization or MFU (Model FLOPs Utilization)" <code>[scaling-book]</code>.</li>
+    <li><strong>Generation (single-token decode):</strong> attention is "always memory bandwidth-bound" because "we're doing a tiny amount of FLOPs while loading a massive KV cache" — the arithmetic intensity is approximately 1, structurally, and cannot be improved <code>[scaling-book]</code>.</li>
+  </ul>
+  <p>That asymmetry is the foundational case for prefill-decode disaggregation. The Scaling Book's recommendation is direct <code>[scaling-book]</code>: "Separate prefill + generation servers... Prefill: batch=1 (low TTFT, compute-bound); Generate: large batch (high throughput, memory-bound); KV cache transferred via network." Two phases, two roofline regimes, two optimal batch shapes — and trying to serve both on the same engine forces a compromise neither phase wants.</p>
+
+  <div class="sec-h" style="font-size:14px;">vLLM's view of the same equation</div>
+  <p>The vLLM team frames the same dynamic in implementation terms <code>[vllm-anatomy]</code>: as batch grows, "ITL (inter-token latency) rises due to increased FLOPs per step" and "throughput improves by amortizing weight I/O across more tokens until reaching saturation batch B_sat." Below saturation, "step time is dominated by HBM bandwidth"; beyond it, "kernels become compute-bound and step time grows roughly with B." Same roofline, different vocabulary.</p>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 2 — KV cache sizing (~10 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 2 — KV cache sizing is the binding constraint</div>
+  <p>If the roofline says <em>whether</em> you can scale batch, the KV cache says <em>how much</em>. The Scaling Book formula is the canonical reference <code>[scaling-book]</code>: <code>KV cache size = 2 · bytes_per_float · H · K · L · T</code>, where H is head dimension, K is the number of KV heads, L is number of layers, T is sequence length, the factor 2 accounts for keys + values.</p>
+
+  <div class="sec-h" style="font-size:14px;">The Llama 2-13B worked example</div>
+  <p>For Llama 2-13B at 8192 tokens of context in bf16, the per-sequence KV cache is <strong>6.7 GB</strong>, and a batch of 4 already occupies <strong>53.6 GB — exceeding 4× the parameter footprint</strong> <code>[scaling-book]</code>. Read that sentence again. The KV cache is not a side-cost of inference; for any realistic batch, it dwarfs the model itself.</p>
+  <p>The Scaling Book's prefill/generation tradeoff table for Llama 2-13B on an 8×TPUv5e replica drives the point home <code>[scaling-book]</code>:</p>
+  <table>
+    <tr><th>Batch</th><th>KV cache</th><th>Total mem</th><th>Step time</th><th>Throughput</th></tr>
+    <tr><td>1</td><td>6.7 GiB</td><td>32.7 GiB</td><td>4.98 ms</td><td>200.6 tok/s</td></tr>
+    <tr><td>16</td><td>107.2 GiB</td><td>133.2 GiB</td><td>20.30 ms</td><td>788 tok/s</td></tr>
+    <tr><td>240</td><td>1608 GiB</td><td>1634 GiB</td><td>249.09 ms</td><td>963.5 tok/s</td></tr>
+  </table>
+  <p>Two things to extract. First, throughput grows by ~4× from batch 1 to batch 240, but per-token wall-clock latency grows by ~50× (step time goes from 4.98 ms to 249.09 ms) — that is the inherent latency-throughput trade you cannot wish away. Second, at batch 240 the KV cache is <strong>1,608 GiB</strong>, far exceeding any plausible single-replica memory pool — meaning the batch ceiling on this workload is set by KV size, not by compute. The Scaling Book's next row shows the cure: shrinking the KV cache 5× via GQA lets batch 64 fit in 111.76 GiB, and throughput jumps to <strong>3,756.6 tok/s</strong> — order-of-magnitude improvement, from the cache shrink alone <code>[scaling-book]</code>.</p>
+
+  <div class="sec-h" style="font-size:14px;">The MLA-vs-GQA comparison that decides the long-context game</div>
+  <p>The DeepSeek-V3 ISCA paper publishes the most useful KV-size-by-architecture table in the literature <code>[ds-insights]</code>. Per-token KV cache at BF16:</p>
+  <table>
+    <tr><th>Model</th><th>KV per token</th><th>Multiplier vs DeepSeek-V3</th></tr>
+    <tr><td>DeepSeek-V3 (MLA)</td><td>70.272 KB</td><td>1×</td></tr>
+    <tr><td>Qwen-2.5 72B (GQA)</td><td>327.680 KB</td><td>4.66×</td></tr>
+    <tr><td>LLaMA-3.1 405B (GQA)</td><td>516.096 KB</td><td>7.28×</td></tr>
+  </table>
+  <p>MLA — Multi-head Latent Attention — wins by jointly compressing K and V into a small latent vector, "compress[ing] the KV representations of all attention heads into a smaller latent vector using a projection matrix, which is jointly trained with the model" <code>[ds-insights]</code>. Only the latent vector is cached at inference. The reported 70 KB/token vs. 516 KB/token for Llama-3.1 405B GQA is the entire reason DeepSeek can serve frontier-quality context cheaply.</p>
+  <p>The same paper situates other KV-reduction techniques on the same spectrum <code>[ds-insights]</code>:</p>
+  <ul>
+    <li><strong>GQA / MQA</strong> — "multiple heads share a single set of KV pairs, significantly compressing KV storage" <code>[ds-insights]</code>. Same idea as MLA but coarser-grained — share at the head level rather than latent-compress.</li>
+    <li><strong>Windowed KV</strong> — keep only a sliding window of the cache, discarding tokens outside the window. The paper notes this "compromises long-context reasoning" <code>[ds-insights]</code>, which is the honest tradeoff most engines hide.</li>
+    <li><strong>Quantized compression</strong> — store KV in INT8 or lower, "further reducing memory usage" with "minimal impact on model performance" <code>[ds-insights]</code>.</li>
+  </ul>
+
+  <div class="viz-flow">
+    <div class="viz-box accent"><strong>MHA (legacy)</strong>K, V per head<br>baseline</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box green"><strong>GQA / MQA</strong>share KV across<br>head groups</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box orange"><strong>Windowed KV</strong>sliding window<br>(loses long-context)</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box purple"><strong>MLA</strong>jointly latent-compress<br>K and V (DeepSeek)</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box accent"><strong>INT8 KV</strong>quantize<br>orthogonal to above</div>
+  </div>
+
+  <div class="sec-h" style="font-size:14px;">PagedAttention block size — the granularity knob</div>
+  <p>vLLM's PagedAttention introduces another KV variable: block size. The default is <strong>16 tokens per block</strong> in each layer's KV pool, with the per-block byte footprint computed as <code>2 × 16 × num_kv_heads × head_size × dtype_bytes</code> (for bf16, dtype_bytes = 2) <code>[vllm-anatomy]</code>. Block size is the granularity at which the cache fragments — picking it too small wastes per-block metadata, too large wastes memory on partial blocks. 16 is the empirically chosen sweet spot for transformer KV layouts.</p>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 3 — The LLaMA 70B worked example (~10 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 3 — The worked example: 70B-class models, end-to-end</div>
+  <p>The Scaling Book's Part 8 grounds the framework in numbers you can carry into any sizing exercise. We will walk one example carefully because the technique generalizes: take a model, take a hardware shape, plug into the roofline, read off the operating regime.</p>
+
+  <div class="sec-h" style="font-size:14px;">The Scaling Book's pop-quiz computation</div>
+  <p>For a 30B-parameter model on a TPU v5e 4×4 pod, int8 weights, batch 4 at 8192 token context, the Scaling Book walks through the latency floor <code>[scaling-book]</code>:</p>
+  <ul>
+    <li>KV cache per sequence at 100 KB/token × 8192 = <strong>819 MB</strong> per sequence.</li>
+    <li>Parameters at int8: <strong>30 GB</strong>.</li>
+    <li>Total bytes per step: 4 × 819 MB + 30 GB ≈ 33.3 GB.</li>
+    <li>HBM bandwidth across 16 chips: 16 × 8.2e11 bytes/s.</li>
+    <li>Latency floor: <strong>2.5 ms</strong> per token at batch 4 (memory-bound regime).</li>
+    <li>At batch 256, the system enters the compute-bound MLP regime: <strong>~21 ms</strong> per token (compute-bound on the MLP, attention now amortized over more tokens) <code>[scaling-book]</code>.</li>
+  </ul>
+  <p>The progression is the point. At batch 4 you are on the memory roofline — every extra request to the batch is essentially free. At batch 256 you are on the compute roofline — extra batch buys nothing for per-token cost. Between them, the per-token cost falls; above 256, it flatlines.</p>
+
+  <div class="sec-h" style="font-size:14px;">Parameter loading is its own floor</div>
+  <p>One subtlety the Scaling Book flags <code>[scaling-book]</code>: even before you load any KV, the parameters themselves have to stream out of HBM. For 18.4B parameters in int8 on a TPU v5e 4×4: 18.4e9 bytes / (8.2e11 bytes/s × 16 chips) = <strong>1.4 ms minimum</strong> per forward pass, just from weight loading. That is the absolute floor for every token. Quantization to int4 halves that floor; FP8 (which Hopper supports natively) halves the bf16 floor.</p>
+
+  <div class="sec-h" style="font-size:14px;">DeepSeek-V3's own back-of-envelope</div>
+  <p>The DeepSeek-V3 paper does a closely-related calculation in its own production setting <code>[ds-insights]</code>. At expert parallelism, the all-to-all communication for one MoE layer on a 400 Gbps CX7 InfiniBand fabric is computed as: <code>(1 byte + 2 bytes) × 32 × 9 × 7K / 50 GB/s = 120.96 μs</code> (FP8 dispatch + BF16 combine, 32 token batch per device, factor 9 = 8 routed experts + 1 shared expert, 7K hidden, 50 GB/s effective). For 61 DeepSeek-V3 layers this gives <strong>14.76 ms TPOT</strong>, or <strong>~67 tokens/sec</strong> as the theoretical upper bound on that fabric <code>[ds-insights]</code>.</p>
+  <p>The same calculation on a GB200 NVL72 NVLink fabric (900 GB/s unidirectional across 72 GPUs) collapses to <code>(1+2) × 32 × 9 × 7K / 900 GB/s = 6.72 μs</code> per layer, giving a theoretical <strong>0.82 ms TPOT, ~1,200 tokens/sec</strong> upper bound <code>[ds-insights]</code>. Same model, same algorithm, 18× faster — because the all-to-all is bandwidth-bound and NVLink is 18× the bandwidth of CX7 IB. <em>This is the exact mechanism by which "buy NVL72" turns into "ship more tokens": you do not change the math, you change the denominator.</em></p>
+
+  <div class="viz-timeline">
+    <div class="viz-row"><span class="viz-label">CX7 IB</span><div class="viz-bar idle" style="width:340px;">14.76 ms / token — 67 tok/sec theoretical</div></div>
+    <div class="viz-row"><span class="viz-label">GB200 NVL72</span><div class="viz-bar decode" style="width:30px;">0.82 ms</div><span style="font-size:11px;color:#34d399;margin-left:10px;font-weight:600;">~1,200 tok/sec theoretical (18× ↑)</span></div>
+    <div class="viz-legend">
+      <div class="viz-legend-item" style="color:#94a3b8;">DeepSeek-V3 layer-level all-to-all, FP8 dispatch + BF16 combine — DeepSeek-V3 insights paper <code>[ds-insights]</code></div>
+    </div>
+  </div>
+
+  <div class="sec-h" style="font-size:14px;">Sharding constraints for generation</div>
+  <p>The Scaling Book is blunt about what does and does not work for the generation phase <code>[scaling-book]</code>:</p>
+  <ul>
+    <li><strong>FSDP</strong> is impossible — parameters would have to move via slow ICI/inter-chip interconnect per step.</li>
+    <li><strong>Data parallelism</strong> is unhelpful — it replicates parameters without speedup, since the bottleneck is per-step bandwidth, not parallel throughput.</li>
+    <li><strong>Sequence sharding</strong> is impractical for decode — generation is sequential, there is no sequence to shard.</li>
+    <li><strong>Model parallelism (TP/PP/EP)</strong> is the only viable answer, with the rule "activation movement preferred over KV cache replication" <code>[scaling-book]</code>.</li>
+  </ul>
+  <p>This is why every serious frontier deployment ends up with the same parallelism cocktail (TP for attention, EP for MoE, PP for very large models) — the constraint is not preference, it is what the roofline allows.</p>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 4 — vLLM and disaggregated serving (~8 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 4 — How the engine implements the framework: vLLM and disaggregation</div>
+  <p>The Scaling Book describes <em>what</em> should happen; the vLLM anatomy blog describes <em>how</em> an engine does it. The two views together are the cheapest way to internalize how a single engine instance turns the roofline into throughput.</p>
+
+  <div class="sec-h" style="font-size:14px;">The four-component architecture</div>
+  <p>vLLM's engine is structured around four components <code>[vllm-anatomy]</code>:</p>
+  <ul>
+    <li><strong>EngineCore</strong> — the execution loop holding scheduling, model execution, and KV cache management.</li>
+    <li><strong>Scheduler</strong> — manages request prioritization (FCFS or priority-based) with separate <em>waiting</em> and <em>running</em> queues.</li>
+    <li><strong>KVCacheManager</strong> — maintains the <code>free_block_queue</code> pool of available KV-cache blocks for paged attention.</li>
+    <li><strong>ModelRunner</strong> — owns the sampler, KV cache, and forward-pass buffers (input_ids, positions).</li>
+  </ul>
+
+  <div class="viz-flow">
+    <div class="viz-box accent"><strong>Scheduler</strong>FCFS or priority<br>waiting → running</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box green"><strong>KVCacheManager</strong>paged blocks<br>(16 tokens default)</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box orange"><strong>ModelRunner</strong>forward pass<br>+ sampler</div>
+    <span class="viz-arrow">→</span>
+    <div class="viz-box accent"><strong>EngineCore</strong>loop body<br>continuous batching</div>
+  </div>
+
+  <div class="sec-h" style="font-size:14px;">The decode-priority rule</div>
+  <p>vLLM's V1 engine encodes the prefill/decode tension as a scheduling policy <code>[vllm-anatomy]</code>: "The V1 engine prioritizes decode requests already in the running queue before processing new prefill requests from waiting." This is the elevator-scheduling answer to mixed-phase traffic — finish what is already moving before letting new requests in. If you let prefill jump ahead, every in-flight decode stalls; if you let decode jump ahead always, prompts never start.</p>
+
+  <div class="sec-h" style="font-size:14px;">Continuous batching, chunked prefill, prefix caching, spec decode</div>
+  <p>vLLM's four headline runtime features map onto the framework cleanly <code>[vllm-anatomy]</code>:</p>
+  <ul>
+    <li><strong>Continuous batching</strong> — the scheduler iteratively re-batches at every step, picking up newly-arrived prefills and dropping completed decodes, so the GPU never sits idle waiting for a fixed batch boundary.</li>
+    <li><strong>Chunked prefill</strong> — long prompts are split into smaller chunks via <code>long_prefill_token_threshold</code>, so a single 16k-token prefill does not stall every in-flight decode for half a second.</li>
+    <li><strong>Prefix caching</strong> — enabled by default; "Reuses KV blocks for matching token prefixes exceeding block boundaries" <code>[vllm-anatomy]</code>. Cache locality at the conversation level.</li>
+    <li><strong>Speculative decoding</strong> — three drafters supported: n-gram, EAGLE, Medusa, each trading speed against accuracy without a separate draft LM <code>[vllm-anatomy]</code>. The roofline framing: speculative decoding trades FLOPs you have (compute-bound headroom) for memory bandwidth you do not (decode is bandwidth-bound), which is exactly the right trade in the decode regime.</li>
+  </ul>
+
+  <div class="sec-h" style="font-size:14px;">LMSYS's published proof — 96 H100s on DeepSeek-V3</div>
+  <p>LMSYS reproduced DeepSeek's deployment shape with prefill-decode disaggregation on a public cluster <code>[lmsys-ep]</code>. The reported numbers are the most credible third-party signal we have for what disaggregation actually delivers:</p>
+  <ul>
+    <li><strong>Hardware:</strong> 12 nodes × 8 H100 = 96 GPUs.</li>
+    <li><strong>Split:</strong> prefill on EP32, decode on EP72, both with data-parallel attention.</li>
+    <li><strong>Throughput:</strong> 52.3k input tokens/sec/node, 22.3k output tokens/sec/node for 2k-token sequences <code>[lmsys-ep]</code>.</li>
+    <li><strong>Latency:</strong> TTFT 2–5 seconds, ITL ~100 ms — explicitly "throughput-optimized, not latency-optimized" <code>[lmsys-ep]</code>.</li>
+    <li><strong>Limitations:</strong> "limited to shorter sequences due to the use of 96 GPUs"; MTP integration with DP-attention is incomplete; EPLB relies on in-distribution traffic that "may diverge from production workloads" <code>[lmsys-ep]</code>.</li>
+  </ul>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 5 — Production case studies (~8 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 5 — Production case studies: Character.AI and DeepSeek</div>
+
+  <div class="sec-h" style="font-size:14px;">Character.AI — what radical KV reduction looks like at consumer scale</div>
+  <p>Character.AI's public inference-cost claims are the most aggressive in the literature for a serving operation that is not also a frontier-lab research showcase <code>[character]</code>:</p>
+  <ul>
+    <li><strong>13.5× less</strong> traffic-serving cost than competitors using leading commercial APIs <code>[character]</code>.</li>
+    <li><strong>33×</strong> reduction in serving costs since the 2022 launch <code>[character]</code>.</li>
+    <li><strong>&lt; 1 cent / hour</strong> per hour of conversation <code>[character]</code>.</li>
+    <li><strong>~20,000 QPS</strong> sustained — approximately 20% of Google Search's request volume <code>[character]</code>.</li>
+  </ul>
+  <p>The blog credits the gains to "Transformer architecture and 'attention KV cache'" innovations plus "improved techniques for inter-turn caching" <code>[character]</code>. The specific techniques cited in the broader literature — cross-layer KV sharing, sliding-window-plus-global hybrid attention, INT8 KV cache quantization — are not quantified in the cited page, so the claim that they produce the 33× reduction is the company's, not a per-technique breakdown the cited source supports. <em>Honest framing for an interview: the cost numbers are public and citeable; the per-technique attribution is not in the same source.</em></p>
+
+  <div class="sec-h" style="font-size:14px;">DeepSeek-V3 — what hardware-aware co-design looks like at frontier scale</div>
+  <p>The DeepSeek-V3 insights paper takes the opposite angle: instead of optimizing a fixed cluster, redesign the model to suit the cluster <code>[ds-insights]</code>. The cluster: 2,048 NVIDIA H800 GPUs. The four architectural choices that paper down to "we made this fit":</p>
+  <ul>
+    <li><strong>MLA</strong> — already covered in Segment 2. 70.272 KB/token KV vs 516.096 KB/token for Llama-3.1 405B at BF16 <code>[ds-insights]</code>.</li>
+    <li><strong>MoE — DeepSeekMoE</strong> — 671B total parameters, 37B activated per token. Per-token training cost: <strong>250 GFLOPs/token</strong> for DeepSeek-V3, vs <strong>394 GFLOPs/token</strong> for Qwen-72B dense and <strong>2,448 GFLOPs/token</strong> for LLaMA-405B dense <code>[ds-insights]</code>. The MoE delivers comparable or superior quality for ~10× less compute.</li>
+    <li><strong>FP8 mixed-precision training</strong> — "FP8 significantly reduces memory consumption by half" compared to BF16, plus the network-side savings of "reducing communication volume by 50% compared to BF16" via FP8 EP dispatch <code>[ds-insights]</code>.</li>
+    <li><strong>Multi-Token Prediction (MTP)</strong> — at inference, the MTP module achieves "an acceptance rate of 80% to 90% for predicting the second subsequent token, which increases the generation TPS by 1.8× compared to the scenario without the MTP module" <code>[ds-insights]</code>.</li>
+  </ul>
+
+  <div class="sec-h" style="font-size:14px;">The two case studies, side-by-side</div>
+  <table>
+    <tr><th>Lever</th><th>Character.AI</th><th>DeepSeek-V3</th></tr>
+    <tr><td>Workload shape</td><td>Consumer chat, very high QPS, short turns</td><td>Frontier reasoning, long context, large batch</td></tr>
+    <tr><td>Cited KV mechanism</td><td>Cross-layer sharing + sliding window + INT8 (unquantified in cited source)</td><td>MLA (70.272 KB/token; quantified) <code>[ds-insights]</code></td></tr>
+    <tr><td>Cost claim</td><td>33× cheaper since 2022; &lt;1¢/hour <code>[character]</code></td><td>10× FLOPs vs dense at same quality <code>[ds-insights]</code></td></tr>
+    <tr><td>Scale claim</td><td>~20k QPS, ~20% of Google Search volume <code>[character]</code></td><td>2,048 H800 training cluster <code>[ds-insights]</code></td></tr>
+    <tr><td>Honest tradeoff</td><td>Likely loses some long-context quality (sliding window)</td><td>MLA up/down-projection compute on every read <code>[ds-insights]</code></td></tr>
+  </table>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SEGMENT 6 — Tuning in practice (~6 min)
+       ══════════════════════════════════════════════════════════ -->
+
+  <div class="sec-h">Segment 6 — Tuning in practice: the TRT-LLM grid search and editorial extension</div>
+  <p>The TensorRT-LLM Performance Tuning Guide is NVIDIA's distilled answer to "OK, I have an engine and a model; what knobs do I turn?" <code>[trt-tuning]</code>. The guide's case study is Llama-3.3-70B on 4× H100-SXM-80GB at input/output sequence length 2048/2048 — a workload close enough to a real production setting that the numbers transfer.</p>
+
+  <div class="sec-h" style="font-size:14px;">The two-knob grid search</div>
+  <p>The headline pair of parameters in TRT-LLM <code>[trt-tuning]</code>:</p>
+  <ul>
+    <li><strong><code>max_batch_size</code></strong> — default 2048. "Powers of 2 are good initial values to sweep through."</li>
+    <li><strong><code>max_num_tokens</code></strong> — default 8192. Recommended sweep range: "Powers of 2 ≥ 1024."</li>
+  </ul>
+  <p>The guide's reported results for Llama-3.3-70B on 4× H100 <code>[trt-tuning]</code>:</p>
+  <table>
+    <tr><th>max_batch_size</th><th>Throughput (tok/sec)</th><th>Note</th></tr>
+    <tr><td>64</td><td>1,944</td><td>bottlenecking — batch too small</td></tr>
+    <tr><td>512</td><td><strong>2,467</strong></td><td>optimal — 21% improvement over default</td></tr>
+    <tr><td>2,048 (default)</td><td>2,044</td><td>over-provisioned — wastes memory on KV admin</td></tr>
+  </table>
+  <p>With <code>max_batch_size = 512</code> fixed, the <code>max_num_tokens</code> sweep <code>[trt-tuning]</code>:</p>
+  <table>
+    <tr><th>max_num_tokens</th><th>Throughput (tok/sec)</th></tr>
+    <tr><td>2,048</td><td><strong>2,474</strong> — best</td></tr>
+    <tr><td>8,192 (default)</td><td>2,467</td></tr>
+    <tr><td>16,384</td><td>2,461</td></tr>
+  </table>
+  <p>The takeaway the guide states explicitly <code>[trt-tuning]</code>: "Grid searching across combinations of them if possible is ideal," rather than tuning independently. The two parameters interact through KV memory accounting. The trap the guide flags: "too small max_num_tokens" bottlenecks scheduling; "too large max_num_tokens" consumes prompt memory, "reducing available KV cache space, potentially causing OOM errors."</p>
+
+  <div class="sec-h" style="font-size:14px;">Where the framework applies — and what it doesn't tell you</div>
+  <p>Everything in this section is grounded in six sources that together cover the framework (Scaling Book), the engine implementation (vLLM anatomy), the per-architecture KV math (DeepSeek-V3 insights), one production cost report (Character.AI), one third-party reproduction (LMSYS), and one official tuning playbook (TRT-LLM). What the cited sources do <em>not</em> describe — and what an interview answer would have to attribute elsewhere — is anything specific about NVIDIA Dynamo's KV-aware routing, NIM Factory's validation matrix, or the per-tenant economics of running mixed traffic on a shared cluster.</p>
+
+  <div class="sec-h" style="font-size:14px;">Editorial postscript — beyond the cited sources</div>
+  <div class="warn"><strong>None of the cited sources describe NIM Factory internals, Dynamo's KVBM, NIXL transports, or the combinatorial validation matrix.</strong> The framing below maps what the cited sources <em>do</em> show onto the NIM-Factory interview question. Treat it as the listener's exercise, not a claim grounded in the resource pack.</div>
+  <p>If you walk an interviewer through the framework above, the implicit conclusion is that productizing an LLM serving stack is a roofline-aware grid search across a large matrix: model × hardware × parallelism × precision × KV strategy × batch shape. The cited sources let you say with confidence that (a) the right operating regime depends on B_crit and KV size, (b) prefill and decode want opposite batch shapes which is why disaggregation exists, (c) MLA-class KV compression buys an order of magnitude at long context, and (d) the public deployments that hit best-in-class economics (DeepSeek's MoE-FP8-MTP stack, Character.AI's KV-radical stack, LMSYS's reproduction) all live in different corners of that matrix. What you cannot say without leaving the sources is anything about NIM's specific validation rules or pruning of the matrix — that is the editorial extension.</p>
+
+  <div class="sec-h" style="font-size:14px;">A short list of things you can defend from the cited sources</div>
+  <ul>
+    <li>B_crit ≈ 240 tokens TPU v5e bf16, ≈ 280 H100 bf16; drops to 120 with int8 weights + bf16 activations <code>[scaling-book]</code>.</li>
+    <li>Prefill is compute-bound for sequences &gt; ~480 tokens; decode attention is always memory-bandwidth-bound with arithmetic intensity ≈ 1 <code>[scaling-book]</code>.</li>
+    <li>KV cache size = 2 · bytes_per_float · H · K · L · T; Llama 2-13B at 8192 tokens bf16 = 6.7 GB/seq; batch 4 = 53.6 GB <code>[scaling-book]</code>.</li>
+    <li>MLA: 70.272 KB/token vs Qwen-2.5 72B GQA 327.680 KB/token (4.66×) vs Llama-3.1 405B GQA 516.096 KB/token (7.28×) at BF16 <code>[ds-insights]</code>.</li>
+    <li>DeepSeek-V3 layer all-to-all: 120.96 μs on CX7 400Gbps IB, 6.72 μs on GB200 NVL72 NVLink → 67 vs 1,200 tok/sec theoretical TPOT <code>[ds-insights]</code>.</li>
+    <li>MoE FLOPs/token: DeepSeek-V3 250 vs Qwen-72B 394 vs LLaMA-405B 2,448 GFLOPs/token <code>[ds-insights]</code>.</li>
+    <li>FP8 vs BF16: 50% memory savings, 50% comm-volume savings <code>[ds-insights]</code>.</li>
+    <li>MTP: 80–90% acceptance rate on second-token prediction → 1.8× TPS <code>[ds-insights]</code>.</li>
+    <li>vLLM PagedAttention block size = 16 tokens; decode-priority scheduling; chunked prefill via long_prefill_token_threshold <code>[vllm-anatomy]</code>.</li>
+    <li>Character.AI: 13.5× cheaper than competitors, 33× cost reduction since 2022, &lt;1¢/hour, ~20k QPS <code>[character]</code>.</li>
+    <li>LMSYS reproduction: 52.3k input / 22.3k output tok/sec/node; TTFT 2–5 s; ITL ~100 ms; EP32 prefill / EP72 decode on 96 H100s <code>[lmsys-ep]</code>.</li>
+    <li>TRT-LLM Llama-3.3 70B / 4× H100: optimal (max_batch_size=512, max_num_tokens=2048) = 2,474 tok/sec; 21% over default <code>[trt-tuning]</code>.</li>
+  </ul>
+
+  <div class="resource-bar">
+    📖 <a href="https://jax-ml.github.io/scaling-book/inference" target="_blank">Scaling Book Part 7 &amp; 8 (Austin/Douglas/Frostig/Pope, Google DeepMind 2025)</a>
+    <a href="https://blog.vllm.ai/2025/09/05/anatomy-of-vllm.html" target="_blank">Inside vLLM (vLLM team, Sept 2025)</a>
+    <a href="https://arxiv.org/abs/2505.09343" target="_blank">Insights into DeepSeek-V3 (Zhao et al., ISCA '25)</a>
+    <a href="https://research.character.ai/optimizing-inference" target="_blank">Optimizing AI Inference at Character.AI</a>
+    <a href="https://www.lmsys.org/blog/2025-05-05-large-scale-ep/" target="_blank">LMSYS 96-H100 PD-disaggregated reproduction</a>
+    <a href="https://nvidia.github.io/TensorRT-LLM/performance/performance-tuning-guide" target="_blank">TensorRT-LLM Performance Tuning Guide</a>
+  </div>
+<div class="prev-next"><a class="pn-link pn-prev" onclick="show('moe-dd')">&#8592; MoE Inference DeepDive</a></div>
 </div>
 
 </div>
@@ -5520,7 +5802,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
 /* ══════════════════════════════════════════════════════════
    SECTION ORDER + NAMES
    ══════════════════════════════════════════════════════════ */
-const order = ['tokenization','embeddings','qkv','multihead','layers','params','moe','numformats','sampling','quiz-ch1','mla','attnvariants','ssm','mtp','codesign','distill','lora','quiz-ch2','nvlink','parallelism','quiz-ch3','batching','kvcache','chunked','flashattn','quant','marlin','specdecode','optlist','quiz-ch4','reqlen','scheduling','outputpred','reqseqbatch','multiturn','agentic','disagg','quiz-ch5','traintoserve','engines','benchmarking','costeconomics','mfu','cuda','numlibs','fusion','fileformats','dynamo-orch','profiling','quiz-ch7','gpuinternals','cachehier','archroadmap','superchips','mig','otheraccel','formfactors','quiz-ch8','containers','autoscaling','multicloud','security','observability','clientside','quiz-ch9','sglang-dd','trtllm-dd','moe-dd'];
+const order = ['tokenization','embeddings','qkv','multihead','layers','params','moe','numformats','sampling','quiz-ch1','mla','attnvariants','ssm','mtp','codesign','distill','lora','quiz-ch2','nvlink','parallelism','quiz-ch3','batching','kvcache','chunked','flashattn','quant','marlin','specdecode','optlist','quiz-ch4','reqlen','scheduling','outputpred','reqseqbatch','multiturn','agentic','disagg','quiz-ch5','traintoserve','engines','benchmarking','costeconomics','mfu','cuda','numlibs','fusion','fileformats','dynamo-orch','profiling','quiz-ch7','gpuinternals','cachehier','archroadmap','superchips','mig','otheraccel','formfactors','quiz-ch8','containers','autoscaling','multicloud','security','observability','clientside','quiz-ch9','sglang-dd','trtllm-dd','moe-dd','sizing-dd'];
 
 const sectionNames = {};
 document.querySelectorAll('.nav-item').forEach(btn => {

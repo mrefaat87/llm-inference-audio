@@ -1,483 +1,487 @@
-Alex: So I want to start somewhere uncomfortable. You know vLLM cold — PagedAttention, continuous batching, prefix caching. You've tuned KV cache fraction, you've watched the scheduler decide between prefill and decode. Here's my question: if I handed you a fresh model, a fresh hardware shape, and said "size this," where would you actually start?
+Alex: So here's the thing. You already know vLLM. You know PagedAttention, you know continuous batching, you know prefix caching gives you a free win when there's a shared system prompt. You've probably tuned `gpu_memory_utilization` on a real deployment.
 
-Jenny: Honestly? I'd start by guessing a batch size, watching the GPU utilization, and iterating. Which is embarrassing to admit on a podcast.
+Jenny: Right.
 
-Alex: It's the honest answer. And the entire point of this episode is that there's a framework underneath that guessing, and once you internalize it, you stop guessing. It's called the roofline model. The Scaling Book — the Google DeepMind one, Austin, Douglas, Frostig, Pope, the Part 7 and Part 8 chapters — frames every sizing decision in LLM serving around exactly one question.
+Alex: But if I asked you — for a brand new model, on brand new hardware, with a brand new SLO contract — how many GPUs do I need, what topology, what batch size, what attention variant — could you answer that on a napkin before you spun anything up?
 
-Jenny: Which is?
+Jenny: Honestly? No. I'd benchmark. I'd just throw it on a box and start sweeping.
 
-Alex: Is the kernel I'm running compute-bound, or memory-bound?
+Alex: Exactly. And that is the gap this whole episode is about. There's a framework — it's mostly in the Google DeepMind Scaling Book, Parts 7 and 8 — that lets you do the napkin math first. You can predict, before you touch a GPU, which regime you'll be in, what your bottleneck will be, and roughly what the achievable throughput is. And it generalizes. It works for DeepSeek-V3 on H800s, it works for Llama on H100s, it works for Character.AI's stack at twenty thousand QPS.
 
-Jenny: Okay, that's the question every systems person asks about every workload ever. What makes it different for LLMs?
+Jenny: Okay so this is "auto scaling instincts, for inference."
 
-Alex: What makes it different is that within a single inference request, you cross the boundary. Twice. Sometimes more. Prefill and decode live on opposite sides of the roofline, on the same chip, in the same engine, sometimes in the same step. And the right batch shape for one is wrong for the other.
+Alex: That's literally the right framing, and I want to start there, because if you don't have the mental model right, none of the numbers stick. Here's the move. Forget tokens for a second. Think of an inference deployment as an Auto Scaling Group. What are your fixed costs and what are your variable costs?
 
-Jenny: Okay, hold on. Define the roofline carefully for me, because I want to make sure I'm not just borrowing intuition from CPU land.
+Jenny: Fixed cost is what's running when zero requests are in flight. Variable cost is what scales with concurrency.
 
-Alex: Fair. Arithmetic intensity is FLOPs per byte loaded from memory. That's the x-axis. Throughput is the y-axis. If your kernel does very little compute per byte loaded — say, streaming a giant KV cache and doing a couple of dot products — you're on the bandwidth-bound side of the roofline. The HBM is the bottleneck. You can have all the FLOPs in the world and they're idle. If your kernel does a lot of compute per byte — a fat matmul — you're on the compute-bound side. The matmul units are saturated, HBM has spare bandwidth.
+Alex: Map that to LLM serving. What's the fixed cost?
 
-Jenny: Right, ops-per-IO. Exactly the same plot you'd draw for a storage tier. Big sequential reads versus random small reads.
+Jenny: The model weights sitting in HBM. They're paid for whether you have one request or a thousand.
 
-Alex: Exactly that. And the ridge — the elbow where you transition — is the critical arithmetic intensity. For a transformer matmul, the Scaling Book gives you a tidy formula: the critical batch size B_crit is FLOPs-per-second divided by HBM-bandwidth, times the ratio of bits-per-parameter to bits-per-activation.
+Alex: Right. The weights are your warm instance pool. They're sunk. The variable cost is the KV cache, because that grows with concurrent sessions times context length. So your job — and this is going to sound flippant but it's literally true — your job as the person sizing the deployment is exactly the same job as the person sizing an ASG. Size the fleet to meet SLO at the lowest dollar per million tokens.
 
-Jenny: So a hardware number and a precision number.
+Jenny: Okay but in an ASG I have like, target tracking on CPU utilization. What's the equivalent here?
 
-Alex: Both. For TPU v5e at bf16, the Scaling Book reports 1.97 times ten-to-the-fourteenth FLOPs per second, 8.2 times ten-to-the-eleventh bytes per second of HBM bandwidth. Divide them and you get roughly 240 tokens per replica. That's B_crit on TPU v5e in bf16.
+Alex: HBM bandwidth utilization. Because — and we're going to spend the next ten minutes on this — decode is almost always memory-bandwidth-bound, not compute-bound. So your "CPU at 70%" target is actually "HBM bandwidth at 80%." If you're not pushing the memory bus, you're leaving throughput on the floor.
 
-Jenny: 240. Okay.
+Jenny: Wait. That's a real inversion. In every distributed system I've ever sized, compute is the thing I'm watching. You're telling me on these chips the FLOPs are basically idle?
 
-Alex: For H100, same source, it's about 280 tokens, bf16. And here's the part that changes everyone's mental model: if you go to int8 weights with bf16 activations, B_crit drops to 120. Half. Because the bytes-per-parameter dropped, so you need fewer FLOPs per byte to be compute-bound.
+Alex: On the decode side, often yes. The H100 has roughly a petaflop of fp8 FLOPs and about 3.35 terabytes per second of HBM bandwidth. Divide those — you get this ratio of about 295 FLOPs per byte in bf16, or 590 in fp8. That's the roofline. That ratio is the number that decides everything.
 
-Jenny: Wait, but if I quantize both weights and activations to int8?
+Jenny: Walk me through that ratio. What is it telling me?
 
-Alex: Back to 240. The ratio matters, not the absolute precision. That's an underrated point — quantizing one side of the equation moves the roofline, quantizing both keeps it where it was.
+Alex: It's telling you the break-even point. If your kernel does fewer than 295 FLOPs per byte it loads from HBM, you finish the FLOPs before the memory arrives. So your time is set by memory bandwidth. If you do more than 295, you finish the memory load first and your time is set by FLOPs. There's a name for that ratio for a workload — arithmetic intensity. FLOPs per byte moved.
 
-Jenny: That's actually a beautiful little observation. So when somebody says "we switched to FP8" — that's not just a memory savings story, that's a roofline-shift story.
+Jenny: Ops per I-O. That's exactly the metric I'd use for a storage tier.
 
-Alex: It is, and Hopper's native FP8 is the reason DeepSeek-V3's whole pipeline pencils out, but we're getting ahead of ourselves.
+Alex: It's the same model. It's literally the same plot. You can draw the roofline diagram for HBM the way you'd draw it for a buffer pool in a database. Below the ridge, you're bandwidth-limited and throughput grows linearly with intensity. Above the ridge, you're compute-limited and it's flat. Same shape.
 
-Jenny: Okay let me ground this with my vLLM intuition. The vLLM anatomy blog talks about ITL — inter-token latency — rising as batch grows, and throughput climbing until some saturation batch B_sat. Is that the same number?
+Jenny: Okay so 295 FLOPs per byte on H100 bf16. What's a real workload look like? A decoder doing one token at a time — what's its arithmetic intensity?
 
-Alex: Same animal, different angle. The vLLM blog phrases it in implementation terms — below B_sat, step time is dominated by HBM bandwidth, so you're amortizing weight I/O across more tokens essentially for free. Beyond B_sat, kernels are compute-bound and step time grows with B. Same roofline. The Scaling Book gives you the closed-form number; vLLM tells you what it feels like in production when you hit it.
+Alex: For decode attention, basically one. You load the KV cache and you do one dot product per element. So you're at about one FLOP per byte against a roofline of 295. You're using a third of a percent of your compute. The GPU is mostly waiting on HBM.
 
-Jenny: Free until it's not.
+Jenny: That's brutal.
 
-Alex: Free until it's not. And then it's strictly worse.
+Alex: That's why batching exists. Every request you add to the batch shares the weight load — you stream the weights from HBM once and apply them to B requests' worth of activations. So your arithmetic intensity is, roughly, the batch size. Batch one, AI of one. Batch a hundred, AI of a hundred. Batch 295... 
 
-Jenny: Now — prefill versus decode. You said they live on opposite sides. Walk me through that, because in my head they're both just transformer forward passes.
+Jenny: You hit the ridge.
 
-Alex: They're both forward passes, and that's the trap. Prefill processes the whole prompt at once. If the prompt is two thousand tokens, your "batch" — from the matmul's perspective — is two thousand. Massively compute-bound for any reasonable prompt length. The Scaling Book says prefill attention is compute-bound for sequences roughly above 480 tokens, and the linear layers are compute-bound because the prompt itself is the batch.
+Alex: You hit the ridge. And that's the critical batch size — B-crit. The Scaling Book writes it as peak FLOPs over peak HBM bandwidth, times a correction for the ratio of bits per parameter to bits per activation. On H100 bf16 weights with bf16 activations, B-crit is about 280 tokens. Below 280 you're memory-bound, above 280 you're compute-bound.
 
-Jenny: So one request with a long prompt is already past B_crit on its own.
+Jenny: And below 280, what happens to latency as I add requests?
 
-Alex: Already past it. You don't need to batch across requests to be compute-bound during prefill. You're optimizing for MFU — Model FLOPs Utilization — and the right target is "fill the matmul units."
+Alex: This is the magical part. Latency is flat. Because you were going to pay the weight load anyway, whether you had one request or two hundred. So adding requests in the memory-bound regime is free throughput.
 
-Jenny: And decode?
+Jenny: Free.
 
-Alex: Decode is the opposite universe. You're generating one token at a time per sequence. The attention operation per step has arithmetic intensity of approximately one. That's structural. You load the entire KV cache for the sequence, do a tiny dot product with one new query, and that's the step. The Scaling Book is blunt about it — decode attention is always memory-bandwidth-bound. You cannot improve the arithmetic intensity of a single-token attention. It's literally the geometry of the operation.
+Alex: Free. Until you cross the ridge. Then every new request costs you proportional latency. So the rule is: if you're throughput-optimizing, you want to batch as close to B-crit as you can. If you're latency-optimizing, you want to batch below it. Reiner Pope phrased it on the Dwarkesh interview as — below B-crit, latency is flat as you add requests; above, latency grows linearly with batch. If you remember one curve from this whole episode, make it that one.
 
-Jenny: Always. That's a strong word.
+Jenny: Hold on. You said int8 weights drop B-crit to 140. Why is that?
 
-Alex: It's structural. The only way to improve it is to batch across sequences — different sequences sharing the weight load. Which is what continuous batching is doing. But the per-sequence work, the KV streaming, scales with batch and you're still bandwidth-bound on the cache.
+Alex: Because the FLOP roofline depends on the precision of your matmuls. Int8 or fp8 doubles your FLOPs throughput on H100 — Tensor Cores are twice as fast in 8-bit as in 16-bit — but HBM bandwidth is the same. So the ratio of FLOPs per byte doubles to 590. But — and this is the subtlety — B-crit also has that correction term, bits per param over bits per activation. If your weights are int8 and your activations are still bf16, the parameter byte is half the cost, so you reach saturation at half the batch. B-crit drops to 140.
 
-Jenny: So prefill wants small batch, low TTFT, sweat the compute. Decode wants huge batch, amortize the weight load, sweat the bandwidth.
+Jenny: So smaller B-crit means I get to compute-bound faster, with less batching.
 
-Alex: Two phases, two regimes, two optimal batch shapes. And the Scaling Book just states the conclusion directly: separate prefill and generation servers. Prefill batch of one, low TTFT, compute-bound. Generate at large batch, high throughput, memory-bound. KV cache transferred over the network between them.
+Alex: Right. And if you also push activations to int8, the FLOP roofline doubles but so does the activation savings, and B-crit goes back to 280. The two effects cancel.
 
-Jenny: Which is exactly what disaggregated serving is. PD split.
+Jenny: Okay that's neat. And H200?
 
-Alex: That's the whole architectural argument for PD disaggregation in one sentence. Two roofline regimes, two optimal configurations, you can't satisfy both on one engine without compromising one.
+Alex: H200 is interesting. Same peak FLOPs as H100 — 9.9 times ten to the fourteen — but HBM bandwidth went from 3.35 to 4.8 terabytes per second. So the FLOPs-per-byte ratio actually goes down, to about 205 in bf16. You saturate at a smaller batch on H200 than on H100.
 
-Jenny: Okay. I'm going to push on this. People have been running prefill and decode on the same engine for two years. vLLM does it. It works. So what's the actual quantified cost of mixing them?
+Jenny: Which means for latency-sensitive serving, H200 is actually the easier chip to keep in the latency-friendly regime.
 
-Alex: vLLM's V1 scheduler has a specific rule for this — decode-priority. Quoting the anatomy blog: "the V1 engine prioritizes decode requests already in the running queue before processing new prefill requests from waiting." That's the elevator-scheduling answer.
+Alex: That's the read. You get more bandwidth, you reach saturation sooner, you can run smaller batches without giving up throughput. That's the entire upgrade story.
 
-Jenny: Finish what's already moving before letting new requests in.
+Jenny: Okay. Now you keep saying decode is memory-bound and prefill is something else. Walk me through prefill.
 
-Alex: Exactly. Because if you let a fresh prefill jump in front of fifty in-flight decodes, every one of those decodes stalls for the duration of that prefill. A two-thousand-token prefill is maybe four hundred milliseconds. You just added four hundred milliseconds of ITL to every other request. Conversely, if you always let decode jump ahead, new prompts never start. The scheduler is constantly trying to find a fair point in between.
+Alex: Prefill is the same model, opposite regime. In prefill you process the whole prompt in parallel — the prompt comes in, you run it through every layer, you produce the first KV state, and you emit the first token. So the per-step work isn't "one token, one matmul of width B" — it's "T tokens, one matmul of width T." Suddenly your arithmetic intensity is on the order of T over 2. If T is more than about 480 tokens, prefill is compute-bound.
 
-Jenny: And chunked prefill is the engine's escape valve for that.
+Jenny: So prefill is the FLOPs-eating part and decode is the bandwidth-eating part.
 
-Alex: Chunked prefill — there's a parameter, long_prefill_token_threshold — splits a long prompt into smaller chunks so a single sixteen-thousand-token prefill doesn't stall every in-flight decode for half a second. It's a workaround for not having disaggregation. Which works. But you can see why a frontier-scale deployment, where TTFT and ITL SLOs are both tight, eventually gives up and runs separate fleets.
+Alex: Yes. Same weights, same model, totally different rooflines. And here's the punchline. If you mix them on the same server, every time a new prompt lands you have to interrupt the decode loop to do a compute-bound prefill burst, and that craters your time-between-tokens for every request currently decoding. Your p99 TBT goes to hell.
 
-Jenny: Okay. I want to recap before we go into segment two because there's a lot here. The roofline says: every kernel is either compute-bound or memory-bound. The crossover is B_crit, which depends on hardware and precision — 240 on TPU v5e bf16, 280 on H100 bf16, 120 if you go int8-weights-bf16-activations. Prefill is always above B_crit because the prompt is the batch. Decode is always below — arithmetic intensity ~1, structural. Hence disaggregation.
+Jenny: That's what chunked prefill is trying to fix in vLLM, right? You slice the prefill across multiple steps.
 
-Alex: Perfect recap. And now the second question, which I think is the more interesting one: the roofline tells you whether more batch helps. The KV cache tells you whether more batch fits.
+Alex: Right. Chunked prefill is the band-aid that lets you keep both phases on one server. But the structural answer is to disaggregate. Run prefill on a pool optimized for compute — small batches, high TP, push FLOPs — and decode on a pool optimized for bandwidth — big batches, high concurrency, push HBM utilization. Ship the KV cache between them.
 
-Jenny: The binding constraint.
+Jenny: That's literally separating the two regimes so each pool gets its own roofline.
 
-Alex: The binding constraint. Let me give you the formula and then a concrete number that I think genuinely shocks people the first time they see it. KV cache size per sequence equals two — for keys and values — times bytes per float, times head dimension, times number of KV heads, times number of layers, times sequence length. Canonical reference is the Scaling Book.
+Alex: That's the whole game. And the entire mechanical case for disaggregated serving — DeepSeek does it, LMSYS reproduces it, Character.AI does it — comes from that observation. Prefill and decode want opposite batch shapes.
 
-Jenny: Six factors. Okay.
+Jenny: Okay. Roofline. B-crit. Two regimes. I think I have it. But weights are only one part of what's streaming through HBM, right? You keep mentioning KV.
 
-Alex: Llama 2-13B. Eight thousand one hundred ninety-two tokens of context. bf16. Per-sequence KV cache: 6.7 gigabytes.
+Alex: That's the next big thing. Once your weights fit, KV cache is the new bottleneck. And the reason is that, on every single decode step, you stream the entire KV cache for every active sequence through HBM for the attention kernel. Every step. So your bandwidth-bound regime now has two consumers: weights, plus KV times batch.
 
-Jenny: Per sequence.
+Jenny: And KV scales with batch and sequence length.
 
-Alex: Per sequence. Batch of four? 53.6 gigabytes. Which is more than four times the parameter footprint of a 13-billion-parameter model in bf16.
+Alex: Linearly in both. So as you raise the batch — which you want to do for throughput — you raise the per-step bytes by B times KV-per-token. At some point that dominates the weight load entirely, and adding more batch stops helping because step time grows just as fast as throughput.
 
-Jenny: Wait. Hold on. The KV cache for a batch of four is bigger than the model.
+Jenny: What's the formula? Give me the napkin version.
 
-Alex: Four times bigger than the model. That's the moment, when you actually compute it, where the field stops feeling like "models are big." The KV cache is the dominant memory consumer for anything close to a useful batch.
+Alex: KV per token equals two — that's for K and V — times bytes per element, times number of KV heads, times head dim, times number of layers. The two is the K and V. The bytes-per-element is your dtype — two for bf16, one for int8 or fp8. The KV heads is where the attention variant matters.
 
-Jenny: That just inverts my whole intuition. I keep thinking of weights as the heavy thing.
+Jenny: Right, GQA shares heads.
 
-Alex: Weights are static — you load them once, they sit there. KV cache is dynamic, grows with batch and grows with sequence length, and at long context with a non-trivial batch, it dwarfs the model. The Scaling Book has a tradeoff table for Llama 2-13B on an 8-way TPU v5e replica that makes the latency-throughput curve concrete. Batch 1: KV is 6.7 gigs, total memory 32.7 gigs, step time 4.98 milliseconds, throughput 200 tokens per second. Batch 16: KV jumps to 107 gigs, total memory 133, step time 20 milliseconds, throughput 788 tokens per second. Batch 240: KV is 1,608 gigabytes, total memory 1,634, step time 249 milliseconds, throughput 963 tokens per second.
+Alex: GQA, MQA, MLA — they're all answers to the question "how much can I share K and V across query heads without tanking quality." Let me give you the table that lives rent-free in everyone's head. Take a DeepSeek-V3-shaped model — 61 layers, 128 heads, head dim 128. At 32K context, MHA — vanilla multi-head — costs you 256 gigabytes of KV per single sequence. Per user.
 
-Jenny: So throughput goes up about five-x from batch 1 to batch 240, but step time goes up fifty-x.
+Jenny: That's more than three H100s for one user.
 
-Alex: Fifty-x per-token latency, five-x throughput. That's the inherent latency-throughput trade you cannot wish away. And the more important observation: at batch 240, the KV cache is one-point-six terabytes. That doesn't fit on any single replica anyone has ever shipped. The batch ceiling on this workload is set by KV size, not by compute.
+Alex: For one user. That's why nobody actually runs MHA at 32K. GQA with 8 groups — which is what Llama 3 uses — drops it to 16 gigabytes per sequence. MQA, which is one shared K and one shared V across all heads, gets you down to 2 gigabytes. And MLA, DeepSeek's invention, is 2.18 gigabytes.
 
-Jenny: So the roofline says "compute-bound at 240" — you'd love to be there — and the KV math says "you cannot get there, you do not have the memory."
+Jenny: MLA matches MQA on size but DeepSeek says it's higher quality. How?
 
-Alex: Exactly. And the cure — the next row in that Scaling Book table — is GQA. Shrink the KV cache five-x via Grouped Query Attention, batch 64 fits in 111 gigs, throughput jumps to 3,756 tokens per second. Order of magnitude improvement, from shrinking the cache alone.
+Alex: This is the clever bit. MLA doesn't actually store separate K and V per head. It stores a single low-rank latent vector — one compressed representation — plus a small RoPE component for positional info. The total cached state is small. But when you read it back, you up-project that latent through a learned matrix to reconstruct all the multi-head K and V you need for that step. So you cache compressed, decompress on read.
 
-Jenny: Just from sharing KV heads across query heads.
+Jenny: That's literally compressed columnar storage. You're paying decompression cost on every read in exchange for storage size.
 
-Alex: Just from the architectural change to the model. No new hardware. No new engine.
+Alex: That's a great analogy. And the question with any compression scheme is whether the decompression cost outruns the bandwidth savings. With MLA, it doesn't, because you were memory-bound anyway. You had FLOPs to burn. So you spend FLOPs on the up-projection and you save bandwidth on the cache stream. Net win.
 
-Jenny: Okay so this is where I want to pull on the architectural thread. Because GQA is everywhere — Llama 3, Mistral, basically everyone. And DeepSeek did something different. MLA. Walk me through it.
+Jenny: And the quality thing?
 
-Alex: MLA — Multi-head Latent Attention. The ISCA paper, Zhao et al., DeepSeek-AI, the 2505.09343 arXiv tag. They publish what's probably the most useful KV-size-by-architecture table in the literature. Per-token KV cache, bf16. DeepSeek-V3 with MLA: 70.272 kilobytes per token. Qwen-2.5 72B with GQA: 327.68 kilobytes per token, which is 4.66x. Llama-3.1 405B with GQA: 516.10 kilobytes per token, which is 7.28x.
+Alex: The DeepSeek-V2 paper makes the case. MLA preserves multi-head expressivity at inference because you really do produce a full set of heads on every read — they're just derived from a shared latent. MQA collapses to a single head, which is genuinely losing capacity. MLA keeps the heads, it just shares their substrate. The V2 paper shows MLA beating GQA at the same cache budget. That's the entire reason DeepSeek invented it.
 
-Jenny: Seven-x. Per token.
+Jenny: Okay, let me put this in numbers. If I'm running Llama 3 70B with GQA-8, what does the math look like?
 
-Alex: At a hundred thousand tokens of context, that's a different universe.
+Alex: Scaling Book Part 8 does this exact walkthrough. Llama 3 70B: hidden dim 8192, 80 layers, 64 query heads but 8 KV heads — that's the GQA-8 — head dim 128. KV per token in int8: 2 times 8 KV heads times 128 head dim times 80 layers. Comes out to 160 kilobytes per token.
 
-Jenny: So what's the actual trick? GQA shares KV heads. What does MLA do?
+Jenny: 160K per token. So a single 8K sequence is...
 
-Alex: MLA compresses K and V jointly into a small latent vector. There's a projection matrix, learned during training, that takes the full K and V and squeezes them into a low-dimensional latent. Only the latent gets cached. When you actually need K and V for an attention computation, you up-project from the latent.
+Alex: 1.3 gigabytes. Batch 32 at 8K context is 42 gigabytes of KV on top of 70 gigabytes of int8 weights. That's 112 gigabytes total. Doesn't fit on one chip. The book sizes it as a 4-by-2 TPU v5e replica — eight chips together.
 
-Jenny: So you trade cache size for a tiny extra matmul on every read.
+Jenny: And what's the throughput?
 
-Alex: That's exactly the trade. And it's a great trade because — here's the punchline — you were memory-bandwidth-bound anyway. You had compute to spare. So you spend some of that spare compute on the up-projection, you cut your KV cache by roughly an order of magnitude, and you climb straight up the roofline.
+Alex: 17 milliseconds per decode step, 1,882 tokens per second aggregate. 235 tokens per second per chip on a 4-by-2 v5e replica at batch 32, int8. And the choice of batch 32 was deliberate. B-crit on v5e with int8 weights and bf16 activations is 120. They chose 32 on purpose to stay deep in the memory-bound regime, so that adding sessions would raise throughput without raising per-step latency.
 
-Jenny: That is — okay. That is genuinely elegant. The constraint is bandwidth, you spend the FLOPs you already had to relieve the bandwidth.
+Jenny: They're sitting comfortably under the ridge so they have room.
 
-Alex: It's the same shape as speculative decoding, just at a different layer of the stack. Spend cheap FLOPs to win against an expensive memory constraint.
+Alex: They're sitting comfortably under the ridge. They could push to 120 if they wanted more throughput per chip, at the cost of latency starting to climb. That's the kind of decision the framework helps you make in advance, on paper, before you launch a benchmark.
 
-Jenny: Wait, isn't that just GQA with extra steps? Sharing K and V?
+Jenny: Let me ask the obvious question. PagedAttention. We both know vLLM allocates KV in blocks. What's the right block size and why?
 
-Alex: It's the same family. The DeepSeek paper situates them on a spectrum. GQA and MQA — multiple query heads share a single set of KV pairs. Coarse-grained sharing. MLA — joint latent compression of K and V across all heads. Fine-grained learned compression. Same intent, different mechanism, and MLA is more aggressive about it.
+Alex: vLLM defaults to 16 tokens per block. And the way to think about it is exactly virtual memory paging. You have a free list of physical blocks, each block stores 16 tokens worth of KV across all heads and layers, and per request you maintain a list of which physical blocks back this request's logical context. When the request grows, you allocate another block off the free list. When the request finishes, you return its blocks.
 
-Jenny: And the quality cost?
+Jenny: So why 16 and not 1, or 256?
 
-Alex: The paper claims minimal — DeepSeek-V3 is competitive with frontier models, and MLA is part of how they got there. The quality cost is buried in the joint training; you have to train with MLA from scratch, you can't bolt it onto a GQA model.
+Alex: Two tensions. Smaller block size means more allocation overhead and more fragmentation. The Inside vLLM writeup walks through this — the per-block metadata starts to dominate at small sizes, and if you're trying to do prefix caching, smaller blocks mean alignment breaks more easily and you can't reuse partial blocks across prefixes.
 
-Jenny: That's a deployment constraint right there. You can't retrofit MLA, you ship MLA from day one.
+Jenny: Like 4K vs 1MB pages.
 
-Alex: Which is exactly why the only model in production at scale with MLA is DeepSeek's. It's a co-design decision from training.
+Alex: Same tradeoff. Bigger block size means less fragmentation overhead but more wasted tail-of-sequence. If your sequence ends mid-block, the rest of that block is wasted memory. So 16 is the empirical sweet spot for the kinds of sequences and the kinds of prefix patterns vLLM was tuned for. You can override it but most people don't.
 
-Jenny: Okay what about the other techniques on that spectrum? Windowed KV, quantization?
+Jenny: Okay so we've talked about weights, we've talked about KV. We've talked about why decode and prefill want opposite things. What's the parallelism story? How do you actually shard this across a node, across a rack?
 
-Alex: The paper lists them. Sliding window — keep only a recent window, discard older tokens. The paper is honest about this — quote, "compromises long-context reasoning." Which is the tradeoff most engines hide. If you're doing customer support chats that don't need long memory, fine. If you're doing code review with thirty thousand tokens of context, not fine. Quantized compression — store KV in int8 or lower. The DeepSeek paper says "minimal impact on model performance," and people generally agree at int8. At int4 it depends a lot on the model.
+Alex: This is where most people make their worst decision. Because their auto scaling reflex is data parallelism — just replicate the whole thing. And data parallelism is useless for decode latency.
 
-Jenny: And block size? In vLLM, PagedAttention has a block size?
+Jenny: Why?
 
-Alex: Sixteen tokens per block, by default. Per layer's KV pool. The per-block byte footprint is two — keys and values — times sixteen, times num_kv_heads, times head_size, times dtype_bytes. For bf16 that's two bytes. Sixteen is the empirical sweet spot for transformer KV layouts. Smaller blocks waste metadata. Larger blocks waste memory on partial blocks at the tail of each sequence.
+Alex: Because it doesn't speed up a single step. Data parallelism gives you more independent replicas, so you can serve more concurrent requests, but each replica still has to stream the weights through HBM at the same rate. DP doesn't divide your bandwidth bill. It just gives you more bandwidth bills to pay.
 
-Jenny: Right, exactly like a filesystem block size or a virtual memory page. Smaller pages, more page table overhead. Larger pages, more internal fragmentation.
+Jenny: It's horizontal scaling without sharding.
 
-Alex: It is literally a page size choice. And PagedAttention is virtual memory paging inside a single GPU process. Same primitive.
+Alex: Right. And what you need is sharding of the weights themselves so each GPU has less weight to stream per step. That's tensor parallelism. Megatron-style TP shards the hidden dimension of every matmul. So if you do TP-4 on a layer, each GPU does a quarter of that layer's work and you all-reduce at the end of the layer.
 
-Jenny: Okay good. Let me see if I can frame the segment. KV cache is the binding constraint on batch. The formula has six factors. The 13B Llama example at 8k context is 6.7 gigs per sequence and dwarfs the model at any real batch. Architecture is the lever — MLA gets DeepSeek to 70 kilobytes per token versus Llama's 516. GQA, sliding window, INT8 are the other points on the spectrum, each with its own honesty problem.
+Jenny: And each GPU only streams a quarter of the weights.
 
-Alex: That's it. And now the natural question: given the roofline and given the KV constraint, what's the actual sizing math for a real model on real hardware? Which is segment three.
+Alex: Each GPU streams a quarter of the weights per step. So per-step decode latency gets divided by your TP degree. That's the only sharding pattern that helps decode latency. But TP has limits — the all-reduce overhead grows with the number of participants, and it's only viable inside an NVLink island.
 
-Jenny: Bring it on.
+Jenny: How big is an NVLink island?
 
-Alex: Okay. Pop quiz from the Scaling Book. 30 billion parameter model. TPU v5e 4-by-4 pod, sixteen chips. Int8 weights. Batch four at eight-thousand-token context. What's the latency floor per decode step?
+Alex: On H100, eight GPUs per node connected by NVLink at hundreds of gigabytes per second of one-way bandwidth. So TP-8 is practical inside one node. TP across nodes is bottlenecked by inter-node bandwidth — Infiniband at 50 gigabytes per second, much slower — and the all-reduce starts to dominate. Don't go TP across nodes unless you really have to.
 
-Jenny: I have no idea. Walk me through it.
+Jenny: What if the model doesn't fit in one node?
 
-Alex: KV cache per sequence: at 100 kilobytes per token times 8,192 tokens, that's 819 megabytes per sequence. Times four sequences in the batch, that's about 3.3 gigabytes of KV. Parameters at int8: 30 gigabytes. Total bytes to stream per decode step: roughly 33.3 gigabytes. HBM bandwidth across 16 chips: 16 times 8.2 times ten-to-the-eleventh bytes per second. Divide. Latency floor: about 2.5 milliseconds per token at batch four.
+Alex: Then you reach for pipeline parallelism. Stack the layers across nodes. Each node owns a contiguous block of layers. Tokens flow through. PP is great for throughput because it pipelines across micro-batches. But it adds latency — you have pipeline bubbles, especially at the start and end of a batch.
 
-Jenny: That's the absolute lower bound assuming the kernels saturate HBM.
+Jenny: So PP only when you have to.
 
-Alex: That's the floor. And the Scaling Book gives you the contrasting case: at batch 256, you've moved past B_crit on the MLP. You're now compute-bound on the MLP. Per-token latency is about 21 milliseconds at batch 256.
+Alex: PP only when the model plus its KV genuinely doesn't fit in one node. And then there's expert parallelism — EP — but that's specifically for mixture of experts. You shard the experts across GPUs so each GPU owns some subset of the experts. We'll get to that with DeepSeek.
 
-Jenny: So going from batch 4 to batch 256 — sixty-four-x more sequences — costs you about eight-x in per-token latency.
+Jenny: And sequence parallelism?
 
-Alex: And the per-token cost per sequence drops dramatically. At batch 4, you're spending 2.5 milliseconds of step time on one token of output. At batch 256, you're spending 21 milliseconds on 256 tokens of output. The per-sequence cost is one-fifteenth.
+Alex: SP shards the sequence dimension. Useful for very long context prefill, basically useless for single-token decode. So for decode you have TP and that's it as a useful weight-sharding pattern. The Scaling Book derives a sweet spot for TP. Y-max equals F over B-crit times beta, where beta is the ratio of HBM bandwidth to interconnect bandwidth. On v5e it's about 8.
 
-Jenny: That's why people batch.
+Jenny: So there's a maximum useful TP degree.
 
-Alex: That's why people batch. That's the entire economic argument. And between batch 4 and batch 256, you're walking up the roofline. Per-token cost falls monotonically. Above 256, on the MLP, it flatlines — extra batch buys you nothing for per-token cost.
+Alex: There's a maximum useful TP degree before the interconnect becomes the bottleneck instead of HBM. And the interesting move — which the book recommends explicitly for latency-bound serving — is to push TP past the FLOP-utilization optimum, intentionally wasting some FLOPs in exchange for lower per-step time.
 
-Jenny: Wait — but parameters need to stream from HBM too, right? Even before any KV.
+Jenny: You're trading utilization for time-to-token. That's why a hand-tuned decode deployment looks "wasteful" by training standards.
 
-Alex: Yes. And this is a really useful observation the Scaling Book makes. Even before KV, parameters have to move from HBM to the compute units for every step. The book does the calculation for 18.4 billion parameters in int8 on the 16-chip pod: 18.4e9 bytes divided by 8.2e11 bytes per second times 16, equals 1.4 milliseconds. That's the parameter-streaming floor. Every token has to pay it. Quantization to int4 halves it. FP8 — which Hopper supports natively — halves the bf16 floor. So when DeepSeek says they run in FP8, part of what they're winning is half the parameter-streaming time per step.
+Alex: That's exactly right. Training cares about FLOPs per dollar. Latency-bound serving cares about time per token. Different optimizers, different optima.
 
-Jenny: That hits hard. Even with zero KV, you have a millisecond-plus floor just from weights.
+Jenny: Can you give me the closed form? You teased it earlier.
 
-Alex: Just from weights. And it scales with model size and inversely with bandwidth and chip count. It's the rock bottom.
+Alex: In the memory-bound regime, step time is approximately the bytes you stream per step divided by your bandwidth. The bytes per step are batch times KV-per-sequence — that's the KV streaming — plus weight params. Divide by total HBM bandwidth and that's your step time. Tokens per second is batch divided by step time, which gives you batch times bandwidth, over batch-times-KV plus weights.
 
-Jenny: Okay. Now the DeepSeek-V3 paper has its own back-of-envelope thing I want you to walk through. The all-to-all calculation.
+Jenny: So at small batch, weights dominate the denominator and throughput scales linearly with batch.
 
-Alex: Yes. This one is worth doing carefully because it makes the case for NVLink at frontier scale better than any marketing material. DeepSeek-V3 has 61 layers. Each layer's MoE all-to-all moves, per device, batch 32 times nine — that's eight routed experts plus one shared expert per token — times the hidden dimension 7K, in mixed FP8 dispatch plus BF16 combine, so one byte plus two bytes per element.
+Alex: Linearly. Free throughput. Then as batch grows, batch-times-KV starts to dominate, and throughput asymptotes. The crossover happens when KV bytes equal weight bytes per step. That's the diminishing-returns knee on every "throughput vs ITL" sweep graph you've ever seen.
 
-Jenny: Okay.
+Jenny: And past that knee, doubling the batch buys less than doubling the throughput.
 
-Alex: On a 400 Gigabit per second CX7 InfiniBand fabric — the H800 deployment shape — that's 50 gigabytes per second effective. Plug in: (1 + 2) times 32 times 9 times 7K divided by 50 GB per second equals 120.96 microseconds per layer.
+Alex: Less than 2x per doubling. The classic asymptote. You can sketch this curve on paper before launching a single benchmark, which is enormously powerful. You can predict your own results.
 
-Jenny: Per layer.
+Jenny: Okay. So I think I have the math. Roofline, B-crit, KV formula, parallelism. Let me hear how this plays out in real deployments. You keep mentioning DeepSeek and Character.AI and the LMSYS reproduction.
 
-Alex: Per layer. Across 61 layers, that's 14.76 milliseconds of just all-to-all per token. Which means the theoretical upper bound is about 67 tokens per second. That's the ceiling. You cannot do better than that on that fabric, period. The bandwidth is the constraint.
+Alex: Three case studies, three very different corners of the same Pareto frontier. Let's start with DeepSeek-V3, because that's the one with the most going on. 671 billion parameters total, 37 billion activated per token — MoE. 256 experts plus 32 redundant. MLA for attention. FP8 mixed precision end-to-end. Trained on 2,048 H800 GPUs.
 
-Jenny: 67 tokens per second is the ceiling.
+Jenny: H800, not H100. The bandwidth-limited export variant.
 
-Alex: The ceiling. Now run the same calculation on a GB200 NVL72. NVLink at 900 gigabytes per second unidirectional, 72 GPUs in one fabric. The 50 GB per second becomes 900 GB per second. The per-layer cost drops to 6.72 microseconds. 61 layers, 0.82 milliseconds TPOT. Theoretical ceiling: about 1,200 tokens per second.
+Alex: Right, half the NVLink bandwidth of H100, capped Infiniband. So they had to design the system around the network constraints from day one. Four architectural decisions and every single one was a hardware co-design move. First — MLA. We covered why. Matches MQA cache size with multi-head quality. Second — FP8 everywhere. They train in FP8, they serve in FP8. That doubles their FLOPs roofline from 295 to 590 on Hopper, halves memory consumption versus BF16, and cuts the expert all-to-all communication volume by 50% because the activations on the wire are 8-bit instead of 16-bit.
 
-Jenny: Eighteen-x.
+Jenny: That last one is huge for an MoE.
 
-Alex: Eighteen-x faster. Same model. Same algorithm. The math doesn't change. The denominator does. This is the cleanest possible proof that "buy NVL72" turns into "ship more tokens" — you do not optimize anything, you just have more bandwidth, and the bandwidth was the binding constraint.
+Alex: That last one is the entire story for an MoE at scale. MoE inference latency is dominated by all-to-all communication — when each token's chosen experts are scattered across different GPUs, you do a network shuffle to send each token to its experts and another shuffle to bring the results back. Twice per layer. Synchronous. So halving the bytes on the wire is the biggest perf lever you have.
 
-Jenny: That makes my brain hurt a little. Because what you're saying is — for a frontier MoE — the all-to-all bandwidth is the entire performance ceiling.
+Jenny: That's literally the same as compressing payloads before a shuffle in a distributed sort.
 
-Alex: For a frontier MoE at scale, yes. Forty to sixty percent of inference latency at scale is the all-to-all. The MoE all-to-all is the network shuffle phase of map-reduce, executed twice per layer, synchronously, with dynamic per-rank payload sizes because routing is dynamic. That's the worst possible workload for a non-NVLink interconnect.
+Alex: Same exact play. Third decision — MTP, multi-token prediction, at training time. They train extra heads to predict the next-plus-one, next-plus-two, etc. Then at inference, they repurpose those heads as a built-in speculative decoder. The acceptance rate they report is 80 to 90 percent on the second token, which gives 1.8x effective generation throughput.
 
-Jenny: Synchronously meaning everyone waits.
+Jenny: Speculative decoding gets a free ride because you were bandwidth-bound anyway.
 
-Alex: It's a global barrier. The slowest expert pins everyone to its tail latency. Which is why dynamic routing skew turns into idle GPU time on the popular experts' victims.
+Alex: Exactly the right intuition. Spec decode trades FLOPs for bandwidth wins. Your verifier model has to run a forward pass on the draft tokens, which costs FLOPs. But on a memory-bound decoder, those FLOPs were idle. So it's almost free FLOPs in exchange for fewer step-by-step weight loads. Pure win.
 
-Jenny: So before we even get into DeepSeek's specific tricks — EPLB, redundant experts, DualPipe — the headline is just: MoE inference at scale is a network problem.
+Jenny: And the fourth?
 
-Alex: It is, fundamentally, a network problem with some matmul attached. And the model's design choices — number of routed experts, hidden size, layer count, FP8 dispatch — all flow from what the network can carry.
+Alex: The fourth is networking — a multi-plane two-layer fat tree replacing the conventional three-layer. Isolates collective communication from request traffic, cuts cluster networking costs. The DeepSeek insights paper makes the point explicitly: they redesigned the network topology around the MoE all-to-all pattern.
 
-Jenny: Okay. Let me ask the sharding question because I keep wanting to default to my distributed systems instincts. Why can't I just FSDP my way out of this?
+Jenny: They co-designed the data center.
 
-Alex: Great question. Scaling Book is blunt about it. FSDP — Fully Sharded Data Parallel — is impossible for decode. Parameters would have to move over the slow ICI per step. Bandwidth doesn't support it. Data parallelism — replicating parameters across replicas — is unhelpful for decode latency, because the bottleneck is per-step bandwidth, not parallel throughput. Sequence sharding is impractical because decode is sequential by definition, there's no sequence to shard.
+Alex: They co-designed the data center. That's the level of vertical integration we're talking about. And then in deployment, they disaggregate prefill from decode and use wildly different parallelism for each. Prefill runs TP4 plus sequence parallelism, EP32, on 32 GPUs across 4 nodes. Decode runs EP320 on 320 GPUs across 40 nodes.
 
-Jenny: So the only sharding that works for decode is model parallelism.
+Jenny: Wait. EP320. They shard experts across 320 GPUs?
 
-Alex: Tensor parallel for attention, expert parallel for MoE, pipeline parallel for very large models. With the rule "prefer to move activations, not KV cache." That's the entire viable design space. It's not a preference, it's what the roofline allows.
+Alex: Wide expert parallelism. They have 256 routed experts, so EP320 means most GPUs hold a single expert, plus some redundant copies of the popular ones. The all-to-all spans the entire decode pool. This is only sane because the H800 NVLink fabric — even at half the H100 bandwidth — can absorb the shuffle, and because their custom DeepEP kernels are tuned for exactly this topology.
 
-Jenny: Which is why every serious deployment ends up looking the same.
+Jenny: And the load balancing problem? Some experts get picked more than others.
 
-Alex: Same parallelism cocktail. TP for attention, EP for MoE, PP for the very biggest. You can read it off the math.
+Alex: This is huge. The MoE gate routes each token to its top-k experts based on learned routing scores, and the distribution is never uniform. Some experts are "hot." DeepSeek has two mechanisms. First, auxiliary-loss-free balancing — they learn a routing bias that pushes tokens toward underutilized experts without adding a loss term that would hurt model quality. Second, redundant experts — at deployment they replicate the 32 most popular experts onto additional GPUs.
 
-Jenny: Let me try to recap segment three before we shift to the engine implementation. Real sizing math: parameter streaming sets the floor, KV streaming compounds with batch, all-to-all dominates at frontier MoE scale. NVLink is the lever for the all-to-all, FP8 is the lever for parameter streaming, MLA-class compression is the lever for KV. Sharding is forced — TP, EP, PP, no FSDP, no DP for decode.
+Jenny: That's just hot-shard replication in a sharded database.
 
-Alex: That's it. So now: how does a real engine actually do this? Which is where vLLM comes in. Segment four.
+Alex: It is exactly hot-shard replication. Same problem, same solution. And there's an EPLB — expert-parallel load balancer — that does placement and dynamic remapping based on observed traffic. Same idea as a query router that's learned which tenant goes to which replica.
 
-Jenny: I've been waiting for this. I want to know the four-component architecture.
+Jenny: And the all-to-all itself. You said synchronous.
 
-Alex: The anatomy blog lays it out clean. EngineCore — the execution loop that owns scheduling, model execution, and KV management. Scheduler — manages request prioritization, FCFS or priority, with separate waiting and running queues. KVCacheManager — maintains the free_block_queue pool of available KV blocks for paged attention. ModelRunner — owns the sampler, the KV cache, the forward-pass buffers, the input_ids and positions tensors.
+Alex: Synchronous. That's the killer. Every layer, twice, you do a global shuffle. Every GPU is blocked until every other GPU finishes its part. So your tail latency is set by the slowest expert's GPU. If your routing is even slightly skewed, the popular experts' victims sit idle.
 
-Jenny: Four components, three of them are basically about scheduling and memory, one is the actual GPU work.
+Jenny: It's a global barrier.
 
-Alex: Which tells you where the engineering effort goes. The model runner is the easy part — it's a forward pass. The hard parts are: who gets in the batch, when, with what cache?
+Alex: It's two global barriers per layer. 61 layers. That's 122 barriers per decode step. The communication time per layer in DeepSeek's CX7 400Gbps Infiniband setup is around 242 microseconds per layer for the all-to-all. Multiply: 61 times 242 microseconds is about 14.76 milliseconds per token, which caps you at about 67 tokens per second.
 
-Jenny: Right. And we covered decode-priority. What about prefix caching?
+Jenny: Per request.
 
-Alex: Enabled by default in vLLM V1. Quote: "Reuses KV blocks for matching token prefixes exceeding block boundaries." Cache locality at the conversation level. If two requests share a thousand-token prefix, the engine computes the prefill on that prefix once, caches the KV blocks, and reuses them for the second request.
+Alex: Per request. That's the theoretical ceiling set just by the all-to-all. On a GB200 NVL72 with 900 gigabytes per second of NVLink instead, the same math gives 820 microseconds per token, or about 1200 tokens per second. Same model, different rack — 18x throughput difference.
 
-Jenny: Which is exactly what API-tier prompt caching at Anthropic and OpenAI is exposing to users, right? The same primitive, surfaced through the API.
+Jenny: The interconnect is the model architecture.
 
-Alex: Exactly the same primitive. Content-addressable KV. RadixAttention — SGLang's version — generalizes it further to a shared filesystem cache across processes, where PagedAttention is virtual memory paging within a single process.
+Alex: The interconnect is the architecture. That's the whole point of Wide-EP. You're saying "I will design a model that only works if the network is fast enough." And then you go build that network.
 
-Jenny: Oh that's a nice distinction. PagedAttention is intra-process, RadixAttention is cross-process.
+Jenny: Okay, LMSYS reproduction.
 
-Alex: That's the cleanest way to put it. RadixAttention can be shared across replicas, persisted, even spilled to host memory or to a tiered cache. Which is what HiCache does in SGLang — HBM is the hot tier, host RAM is warm, RDMA-attached storage is cold. Exactly how a database buffer pool works.
+Alex: LMSYS, May 2025. They published the open-source reproduction of DeepSeek-V3 on commodity H100 — 12 nodes, 96 H100s, using SGLang. Disaggregated prefill and decode. Prefill on 4 nodes — 32 H100s — running TP16 plus EP32 with DP-attention. Decode on the other 9 nodes — 72 H100s — running EP72.
 
-Jenny: A KV cache buffer pool with explicit tiering.
+Jenny: Numbers?
 
-Alex: Yes. And HiCache speaks NIXL — the RDMA transport — natively, so KV blocks can travel between nodes. Which is the trick Dynamo plus SGLang plays for disaggregated serving: the KV moves over RDMA from the prefill pool to the decode pool, and the receiver doesn't stall waiting for a sender, it's one-sided.
+Alex: 50,302 prefill tokens per second per node at 4K input length. 22,282 decode tokens per second per node at 2K input length. TTFT between 2 and 5 seconds, ITL around 100 milliseconds. Cost: 20 cents per million output tokens, which is about one-fifth of DeepSeek's own API price.
 
-Jenny: One-sided RDMA versus MPI send-receive. Yes. Okay. So vLLM's continuous batching — that's the iterative thing where the scheduler rebatches every step.
+Jenny: That's the real number. 20 cents per million.
 
-Alex: Every step. Newly-arrived prefills get picked up, completed decodes get dropped. The GPU never sits idle waiting for a fixed batch boundary. It's the difference between static batching — where you assemble a batch, run it to completion, then assemble the next — and continuous batching, where the batch is liquid.
+Alex: 20 cents per million on commodity hardware, with open source. Within 5 to 7 percent of DeepSeek's reported numbers on their own H800 stack. The disaggregation story has receipts now.
 
-Jenny: Static batching is like a fixed-size thread pool that processes a request from queue-to-done. Continuous batching is the request entering and leaving the in-flight set mid-execution.
+Jenny: How does KV move between prefill and decode?
 
-Alex: That's exactly it.
+Alex: RDMA, scatter-gather, on a background thread. Decode pre-allocates the KV blocks. Prefill writes directly to those blocks over RDMA. Decode reads on its first step. So the prefill-to-decode handoff is just "prefill posts an RDMA write to decode's KV pool, decode wakes up and starts reading."
 
-Jenny: What about speculative decoding? Because this is the one I always get tripped up on the economics of.
+Jenny: That's exactly RDMA in distributed storage. Pre-allocate, write, read.
 
-Alex: vLLM supports three drafters out of the box. N-gram — purely lookup-based, super fast, low accuracy. EAGLE — a learned small drafter, mid speed, mid accuracy. Medusa — multi-head prediction, very fast, varied accuracy. The key insight, framed in roofline terms: speculative decoding trades FLOPs you have for memory bandwidth you don't.
+Alex: Same primitive. NIXL is the transport. SGLang's HiCache speaks NIXL natively, which is why Dynamo and SGLang compose cleanly — they share the cache transport.
 
-Jenny: Say that again slowly.
+Jenny: And on the EP side? They mention EPLB.
 
-Alex: Decode is memory-bandwidth-bound. The GPU is sitting there with idle FLOPs every step. Speculative decoding says: use those idle FLOPs to verify several drafted tokens in parallel. If the drafts are right, you accept multiple tokens per forward pass. You generate more tokens with the same number of weight loads.
+Alex: The LMSYS post is candid about it. EPLB is tuned on in-distribution traffic. Production traffic is not in-distribution. So EPLB is a starting point — you ship with a placement, then you collect observed traffic, then you remap periodically. It's not a finished product. Real deployments need an ongoing balancer.
 
-Jenny: So a 1.8x acceptance is essentially a 1.8x throughput win because the FLOPs were free.
+Jenny: Production system, never done.
 
-Alex: The FLOPs were free, yes. The cost is the drafter — either a small model running ahead or a Medusa head — and the verification logic. But on a memory-bound decode, you had compute to burn. That's the perfect trade.
+Alex: Production system, never done.
 
-Jenny: Right, and DeepSeek's MTP at inference is this same idea, except the drafter is built into the main model's training.
+Jenny: Okay, third case study. Character.AI.
 
-Alex: Their MTP — Multi-Token Prediction — was originally a training-time auxiliary objective. At inference, they repurpose the MTP head as a built-in drafter. DeepSeek reports an acceptance rate of 80 to 90 percent for the second-subsequent-token prediction, which gives a 1.8x speedup in tokens per second compared to no MTP. On B200 with three stacked MTP layers, the R1 deployment hits 2.82x. So you can compound it.
+Alex: Character.AI is the most aggressive cost-side optimization that's been publicly disclosed. They claim about 20,000 QPS sustained — which is something like 20 percent of Google Search's request volume — at under one cent per hour of conversation. They report 33x cost reduction since their 2022 launch and 13.5x cheaper than competitors using leading commercial APIs.
 
-Jenny: Compound it.
+Jenny: How?
 
-Alex: Stack MTP layers, each predicting one token further out. Accept rates fall with depth but stay non-trivial.
+Alex: A stack of five compounding techniques, all aimed at KV. Roughly 20x cumulative KV reduction with no measurable quality regression on their internal evals. First — MQA everywhere, not GQA. Eight times reduction versus the standard GQA-8 baseline. They took the quality hit and tuned around it.
 
-Jenny: Okay let me ask the question I keep wanting to ask. Is there a public reproduction of all this? Because so far we've been quoting the Scaling Book and the DeepSeek paper, both of which are first-party. Is there third-party proof?
+Jenny: They went all the way to MQA. That's an architectural decision.
 
-Alex: Yes — and this is the most useful third-party signal in the literature right now. LMSYS, May 2025, published a reproduction of DeepSeek's deployment shape with prefill-decode disaggregation on 12 nodes by 8 H100s — 96 GPUs total. Public cluster, commodity H100, not the H800 fabric DeepSeek used.
+Alex: Architectural. Made at training time. Second — cross-layer KV sharing. Tie the KV across neighboring attention layers, so two adjacent layers literally share the same K and V buffers. Another 2 to 3x reduction.
 
-Jenny: And?
+Jenny: That's like memoizing across layers.
 
-Alex: They split EP32 for prefill, EP72 for decode, both with data-parallel attention. Throughput: 52.3 thousand input tokens per second per node, 22.3 thousand output tokens per second per node, on two-thousand-token sequences.
+Alex: Exactly. They're betting that neighboring layers don't need totally independent KV — that the information overlap is large enough that sharing is fine. And on their workload, with their evals, that holds. Third — hybrid attention horizons. Interleave local sliding-window attention with sparse global layers. Most layers only attend within a fixed window — say 1024 tokens — and only a few layers do full-context attention. So the cost of long context drops from quadratic in sequence length to linear on the local layers, and only the global layers contribute to KV across the full context.
 
-Jenny: Per node.
+Jenny: That's like a tiered index. Most reads hit the local index, occasional reads go to the global one.
 
-Alex: Per node. Across the 12 nodes that's a lot of throughput. TTFT 2 to 5 seconds, ITL about 100 milliseconds. And the LMSYS blog is explicitly honest: this is throughput-optimized, not latency-optimized. The five-second TTFT is not a consumer-grade SLO. It's a fleet-economics demo.
+Alex: Same shape. You're paying full cost only when you have to. Fourth — native int8 training. Weights, activations, and KV all in int8 from training onward, with custom int8 matmul and attention kernels. Eliminates the train-serve dtype mismatch.
 
-Jenny: 100-millisecond ITL is pretty livable for chat.
+Jenny: That's a big bet. Most people train in bf16 and quantize after.
 
-Alex: It is. The numbers they hit are within 5 to 7 percent of DeepSeek's own numbers, which is the validation point. It says: this works on commodity hardware, the techniques travel, the math is right.
+Alex: Most people do, and most people pay a small quality cost on quantization. Character.AI's bet is "if I train native int8, the model learns to live in int8 representation space, and there's no quantization gap." They claim it works. Two times memory reduction, faster matmuls.
 
-Jenny: And what doesn't work?
+Jenny: And fifth?
 
-Alex: The honest tradeoffs. Quote: "limited to shorter sequences due to the use of 96 GPUs." MTP integration with DP-attention is incomplete. And the EPLB — Expert-Parallel Load Balancer — they note relies on in-distribution traffic that, quote, "may diverge from production workloads."
+Alex: Inter-turn caching. KV for every prefilled prefix and every generated message is held in host DRAM, fetched back into HBM on follow-up turns. So multi-turn conversation, which is their entire product, basically eliminates prefill cost in the common case.
 
-Jenny: Which is a really important caveat. EPLB is doing hot-shard balancing — like read replicas for hot keys in a sharded database — but it's tuned on the traffic mix you observed yesterday. Production traffic shifts.
+Jenny: That's a tiered buffer pool for KV.
 
-Alex: Exactly. EPLB is a starting point, not a finished product. The placement of redundant experts — the 32 redundant experts in DeepSeek's prefill, for instance — has to be retuned as traffic drifts.
+Alex: It is exactly a tiered buffer pool. HBM is hot, host DRAM is warm. They could extend to NVMe or RDMA-attached storage for cold — that's what HiCache does in SGLang. Same pattern as a database page cache.
 
-Jenny: Okay, segment four recap. The engine is mostly a scheduler and a memory manager. vLLM's four components, decode priority, chunked prefill, prefix caching, continuous batching, speculative decoding — all of these are roofline-aware policies. RadixAttention extends paging to cross-process. HiCache adds tiered storage. LMSYS reproduced DeepSeek-class throughput on commodity 96-H100 with the honest tradeoffs.
+Jenny: And the compounding works out to 20x.
 
-Alex: Good. Now I want to do segment five differently because it's where it gets concrete. Two production case studies, then the decision framework, then how to actually frame this for an interview.
+Alex: 8x from MQA, 2-3x from cross-layer sharing, the hybrid layer factor on top of that, 2x from int8, plus the multi-turn savings on top. Compounding gets you to roughly 20x KV reduction at the headline level. Which means batch size goes up roughly 20x at the same memory budget, which means throughput per GPU goes up roughly 20x. That's the entire cost story.
 
-Jenny: Hit me.
+Jenny: Three companies, three different corners of the same matrix.
 
-Alex: Character.AI versus DeepSeek. Two completely different productions, two completely different KV strategies, both quoting eye-popping numbers. Character.AI publishes 13.5x less serving cost than competitors using leading commercial APIs. 33x reduction in serving cost since their 2022 launch. Less than one cent per hour per hour of conversation. Approximately twenty thousand QPS sustained — about 20 percent of Google Search's request volume.
+Alex: Three different corners. DeepSeek's corner is "frontier quality at minimum FLOPs" — they cared about training cost too, because they were the ones training. MLA, FP8, MTP. LMSYS reproduced the same architecture on commodity hardware to prove disaggregation works in public. Character.AI's corner is "cheapest possible consumer chat" — extreme KV reduction, accepting some long-context quality loss because their product is short turns.
 
-Jenny: Twenty percent of Google Search.
+Jenny: Different SLOs, different points on the Pareto.
 
-Alex: That's their public claim, in their inference cost blog. And it's an interesting case study because the techniques they credit are quote "transformer architecture and attention KV cache innovations" plus "improved techniques for inter-turn caching." The specific techniques cited in the broader literature — cross-layer KV sharing, sliding-window-plus-global hybrid attention, INT8 KV cache quantization — are not quantified in their cited page. So the 33x is the company's, not a per-technique breakdown the source supports.
+Alex: Different SLOs, different points. None of these recipes are wrong. They're each optimal for what they're trying to do. That's the entire frame.
 
-Jenny: That's an important honesty note for an interview. The cost number is citeable. The per-technique attribution is not.
+Jenny: Okay. I want the workflow. If I'm an engineering manager and I get told "stand up serving for this new model," what do I actually do?
 
-Alex: Exactly. The story you tell is: Character.AI made aggressive KV-side architecture choices to serve consumer chat economically, and the cost numbers they publish are credible, and the per-mechanism breakdown is industry inference from the broader literature, not directly attributed in their blog.
+Alex: Nine steps. The Scaling Book and the surrounding literature converge on roughly the same sequence. Step 1: write down the SLO contract. TTFT p50 and p99. TBT p50 and p99. Or end-to-end latency if it's non-streaming. Target peak throughput, requests per second or tokens per second. Cost ceiling — dollars per million tokens or dollars per request. And a quality bar — a specific eval suite at a specific threshold.
 
-Jenny: And DeepSeek is the opposite case study.
+Jenny: No numbers, no decisions.
 
-Alex: Opposite philosophy. Character.AI took a fixed model class — short turns, very high QPS, consumer chat — and optimized the serving stack against it. DeepSeek-V3 took a fixed cluster — 2,048 H800s, fixed network topology — and redesigned the model to suit the cluster. Hardware-aware co-design.
+Alex: No numbers, no decisions. Stop and get them first. I've seen so many teams skip this and end up six months in optimizing for the wrong thing. Step 2: characterize the workload. Input length distribution, median and p95. Output length distribution. Concurrency profile — steady, diurnal, bursty. Multi-turn or single-shot. Shared system prompt or not. Quality-sensitive subset that needs priority.
 
-Jenny: What are the architectural choices?
+Jenny: Because each of those decides a different knob.
 
-Alex: Four. One: MLA, already covered. 70 kilobytes per token KV at bf16 versus 516 for Llama 3.1 405B GQA. Two: MoE — DeepSeekMoE — 671 billion total parameters, 37 billion activated per token. The per-token compute cost: 250 gigaFLOPs for DeepSeek-V3, versus 394 gigaFLOPs for Qwen-72B dense, versus 2,448 gigaFLOPs for Llama 405B dense. About ten-x less compute per token for comparable or superior quality.
+Alex: Each maps to a knob. Multi-turn turns on inter-turn caching. Shared system prompt turns on prefix caching. Bursty turns on disaggregation. Mismatched input-to-output ratio decides your prefill-to-decode server ratio — there's a rule of thumb in the Scaling Book of about 3 prefill servers per decode server at 8K input and 512 output for Llama-70B.
 
-Jenny: Wait. Ten-x less compute per token than dense Llama 405B.
+Jenny: Workload-dependent.
 
-Alex: Ten-x. That's the entire economic argument for MoE. You activate only the experts you need.
+Alex: Always workload-dependent. Step 3: pick the model. Smallest one that clears your quality bar — on your eval, not benchmarks. Benchmarks lie. Eval on your actual workload. Prefer architectures with cheap KV: GQA-8 as the minimum, MLA if cache will be tight, MQA if it's the bottleneck and you can take the quality hit. Note the quantization-friendliness — model families differ a lot on how well they take FP8 and INT4.
 
-Jenny: Right, expert parallelism is like sharding a database by tenant ID, except the routing key — the gate output — is recomputed every token.
+Jenny: Step 4 is the napkin math.
 
-Alex: That's the analogy. And it's a hard sharding problem because the routing is dynamic and skewed. Some experts get hit way more than others. Which is why you need EPLB and redundant experts.
+Alex: Step 4 is roofline on paper. Compute KV per token from the formula. Compute param footprint at your chosen quant. Look up B-crit on your target chip. Decide which regime you're going to live in — cache-limited, bandwidth-limited, compute-limited. If the math says it doesn't work — your KV pool fits one user at target context — stop. No amount of tuning will save you. Pick a smaller model, a bigger box, or a better attention variant.
 
-Jenny: The hot-shard problem.
+Jenny: That's the move that prevents the six-month detour.
 
-Alex: The hot-shard problem at every token. Three: FP8 mixed-precision training. Quote: "FP8 significantly reduces memory consumption by half compared to BF16, plus reducing communication volume by 50 percent compared to BF16 via FP8 EP dispatch." Both the storage and the wire bytes shrink. Which is exactly what we computed in the all-to-all math — fewer bytes per token in the dispatch, less time on the network.
+Alex: That is the move that prevents the six-month detour. Step 5: pick the topology. Smallest box where weights plus KV at target batch plus activation headroom fits. TP first, only within an NVLink island. PP only when it genuinely doesn't fit in one node. EP only for MoE and only when batch is big enough that each expert sees at least B-crit over k tokens.
 
-Jenny: And four?
+Jenny: And the disaggregation decision.
 
-Alex: MTP. Multi-Token Prediction. We covered it — 80 to 90 percent acceptance on the second token, 1.8x TPS without MTP, up to 2.82x on B200 with three stacked layers.
+Alex: Disaggregate if step 2 showed mismatched input and output lengths, or if you have any TTFT pressure. Step 6: pick the engine and a baseline config. vLLM for fast iteration and broad model support. TensorRT-LLM when you need every last percent on a fixed deployment. Set `gpu_memory_utilization` to 0.90 and defaults everywhere else. Do not tune yet.
 
-Jenny: Okay so the side-by-side: Character.AI is consumer-chat economics through aggressive KV reduction. DeepSeek is frontier-reasoning at long context through MLA, MoE, FP8, and MTP. Both publish wild numbers, both are credible in different domains. What's the tradeoff you'd state for each?
+Jenny: Hands off the knobs.
 
-Alex: Character.AI almost certainly loses some long-context quality — sliding window is the honest tradeoff. You serve a chat product, the quality cost is mostly invisible to the user. DeepSeek's MLA has the compute cost of up-projection on every read. The way they pay for it is by living in the regime where they had compute to spare anyway.
+Alex: Hands off the knobs. Step 7: measure against SLO. TTFT, TBT, throughput, success rate, GPU utilization, HBM bandwidth utilization. Identify the single binding constraint. There's only ever one binding constraint at a time. Tuning a non-binding one is pointless.
 
-Jenny: So both are exploiting the asymmetry of decode being bandwidth-bound. Just on different parts of the cache shape.
+Jenny: How do I diagnose memory-bound vs compute-bound at runtime?
 
-Alex: That's the unifying observation. Both stacks are "spend compute, save bandwidth" in different forms.
+Alex: Rule of thumb from nvidia-smi. High SM utilization, above 80%, at moderate memory utilization — compute-bound. Push quantization, push FP8. Low SM utilization, 30 to 50%, with high HBM bandwidth utilization — memory-bound. Push batch, push KV reduction.
 
-Jenny: Okay. Tuning. The TRT-LLM playbook. Walk me through the grid search.
+Jenny: That's elegant. Two regimes, two readings, two responses.
 
-Alex: TensorRT-LLM has a published Performance Tuning Guide. The case study is Llama 3.3 70B on four H100 SXM 80-gig GPUs, sequence in and out of 2048 each. Two main parameters. max_batch_size, default 2048. max_num_tokens, default 8192. The guide recommends sweeping powers of two.
+Alex: Same diagnostic that works for any storage system. Step 8: apply one knob at a time. Symptom to first knob. TBT crushed when prompts arrive — enable chunked prefill, lower `long_prefill_token_threshold`. Repeated prompt prefix in workload — turn on prefix caching. TTFT spiky under load — disaggregate prefill from decode. Throughput plateau below B-crit — raise `max_num_seqs` and `max_num_batched_tokens` together. Quality OK but cost too high — quantize weights to FP8 or INT8, then quantize the KV. ITL still tight after dense tuning — speculative decoding. Long context dominates KV — sliding window or cross-layer sharing. MoE expert under-utilized — raise effective batch via EP or DP-attention.
 
-Jenny: Two parameters, big interaction surface.
+Jenny: Each one is a single Pareto move.
 
-Alex: Big interaction surface. The results: at max_batch_size 64, throughput 1,944 tokens per second — bottlenecked, batch too small. At max_batch_size 512, throughput 2,467 — optimal, 21 percent better than the default. At max_batch_size 2048 — the default — throughput 2,044, over-provisioned, wastes memory on KV admin.
+Alex: Each one is a single Pareto move. Each one slides you along the frontier without expanding it. To expand the frontier you have to go back to step 3 — change the model, the hardware, or the topology.
 
-Jenny: So the default is worse than 512.
+Jenny: And step 9 is re-measure.
 
-Alex: The default is worse than 512 by a meaningful margin. With max_batch_size fixed at 512, sweep max_num_tokens: 2048 gives 2,474, best. 8192 (the default) gives 2,467. 16,384 gives 2,461.
+Alex: Re-measure. Stop when SLO is met or when the marginal gain is less than the complexity cost. That last clause is doing a lot of work. Don't keep tuning past good-enough — you'll re-introduce risk for ten percent throughput you didn't need.
 
-Jenny: So 21 percent free throughput just from a two-knob grid search.
+Jenny: TRT-LLM grid search. You mentioned it.
 
-Alex: Free throughput. And the guide states explicitly: grid search across combinations, don't tune independently. Because the two interact through KV memory accounting. Too small max_num_tokens bottlenecks scheduling. Too large max_num_tokens consumes prompt memory and shrinks the available KV cache space, potentially OOM-ing you.
+Alex: TRT-LLM has a published methodology — six sequential steps. One variable at a time. Baseline with all defaults. Then build flags — quantization choice, kernel fusion choices. Then `max_batch_size` and `max_num_tokens` — set memory ceilings, sweep until the KV pool fills. NVIDIA's reference numbers on Llama-3.3 70B with 4 H100s: optimal at 512 batch size and 2048 num tokens, gives 2474 tokens per second, 21% over the default 2048-token baseline.
 
-Jenny: That's the kind of insight that's only obvious in retrospect. The two parameters are coupled through KV memory, so they're not independent knobs.
+Jenny: 21% from two knobs.
 
-Alex: They look independent in the config file. They're not. And this is true generally — most engine knobs are coupled through KV memory or through scheduler queue dynamics.
+Alex: 21% from two knobs, in the right order. Then sharding — TP first inside the NVLink island, PP only when needed. Then runtime knobs — `kv_cache_free_gpu_mem_fraction` around 0.9, in-flight batching, chunked context. Then speculative decoding last. After the dense path is tuned.
 
-Jenny: What about TRT-LLM versus vLLM as engines? Like, when do you reach for which?
+Jenny: Why speculative decoding last?
 
-Alex: This is the workload-shape question. TRT-LLM is AOT-compiled — ahead-of-time. You build a TensorRT engine, which is a serialized, pre-optimized artifact with kernel selection, quantization calibration, and graph rewrites baked in. It's loaded by the PyExecutor runtime — the same four-component idea as vLLM, scheduler plus KV cache manager plus model engine plus sampler.
+Alex: Because spec decode interacts with everything. It changes your effective batch shape, it changes your kernel selection, it changes your memory usage. If you turn it on early, you can't tell whether your subsequent knob changes are helping the base model or just helping the drafter. Tune the dense path first, get a stable baseline, then add speculative on top.
 
-Jenny: Static binary versus Python script.
+Jenny: That's good discipline.
 
-Alex: Exactly. Statically-linked C++ versus Python with an interpreter. vLLM is JIT, flexible, easy to deploy for new models, but you pay some overhead. TRT-LLM is rigid — engine is shape-specific, hardware-specific, precision-specific — but you get peak throughput. CUDA Graph capture, recording a kernel-launch DAG once and replaying it per iteration, gets fused into the engine. In-flight batching — continuous batching — is also compiled in.
+Alex: That's the entire point of "one knob at a time." You can't attribute wins if you change three things.
 
-Jenny: So TRT-LLM is "what if you compiled the scheduler decisions into the kernel launches."
+Jenny: Okay, last segment. What do I actually say in an interview, or to my VP, when somebody asks me "how would you build NVIDIA's NIM Factory" or "how would you productize this"?
 
-Alex: Roughly that. PDL — Programmatic Dependent Launch — goes further. Kernel B starts as soon as A produces enough output, without waiting for A to fully finish. Device-level fine-grained pipelining.
+Alex: This is the editorial extension. The cited sources don't describe NIM internals. But the framework above lets you reason about it. If you walk an interviewer through three-axis Pareto, roofline plus B-crit, KV as the binding constraint, prefill-decode disaggregation, the MLA-GQA-MQA Pareto, and the nine-step workflow — the implicit conclusion is that productizing an LLM serving stack is a roofline-aware grid search across a big matrix.
 
-Jenny: Like overlap-scheduling but at the kernel boundary.
+Jenny: What's the matrix?
 
-Alex: Below the kernel boundary. The MLA optimizations in TRT-LLM specifically — eliminating Q/K/V concat copies, FP8 Context FMHA matched to FP8 KV cache, 4-way LM-head tensor parallel — these are kernel-level surgery driven by DeepSeek R1 as the target workload.
+Alex: Model times hardware times parallelism times precision times KV strategy times batch shape. Each cell in that matrix is a candidate deployment. NIM Factory, in this framing, is the build pipeline that ships pre-compiled TRT-LLM engine artifacts for some carefully selected subset of those cells.
 
-Jenny: So if you're running DeepSeek R1 at scale, TRT-LLM has hand-written kernels for it.
+Jenny: So the hard problem isn't the build, it's deciding which cells to ship.
 
-Alex: Yes. And there's a quantization stack underneath: FP8 as the throughput tier on Hopper, NVFP4 as the Blackwell-specific aggressive tier, INT4 AWQ as the small-batch memory-bound escape hatch. Three layers of compression for three different operating points.
+Alex: That's the entire engineering challenge. Combinatorially, the matrix is huge. You can't validate every cell. So you have to prune intelligently — which models, which hardware tiers, which precisions, which parallelisms — and then validate that the cells you ship perform within tolerance of their predicted rooflines. And keep up with TRT-LLM's release cadence, which is fast.
 
-Jenny: SGLang would be the third engine in this story, right?
+Jenny: Pre-compiled engines versus customer-compiled. What's the tradeoff?
 
-Alex: SGLang's the third. The NIM Factory framing — which is editorial, not from the cited sources — is essentially: TRT-LLM for peak throughput, vLLM for general-purpose, SGLang for prefix-heavy, structured, or agentic workloads. Three engines, three workload shapes.
+Alex: Pre-compiled gives you fast cold start, predictable performance, fixed validation surface — your customers see exactly the perf you measured. The cost is inflexibility — if a customer wants a shape or a precision outside the matrix, they can't use the pre-compiled engine. Customer-compiled is the opposite — total flexibility, but they're tracking TRT-LLM's release cadence themselves and they have to do calibration and tuning, which is weeks of work.
 
-Jenny: And SGLang's specialness is RadixAttention.
+Jenny: So NIM Factory is the curated set, and customer-compiled is the long tail.
 
-Alex: RadixAttention plus HiCache plus jump-forward decoding for structured outputs. Compressed FSM — when you're generating JSON, large spans are deterministic, the grammar forces them, you can skip the model entirely for those spans. Same idea as a query optimizer constant-folding deterministic predicates.
+Alex: That's the right read. And the parallel to your auto scaling world is — pre-compiled NIMs are like AMIs. They're snapshotted, validated, version-pinned artifacts. Customer-compiled is "bring your own image." Both are valid; they serve different customers.
 
-Jenny: Beautiful. That's just SQL planning ideas applied to token generation.
+Jenny: The validation matrix. What does that look like at scale?
 
-Alex: Exactly.
+Alex: It's the combinatorial product of the cells, times the number of perf metrics you care about — TTFT, TBT, throughput at multiple ISL-OSL points, p99 across all of them, plus quality regressions on your eval suite. So it's not just "does this engine run" — it's "does this engine hit its predicted operating point on all of these metrics, on this exact hardware, with this exact driver and CUDA version."
 
-Jenny: Okay, decision framework. If someone hands you a workload and asks "size this," walk me through the questions you ask.
+Jenny: Hardware-driver-CUDA matrix on top of model-precision-parallelism matrix.
 
-Alex: First question: what does the workload look like? Short turns or long context? High QPS or low QPS? Prefix-heavy or prefix-light? Structured output or free-form? Those answers tell you which engine class is most appropriate. Second question: what hardware is available? H100, H800, B200, GB200 NVL72, TPU? Different memory bandwidth, different network topology, different B_crit. Third question: what's the model? Dense or MoE? GQA, MQA, MLA? Native precision support — does it train in FP8 or only in bf16?
+Alex: That's the real combinatorial explosion. And it's why pre-compiled artifacts are valuable — once a cell is validated, customers don't have to redo that work. The validation is amortized across the install base.
 
-Jenny: That's already a six-dimensional matrix.
+Jenny: What about the other engines? You keep saying vLLM, SGLang, TRT-LLM. Why are there three?
 
-Alex: Now add precision — bf16, FP8, NVFP4, INT8, INT4. Parallelism — TP degree, EP degree, PP degree, DP degree. KV strategy — paged, radix, tiered, quantized. Batch shape — max_batch_size, max_num_tokens. The combinatorial validation matrix is enormous.
+Alex: They occupy different niches in the same matrix. TRT-LLM is the peak-throughput, AOT-compiled, NVIDIA-only path — best when you have a stable model and you'll deploy it at scale. vLLM is the general-purpose JIT path — best for fast iteration, broad model support, when you don't know exactly what you're deploying yet. SGLang is the prefix-heavy, structured, agentic path — RadixAttention is its key primitive, which is content-addressable KV sharing across requests, exposed at a higher level than PagedAttention.
 
-Jenny: This is where NIM Factory comes in.
+Jenny: RadixAttention versus PagedAttention. What's the difference?
 
-Alex: This is editorial — none of the cited sources describe NIM Factory's internals — but the framing is: NIM Factory is the answer to "pre-compile and validate the cells of that matrix you care about, so customers don't have to." Pre-compiled TRT-LLM engine artifacts shipped per model-times-precision-times-hardware-times-parallelism cell. The build pipeline's hard problem is not the build, it's the validation.
+Alex: PagedAttention is virtual memory paging within one process — vLLM's KV manager hands out pages from a free list, per-request. RadixAttention is a shared filesystem cache across processes — a content-addressable index that says "this exact prefix is already cached, here's the pointer, share it." So in SGLang, if two requests share a prefix, they share the actual KV blocks, not just at the page level but at the prefix tree level.
 
-Jenny: Pre-compiled versus customer-compiled is fast cold start and predictable performance, at the cost of inflexibility on shapes outside the matrix.
+Jenny: That's the same content-addressable trick the Anthropic and OpenAI prompt caching APIs are exposing.
 
-Alex: Exactly. Customer compile gives flexibility but costs you weeks of build and calibration time and the burden of tracking TRT-LLM's release cadence. Pre-compile gives a fixed validation surface — fast, predictable, but inflexible.
+Alex: Same primitive shape. The API-tier prompt caching that the model vendors expose is a productized version of RadixAttention's open-source primitive. Hash the prefix, look up the cached KV, charge the customer less if it hits.
 
-Jenny: So how do you actually pick the cells you ship?
+Jenny: And SGLang's other tricks?
 
-Alex: That's the editorial extension. The cited sources don't tell you how to prune the matrix. What they do tell you is the framework for thinking about which cells matter. The right operating regime depends on B_crit and KV size. Prefill and decode want opposite batch shapes — disaggregation exists for that reason. MLA-class KV compression buys an order of magnitude at long context. The public deployments that hit best-in-class economics — DeepSeek's MoE-FP8-MTP stack, Character.AI's KV-radical stack, LMSYS's reproduction — all live in different corners of the matrix.
+Alex: Three more worth knowing. The SGL-Router is a sticky load balancer in front of a fleet — sticky on prefix, so requests that share a prompt get routed to the same replica that's already cached it. Same idea as session-affinity load balancing, just keyed on prefix hash instead of user ID.
 
-Jenny: Which is to say there isn't one best cell. There are several local optima for different workload shapes.
+Jenny: Sticky sessions for KV.
 
-Alex: Several local optima. The job of a productization team is to choose which optima to ship and which to leave behind.
+Alex: Sticky sessions for KV. The overlapped CPU scheduler — they pipeline the dispatcher itself, so while the GPU is running batch N the CPU is building batch N+1. Hides the dispatch overhead the way a CPU pipeline hides the fetch stage.
 
-Jenny: Okay, the interview question. If someone asks you in an interview "how would you size an LLM serving deployment?" — what do you actually say?
+Jenny: That's the kind of thing you only notice when your dispatch overhead is a real fraction of your step time.
 
-Alex: I'd say: I'd start with the roofline. I'd compute B_crit for the target hardware and precision. I'd estimate the per-token KV cache from the model's architecture. I'd identify which phase — prefill or decode — has the tightest SLO, and decide whether to disaggregate. I'd pick a parallelism strategy based on whether the model is dense or MoE and whether the network can carry the all-to-all. I'd grid-search the batch knobs against a representative workload. I'd benchmark and iterate.
+Alex: Which it is, on very fast decode kernels. And HiCache, which we mentioned — tiered buffer pool for KV state across HBM, host DRAM, and RDMA-attached storage. Speaks NIXL, composes with Dynamo.
 
-Jenny: And the honest tradeoffs.
+Jenny: So the three-engine matrix really is workload-shape-driven.
 
-Alex: The honest tradeoffs are: every KV-reduction technique has a quality cost, mostly hidden. Sliding window costs long-context. Aggressive quantization costs marginal quality. MLA costs training-time complexity and a small inference compute overhead. Disaggregation costs operational complexity — you now have two pools to manage and KV transfer over RDMA between them. Speculative decoding costs accuracy on the tail, even when acceptance is high on average. There is no free win at scale.
+Alex: It really is. NVIDIA ships all three under NIM precisely because no single engine wins everywhere. TRT-LLM for peak throughput on validated cells, vLLM for general-purpose flexibility, SGLang for prefix-heavy and structured and agentic workloads. Pick the engine that matches your workload shape.
 
-Jenny: No free wins.
+Jenny: TensorRT-LLM build step. You said AOT versus JIT.
 
-Alex: No free wins. Just better-shaped tradeoffs for your specific workload.
+Alex: TRT-LLM is ahead-of-time compile. You take the model checkpoint, you specify the shapes and the precision and the hardware, and you build a serialized engine artifact. That engine has kernel selection baked in, quantization calibration baked in, graph rewrites baked in. It's a statically-linked C++ binary. The PyExecutor runtime loads it and runs it — Scheduler, KVCacheManager, ModelEngine, Sampler.
 
-Jenny: That's a good place to land. Let me try the closing recap. Roofline frames everything. B_crit is the magic number — 240, 280 in bf16, 120 with mixed precision. Prefill compute-bound, decode bandwidth-bound, hence disaggregation. KV cache is the binding constraint on batch — 6.7 gigs per sequence at Llama 13B 8k context, dwarfs the model. MLA gets DeepSeek to 70 KB per token versus 516 for Llama 405B. MoE makes the math beautiful but the network ugly — 67 tokens per second on H800 IB, 1,200 on NVL72 NVLink, eighteen-x from bandwidth alone. The engine is mostly a scheduler and a memory manager — vLLM, SGLang, TRT-LLM, three workload shapes. Two case studies: Character.AI radical KV at consumer scale, DeepSeek hardware-aware co-design at frontier scale. TRT-LLM grid search finds 21 percent free throughput at the right batch parameters. Productizing it is the combinatorial validation problem.
+Jenny: vLLM is the Python script with the interpreter.
 
-Alex: That's the whole arc.
+Alex: vLLM is much more dynamic. It picks kernels at runtime, it adapts to shapes on the fly. So vLLM is more flexible and slower to peak. TRT-LLM is less flexible and faster at peak. Classic AOT-versus-JIT tradeoff.
 
-Jenny: I think the thing I'm walking away with is: every decision in this stack is the roofline pushed through one more layer of the architecture. The model designers ask "where on the roofline does my model want to live?" The engine designers ask "how do I keep the GPU on the right side of the roofline?" The scheduler asks "which request is on which side right now, and what should I admit next?" The hardware vendors ask "which side of the roofline can we shift with our next generation?"
+Jenny: And CUDA Graphs?
 
-Alex: That's a clean framing. The roofline is the substrate. Everything else is a corollary.
+Alex: CUDA Graph capture is recording a kernel-launch DAG once and replaying it per iteration. Like batching API calls to skip per-call overhead. The hard part is that batch sizes vary at runtime — so TRT-LLM uses CUDA Graph padding to round the dynamic batch up to a captured size, so the recording is reusable.
 
-Jenny: And the magic numbers — B_crit at 240, 70 kilobytes per token MLA, 1.8x MTP acceptance — those are the load-bearing constants you can defend with citations.
+Jenny: That's exactly the same trick as bucketed batching in a query planner.
 
-Alex: Yes. Numbers you can defend. The Scaling Book Part 7 and 8 for the roofline numbers and the Llama 13B worked example. DeepSeek-V3 ISCA paper for the MLA comparison, the all-to-all math, the MoE FLOPs per token, the FP8 and MTP numbers. vLLM anatomy blog for the engine architecture, the scheduler policy, the prefix caching default. LMSYS for the public reproduction numbers. Character.AI for the cost claims. TRT-LLM tuning guide for the grid search numbers. Everything else is editorial — including the NIM Factory framing, which is genuinely useful but not in the resource pack.
+Alex: Same trick. Round to a bucket so you can reuse a plan. And then there's PDL — Programmatic Dependent Launch — which is device-level fine-grained pipelining. Kernel B starts as soon as A produces enough output, without waiting for A to fully finish. Even finer than CUDA Graph overlap.
 
-Jenny: That's a good disclosure to leave the listener with. Cite what you can defend, label what's editorial.
+Jenny: Last thing. Speculative decoding family.
 
-Alex: Exactly. And the meta-lesson — the thing I think a senior infra leader new to ML internals should take from this — is that LLM serving is not a fundamentally new problem class. It's a memory hierarchy problem, a bandwidth problem, a scheduling problem, a sharding problem, a network problem. Every concept maps to something you already know — paging, buffer pools, load balancing, sticky sessions, RDMA, pipelining. The mapping is what's new. The shape of the constraints is what's specific to transformers — the asymmetry between prefill and decode, the structural arithmetic intensity of attention, the KV cache as the dominant memory consumer.
+Alex: Six drafters worth knowing. N-Gram is statistical — use the prompt itself to draft repeating spans. Lookahead is parallel speculation. Medusa adds extra prediction heads. Eagle and Eagle3 are learned draft models. MTP is DeepSeek's training-time multi-token prediction, repurposed at inference. They all attack the same problem — the autoregressive serial chain — and they all give roughly 1.5 to 2x on compatible workloads. Compatible meaning your tokens are predictable enough that draft acceptance is high.
 
-Jenny: And once you have the mapping, your existing instincts work.
+Jenny: And DeepSeek's MTP gets 80 to 90 percent acceptance because the model was literally trained to do it.
 
-Alex: Your existing instincts work. The roofline framework is just the substrate that translates "LLM inference" into "the kind of system I already know how to reason about."
+Alex: Trained to do it. That's the trick. Training-aware speculative decoding always beats bolt-on speculative decoding, because the drafter and the verifier are aligned by construction.
 
-Jenny: I think that's the episode.
+Jenny: Okay let me try to summarize the whole thing in a paragraph.
 
-Alex: I think it is. Next time we'll do something on KV-aware routing — Dynamo, NIXL, the cross-replica KV-locality problem — because that's the natural follow-up. We touched on it but it deserves its own deep dive.
+Alex: Go.
 
-Jenny: Looking forward to it.
+Jenny: Inference is capacity planning where the unit of work is a token. You have a fixed cost in weights and a variable cost in KV. Decode is bandwidth-bound, prefill is compute-bound, and that's the structural case for disaggregating them. The roofline plus B-crit tells you which regime you're in, on paper, before you launch anything. KV per token plus the attention variant tells you how much context you can serve at what batch. TP within an NVLink island is the only weight-sharding that helps decode latency. The Pareto has three axes — quality, latency, throughput — and every knob you turn moves you along the frontier; only architectural choices expand it. DeepSeek's recipe expanded it with MLA plus FP8 plus MTP. Character.AI's recipe expanded it with the 20x KV stack. LMSYS proved the disaggregation pattern reproduces in public. And productizing all this is a curated grid search across the model-times-hardware-times-parallelism-times-precision-times-KV-times-batch matrix.
 
-Alex: Likewise. Thanks for the pushback throughout — every time you asked "wait, isn't that just X" you sharpened the explanation.
+Alex: That's the whole episode. If you can walk that paragraph in an interview, you sound like someone who has built one of these. And the deeper truth is that none of these moves are exotic if you already know capacity planning. It's the same instincts — fixed cost versus variable cost, sticky sessions, hot-shard replication, tiered caches, pre-warmed pools, RDMA transports, AOT versus JIT. The vocabulary is different. The skills transfer.
 
-Jenny: That's the job.
+Jenny: That's actually the encouraging part. It's not that LLM serving is its own alien discipline. It's that the workload happens to have a roofline shape that makes some choices counterintuitive — like "data parallelism doesn't help decode" — but once you internalize the roofline, everything else is the auto scaling playbook you already know.
+
+Alex: Auto scaling, with tokens as the unit, and a memory-bound regime as the default. That's the whole frame.
+
+Jenny: I'll take it.

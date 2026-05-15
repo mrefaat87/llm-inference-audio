@@ -353,7 +353,7 @@ code { background: #1e2a3a; color: #7dd3fc; padding: 2px 6px; border-radius: 3px
     <span class="sync-status" id="syncStatus" title="Sync status">
       <span class="sync-dot off" id="syncDot"></span>
       <span class="sync-text" id="syncText">Sync off</span>
-      <span class="sync-text" style="margin-left:4px; opacity:0.6" title="App version">v4</span>
+      <span class="sync-text" style="margin-left:4px; opacity:0.6" title="App version">v6</span>
     </span>
     <button class="sync-gear" id="syncGear" title="Sync settings" onclick="openSyncModal()" aria-label="Sync settings">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block">
@@ -6002,6 +6002,45 @@ let currentTiming = [];       // [{start, end, paragraphIndex}]
 let currentElements = [];     // DOM elements matching paragraphs in current section
 let lastHighlightIdx = -1;    // Track to avoid redundant DOM updates
 
+// Playback position persistence — keyed by "sec:mode" → seconds.
+const progressData = JSON.parse(localStorage.getItem('llm-ref-progress') || '{}');
+const PROGRESS_MIN_SAVE_S = 5;       // ignore positions below this (too early to bother)
+const PROGRESS_SAVE_THROTTLE_MS = 3000;
+let lastProgressSave = 0;
+function progressKey(sec, mode) { return sec + ':' + mode; }
+function saveProgress(sec, mode, time, force) {
+  if (!sec || !isFinite(time)) return;
+  const now = Date.now();
+  if (!force && now - lastProgressSave < PROGRESS_SAVE_THROTTLE_MS) return;
+  lastProgressSave = now;
+  const key = progressKey(sec, mode);
+  if (time < PROGRESS_MIN_SAVE_S) {
+    if (progressData[key] !== undefined) {
+      delete progressData[key];
+      localStorage.setItem('llm-ref-progress', JSON.stringify(progressData));
+      if (force && typeof markFieldChanged === 'function') markFieldChanged('progress', key);
+    }
+    return;
+  }
+  progressData[key] = time;
+  localStorage.setItem('llm-ref-progress', JSON.stringify(progressData));
+  // Only flag for cross-device sync on "natural" save points (pause/ended/pagehide),
+  // not every 3-second timeupdate tick — otherwise we'd hammer the gist API.
+  if (force && typeof markFieldChanged === 'function') markFieldChanged('progress', key);
+}
+function clearProgress(sec, mode) {
+  const key = progressKey(sec, mode);
+  delete progressData[key];
+  localStorage.setItem('llm-ref-progress', JSON.stringify(progressData));
+  if (typeof markFieldChanged === 'function') markFieldChanged('progress', key);
+}
+window.addEventListener('pagehide', () => {
+  ['listen', 'podcast'].forEach(m => {
+    const p = (typeof players !== 'undefined') && players[m];
+    if (p && p.dataset && p.dataset.sec) saveProgress(p.dataset.sec, m, p.currentTime, true);
+  });
+});
+
 // Load an MP3 for the given mode and section
 function loadAudio(mode, sectionId) {
   const player = players[mode];
@@ -6010,6 +6049,9 @@ function loadAudio(mode, sectionId) {
 
   const src = dirs[mode] + '/' + sectionId + '.mp3';
   player.src = src;
+  player.dataset.sec = sectionId;
+  player.dataset.mode = mode;
+  player._pendingResume = progressData[progressKey(sectionId, mode)] || 0;
   player.playbackRate = currentRate;
   player.style.display = '';
   fallback.style.display = 'none';
@@ -6143,11 +6185,13 @@ Object.keys(players).forEach(mode => {
     btn.textContent = '\u25B6';
     btn.classList.remove('playing');
     clearHighlight();
+    saveProgress(player.dataset.sec, mode, player.currentTime, true);
   });
   player.addEventListener('ended', () => {
     btn.textContent = '\u25B6';
     btn.classList.remove('playing');
     clearHighlight();
+    clearProgress(player.dataset.sec, mode);
     // Auto-advance to next section
     if (autoAdvance) {
       const idx = order.indexOf(currentSec);
@@ -6171,6 +6215,7 @@ Object.keys(players).forEach(mode => {
       const paraIdx = findActiveParagraph(player.currentTime);
       highlightParagraph(paraIdx);
     }
+    saveProgress(player.dataset.sec, mode, player.currentTime, false);
   });
   // Once metadata loads, enable seek slider with the real duration
   player.addEventListener('loadedmetadata', () => {
@@ -6182,6 +6227,12 @@ Object.keys(players).forEach(mode => {
     if (durTimeEls[mode] && isFinite(player.duration)) {
       durTimeEls[mode].textContent = formatTime(player.duration);
     }
+    // Resume from last saved position (leave a small buffer so we don't land on the very end)
+    const resume = player._pendingResume || 0;
+    if (resume > PROGRESS_MIN_SAVE_S && isFinite(player.duration) && resume < player.duration - 2) {
+      try { player.currentTime = resume; } catch {}
+    }
+    player._pendingResume = 0;
   });
 });
 
@@ -6573,6 +6624,7 @@ function buildLocalDoc() {
     queue: upNextQueue,
     completion: completionState,
     notes: notesData,
+    progress: progressData,
     stamps: fieldStamps,
     _client: 'audio-reader',
   };
@@ -6603,6 +6655,25 @@ function applyMergedDoc(merged) {
     const sec = ta.dataset.sec;
     if (sec) ta.value = notesData[sec] || '';
   });
+  // progress
+  Object.keys(progressData).forEach(k => delete progressData[k]);
+  Object.assign(progressData, merged.progress || {});
+  localStorage.setItem('llm-ref-progress', JSON.stringify(progressData));
+  // If a player is loaded for a section we just got new progress for, seek to it
+  // but only if it's paused and hasn't been scrubbed past the very beginning.
+  if (typeof players !== 'undefined') {
+    ['listen', 'podcast'].forEach(m => {
+      const p = players[m];
+      if (!p || !p.dataset || !p.dataset.sec) return;
+      if (!p.paused) return;
+      if (p.currentTime > 2) return;
+      const saved = progressData[progressKey(p.dataset.sec, m)] || 0;
+      if (saved > PROGRESS_MIN_SAVE_S && isFinite(p.duration) && saved < p.duration - 2) {
+        try { p.currentTime = saved; } catch {}
+      }
+      p._pendingResume = saved;
+    });
+  }
   // stamps
   Object.keys(fieldStamps).forEach(k => delete fieldStamps[k]);
   Object.assign(fieldStamps, merged.stamps || {});
@@ -6622,8 +6693,8 @@ function mergeDocs(local, remote) {
     merged.queue = (local.queue || []).slice();
     if (ls.queue) merged.stamps.queue = ls.queue;
   }
-  // completion + notes: per-section LWW; pending local always wins
-  for (const field of ['completion', 'notes']) {
+  // completion + notes + progress: per-section LWW; pending local always wins
+  for (const field of ['completion', 'notes', 'progress']) {
     merged[field] = {};
     merged.stamps[field] = {};
     const lf = local[field] || {}, rf = remote[field] || {};
